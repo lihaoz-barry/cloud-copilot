@@ -130,6 +130,8 @@
     }
     .iconbtn:hover { background: #8883; }
     .iconbtn[hidden] { display: none; }
+    .abortbtn { border-color: #dc262699; color: #dc2626; }
+    .abortbtn:hover { background: #dc262622; }
 
     /* success / failure indicated ON the issue, not on the button */
     .issue { border-left: 3px solid transparent; padding-left: 8px; transition: border-color .2s, opacity .2s; }
@@ -190,12 +192,12 @@ const filterList = document.getElementById('filterList');
 const enc = encodeURIComponent;
 
 const STATE_LABEL = {
-  work:   { idle: 'Create PR', working: 'Creating PR…', success: 'PR created', failed: 'PR failed' },
-  deploy: { idle: 'Deploy', deploying: 'Deploying…', success: 'Deployed', failed: 'Deploy failed' },
+  work:   { idle: 'Create PR', working: 'Creating PR…', success: 'PR created', failed: 'PR failed', aborted: 'PR aborted' },
+  deploy: { idle: 'Deploy', deploying: 'Deploying…', success: 'Deployed', failed: 'Deploy failed', aborted: 'Aborted' },
 };
 const STATE_CLASS = {
   idle: 'st-idle', working: 'st-working', deploying: 'st-deploying',
-  success: 'st-success', failed: 'st-failed',
+  success: 'st-success', failed: 'st-failed', aborted: 'st-failed',
 };
 
 // ---- timing helpers -------------------------------------------------------
@@ -386,10 +388,17 @@ function renderIssue(repo, issue, repoCtx) {
   workLogBtn.addEventListener('click', async () => {
     const show = !worklog.classList.contains('show');
     worklog.classList.toggle('show', show);
-    if (show && !worklog.textContent.trim() && (st.work.status === 'success' || st.work.status === 'failed')) {
+    if (show && !worklog.textContent.trim() && (st.work.status === 'success' || st.work.status === 'failed' || st.work.status === 'aborted')) {
       await loadWorkTranscript();
     }
   });
+
+  const workAbortBtn = document.createElement('button');
+  workAbortBtn.className = 'iconbtn abortbtn';
+  workAbortBtn.textContent = '⨯ Abort';
+  workAbortBtn.title = 'Abort PR creation';
+  workAbortBtn.hidden = true;
+  workAbortBtn.addEventListener('click', onWorkAbort);
 
   const refreshPrsBtn = document.createElement('button');
   refreshPrsBtn.className = 'ghost sm';
@@ -403,7 +412,7 @@ function renderIssue(repo, issue, repoCtx) {
     } catch { /* ignore */ } finally { refreshPrsBtn.disabled = false; }
   });
 
-  actions.append(workBtn, workLogBtn, refreshPrsBtn);
+  actions.append(workBtn, workAbortBtn, workLogBtn, refreshPrsBtn);
 
   paintWork(st.work.status);
   renderPrs();
@@ -429,9 +438,10 @@ function renderIssue(repo, issue, repoCtx) {
     const visual = status === 'working' ? 'working' : 'idle'; // button stays "Create PR"
     paintBtn(workBtn, 'work', visual, st.work);
     el.classList.toggle('ok', status === 'success');
-    el.classList.toggle('fail', status === 'failed');
-    const hasLog = status === 'working' || status === 'success' || status === 'failed' || st.work.hasConversation;
+    el.classList.toggle('fail', status === 'failed' || status === 'aborted');
+    const hasLog = status === 'working' || status === 'success' || status === 'failed' || status === 'aborted' || st.work.hasConversation;
     workLogBtn.hidden = !hasLog;
+    workAbortBtn.hidden = status !== 'working';
   }
 
   // --- PR rows (each with its own collapsible deploy log) -------------------
@@ -478,6 +488,12 @@ function renderIssue(repo, issue, repoCtx) {
     paintBtn(deployBtn, 'deploy', (pr.deploy && pr.deploy.status) || 'idle', pr.deploy);
     deployBtn.addEventListener('click', () => onDeploy(pr.prNumber));
 
+    const abortBtn = document.createElement('button');
+    abortBtn.className = 'iconbtn abortbtn';
+    abortBtn.textContent = '⨯ Abort';
+    abortBtn.title = 'Abort this deploy';
+    abortBtn.addEventListener('click', () => onAbort(pr.prNumber));
+
     const deployLogBtn = document.createElement('button');
     deployLogBtn.className = 'iconbtn prlog-toggle';
     deployLogBtn.textContent = '▤';
@@ -491,7 +507,7 @@ function renderIssue(repo, issue, repoCtx) {
       prlog.classList.toggle('show', show);
       const cur = findPr(pr.prNumber);
       const s = cur && cur.deploy && cur.deploy.status;
-      if (show && !prlog.textContent.trim() && (s === 'success' || s === 'failed')) {
+      if (show && !prlog.textContent.trim() && (s === 'success' || s === 'failed' || s === 'aborted')) {
         await loadDeployTranscript(pr.prNumber);
       }
     };
@@ -499,11 +515,12 @@ function renderIssue(repo, issue, repoCtx) {
     deployLogBtn.addEventListener('click', toggleLog);
 
     const s0 = (pr.deploy && pr.deploy.status) || 'idle';
-    const showLog0 = s0 === 'deploying' || (pr.deploy && pr.deploy.hasConversation) || s0 === 'success' || s0 === 'failed';
+    const showLog0 = s0 === 'deploying' || (pr.deploy && pr.deploy.hasConversation) || s0 === 'success' || s0 === 'failed' || s0 === 'aborted';
     logBtn.hidden = !showLog0;
     deployLogBtn.hidden = !showLog0;
+    abortBtn.hidden = s0 !== 'deploying';
 
-    row.append(link, logBtn, timing, spacer, deployBtn, deployLogBtn);
+    row.append(link, logBtn, timing, spacer, deployBtn, abortBtn, deployLogBtn);
     item.append(row, prlog);
     return item;
   }
@@ -514,8 +531,10 @@ function renderIssue(repo, issue, repoCtx) {
     const s = (pr.deploy && pr.deploy.status) || 'idle';
     const btn = deployBtnEl(prNumber);
     if (btn) paintBtn(btn, 'deploy', s, pr.deploy);
-    const showLog = s === 'deploying' || (pr.deploy && pr.deploy.hasConversation) || s === 'success' || s === 'failed';
+    const showLog = s === 'deploying' || (pr.deploy && pr.deploy.hasConversation) || s === 'success' || s === 'failed' || s === 'aborted';
     prlist.querySelectorAll(`.pritem[data-pr="${prNumber}"] .prlog-toggle`).forEach((b) => { b.hidden = !showLog; });
+    const abort = prlist.querySelector(`.pritem[data-pr="${prNumber}"] .abortbtn`);
+    if (abort) abort.hidden = s !== 'deploying';
     if (pr.deploy && pr.deploy.durationMs != null) setPrTiming(prNumber, pr.deploy.durationMs);
   }
 
@@ -558,6 +577,17 @@ function renderIssue(repo, issue, repoCtx) {
     st.work.status = 'working';
     paintWork('working');
     await streamWork(false);
+  }
+
+  async function onWorkAbort() {
+    if (st.work.status !== 'working') return;
+    if (!window.confirm(`Abort creating PR for issue #${issue.number}?`)) return;
+    appendWork('\n[abort requested…]\n', 'stderr');
+    try {
+      await fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/work/cancel`, { method: 'POST' });
+    } catch (e) {
+      appendWork(`\n[abort failed: ${e.message}]\n`, 'err');
+    }
   }
 
   async function streamWork(reconnect) {
@@ -604,7 +634,7 @@ function renderIssue(repo, issue, repoCtx) {
       let rec;
       try { rec = await fetchRecord(); } catch { await sleep(3000); continue; }
       const s = rec.work.status;
-      if (s === 'success' || s === 'failed') {
+      if (s === 'success' || s === 'failed' || s === 'aborted') {
         st.work.status = s; st.work.hasConversation = true; paintWork(s); syncPrsFromRecord(rec);
         appendWork(`\n[work] finished: ${s}\n`, s === 'success' ? 'ok' : 'err');
         repoCtx.clearActive(issue.number);
@@ -623,10 +653,26 @@ function renderIssue(repo, issue, repoCtx) {
     if (!pr) return;
     const s = (pr.deploy && pr.deploy.status) || 'idle';
     if (s === 'deploying') { const p = deployPanel(prNumber); if (p) p.classList.toggle('show'); return; }
-    if (s === 'success' || s === 'failed') return loadDeployTranscript(prNumber);
+    // Finished runs require confirmation before starting a fresh TestFlight build.
+    if (s === 'success' || s === 'failed' || s === 'aborted') {
+      const verb = (s === 'failed' || s === 'aborted') ? 'Re-deploy' : 'Deploy again';
+      if (!window.confirm(`${verb} PR #${prNumber}? This starts a new TestFlight build.`)) return;
+    }
     pr.deploy.status = 'deploying';
     paintDeploy(prNumber);
     await streamDeploy(prNumber, false);
+  }
+
+  async function onAbort(prNumber) {
+    const pr = findPr(prNumber);
+    if (!pr || !pr.deploy || pr.deploy.status !== 'deploying') return;
+    if (!window.confirm(`Abort the current deploy for PR #${prNumber}?`)) return;
+    appendDeploy(prNumber, `\n[abort requested…]\n`, 'stderr');
+    try {
+      await fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/deploy/${prNumber}/cancel`, { method: 'POST' });
+    } catch (e) {
+      appendDeploy(prNumber, `\n[abort failed: ${e.message}]\n`, 'err');
+    }
   }
 
   async function streamDeploy(prNumber, reconnect) {
@@ -664,7 +710,7 @@ function renderIssue(repo, issue, repoCtx) {
       try { rec = await fetchRecord(); } catch { await sleep(3000); continue; }
       const prRec = (rec.prs || {})[prNumber];
       const s = prRec && prRec.deploy && prRec.deploy.status;
-      if (s === 'success' || s === 'failed') {
+      if (s === 'success' || s === 'failed' || s === 'aborted') {
         const pr = findPr(prNumber);
         if (pr) pr.deploy = { ...prRec.deploy };
         paintDeploy(prNumber);

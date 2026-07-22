@@ -3,12 +3,18 @@
 A phone-friendly **issues console** for driving the local GitHub Copilot CLI over
 your LAN/VPN. From your phone you can:
 
-- browse the git repos under an **authorized root** (`REPOS_ROOT`)
+- browse the git repos under an **authorized root** (`REPOS_ROOT`), with a
+  per-device **repo filter** (checkbox show/hide, persisted in `localStorage`)
 - expand a repo to see its **GitHub issues** (fetched via `gh`, cached, refreshable)
 - **Create PR** — Copilot implements the issue end-to-end and opens a PR
-- **Deploy** — ship the app to TestFlight via the `testflight-deploy` skill
-- watch every run **stream live**, and see each action go **yellow → green/red**
-  with a link to the PR or the full transcript on failure
+- **Deploy per PR** — every PR gets its own **Deploy** button; ship it to TestFlight
+  via the `testflight-deploy` skill
+- **Abort** a running Create PR or Deploy (kills the whole process group); aborted
+  runs get their own state and can be re-run after a confirm
+- watch every run **stream live** in **collapsible per-action logs** (hidden by
+  default), with success/failure shown **on the issue** and lifecycle timing cached
+- **one PR creation per repo at a time** — other issues in that repo are greyed out
+  while one is in progress, to avoid working-tree collisions
 
 This is a proof-of-concept for remotely driving a local coding-agent CLI from a web UI.
 
@@ -21,17 +27,24 @@ wiring needed**. The four tabs you see in the Copilot CLI TUI (Session / Issues 
 Pull requests / Gists) are Copilot's own built-in GitHub views; this app reproduces
 the Issues + PR flow through `gh` + `copilot -p`.
 
-Per-issue state is a small machine persisted to `data/state.json`:
+Per-issue state is a small machine persisted to `data/state.json`. Each issue keeps
+one **work** (Create PR) record plus a map of **PRs**, and every PR carries its own
+**deploy** lifecycle (status, start/finish, `durationMs`, transcript):
 
-| Action     | idle        | running        | success            | failed              |
-| ---------- | ----------- | -------------- | ------------------ | ------------------- |
-| Create PR  | `Create PR` | `Creating PR…` 🟡 | `PR created` 🟢    | `PR failed` 🔴      |
-| Deploy     | `Deploy`    | `Deploying…` 🟡  | `Deployed` 🟢      | `Deploy failed` 🔴  |
+| Action     | idle        | running          | success         | failed / aborted                |
+| ---------- | ----------- | ---------------- | --------------- | ------------------------------- |
+| Create PR  | `Create PR` | `Creating PR…` 🟡 | issue turns 🟢  | `PR failed` 🔴 / `PR aborted`   |
+| Deploy     | `Deploy`    | `Deploying…` 🟡   | `Deployed` 🟢   | `Deploy failed` 🔴 / `Aborted`  |
 
-- 🟢 clicking a **success** button opens a panel with the **PR link** (and the
-  always-present *View issue on GitHub* link).
-- 🔴 clicking a **failed** button opens the **full Copilot conversation** so you can
-  see what went wrong.
+- **Success shows on the issue**, not the button: on a created PR the issue gets a
+  green border + green `#number`, and the **Create PR** button stays "Create PR".
+- **Per-action logs** are hidden by default. A small `▤` toggle by **Create PR**
+  reveals the creation log; each PR row has `▤ logs` toggles for its deploy log.
+- **Abort**: while running, Create PR and each Deploy show a red `⨯ Abort` button.
+  Confirming signals the whole process group (copilot + fastlane/xcodebuild), so
+  subprocesses die too; the run ends in an `aborted` state you can re-run.
+- **Re-deploy**: clicking Deploy on a finished/failed/aborted PR asks to confirm
+  before starting a new TestFlight build.
 - Success/failure is decided by the CLI **exit code** plus detection: a PR URL in the
   transcript (fallback: `gh pr list` referencing the issue) for Create PR; a fastlane/
   TestFlight success marker for Deploy.
@@ -43,16 +56,21 @@ Per-issue state is a small machine persisted to `data/state.json`:
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
 | GET  | `/api/repos` | List git repos under `REPOS_ROOT` (with remotes). |
-| GET  | `/api/repos/:name/issues[?refresh=1]` | List open issues (cached 5 min) merged with local status. |
-| GET  | `/api/repos/:name/issues/:n/record` | Full stored record (status, PR link, transcript). |
+| GET  | `/api/repos/:name/issues[?refresh=1]` | List open issues (cached 5 min) merged with local status; includes `activeWorkIssues` (repo lock). |
+| GET  | `/api/repos/:name/issues/:n/record` | Full stored record (work + per-PR deploy, transcripts, `live` flags). |
+| GET  | `/api/repos/:name/issues/:n/prs` | Refresh the PR list for an issue from GitHub. |
 | POST | `/api/repos/:name/issues/:n/work` | **Create PR** — SSE stream. Body: `{ "mode": "allow-all" }`. |
-| POST | `/api/repos/:name/issues/:n/deploy` | **Deploy** — SSE stream. |
+| POST | `/api/repos/:name/issues/:n/work/cancel` | Abort the running PR creation. |
+| POST | `/api/repos/:name/issues/:n/deploy/:pr` | **Deploy a specific PR** — SSE stream. |
+| POST | `/api/repos/:name/issues/:n/deploy/:pr/cancel` | Abort the running deploy for that PR. |
 | POST | `/api/run` | Simple one-shot demo (prompt + optional `sessionId` resume). |
 
 ### SSE events
 
 `meta` (command) → `chunk` (`{stream,text}` streamed output) → `session`
-(`{sessionId}`) → `result` (`{action,status,prUrl,prNumber}`) → `done` (`{exitCode}`).
+(`{sessionId}`) → `result` (`{action,status,prUrl?,prNumber?}`, where `status` is
+`success`/`failed`/`aborted`, or `blocked` when the repo lock rejects a second
+Create PR) → `done` (`{exitCode}`).
 
 ---
 
@@ -63,6 +81,44 @@ The **Deploy** button runs `copilot -p` with a prompt that invokes your personal
 encodes the correct signing team, bundle id, and App Store Connect API key for
 `ios-diet-expert`. (The generic `ios-deploy` skill is intentionally **not** used —
 `testflight-deploy` supersedes it.)
+
+---
+
+## Replicate on another machine
+
+Everything needed to reproduce the **Create PR** + **Deploy** chain on a fresh Mac
+is bundled in this repo — as both an automated script and a guided skill.
+
+```bash
+git clone <this-repo> && cd cloud-copilot
+./setup/setup.sh                     # Copilot CLI + gh + skills + .p8 + fastlane
+```
+
+The script is idempotent and prints a ✓/✗ summary. Flags:
+
+| Flag | Effect |
+| ---- | ------ |
+| `--skills-scope global` (default) | Symlink `skills/*` into `~/.agents/skills/` so Copilot finds them everywhere |
+| `--skills-scope project` | Keep skills in-repo; link per-project yourself |
+| `--override-global-skills` | Replace an existing global skill of the same name |
+| `--fix-keychain` | One-time `codesign` keychain grant (prompts for your login password) |
+| `--no-install` | Verify only, install nothing |
+
+**Bundled skills** (`skills/`):
+- `create-pr` — implement an issue end-to-end and open a PR (the Create PR flow).
+- `testflight-deploy` — build + upload to TestFlight via fastlane (the Deploy flow).
+- `cloud-copilot-setup` — a step-by-step guide an agent can read to do the setup
+  interactively, if you'd rather not run the script.
+
+**Secrets stay local.** Real App Store Connect identifiers go in
+`~/.config/cloud-copilot/deploy.env` (created from
+[`setup/deploy.env.example`](setup/deploy.env.example)); the `.p8` key lives under
+`~/.appstoreconnect/private_keys/`. Both are gitignored — nothing sensitive is
+committed. Fill `deploy.env`, then re-run the script to install the key.
+
+> Skills scope: use **global** to make Deploy work from any app repo (recommended),
+> or **project** to leave a machine's existing global skills untouched and reference
+> the in-repo copies explicitly.
 
 ---
 
@@ -136,7 +192,9 @@ the HTTP connection that started them:
    gh auth status
    ```
 4. *(for Deploy only)* the **`testflight-deploy` skill** installed under
-   `~/.agents/skills/` and fastlane configured for `ios-diet-expert`.
+   `~/.agents/skills/` and fastlane configured for your iOS app. On a fresh machine,
+   run [`setup/setup.sh`](setup/setup.sh) (see **Replicate on another machine**) to
+   install the bundled skills, the App Store Connect `.p8`, and fastlane in one go.
 
 ---
 
@@ -163,7 +221,7 @@ Other optional env vars:
 | `REPOS_ROOT` | `~/repos`      | Authorized root — repos shown in the UI  |
 | `GH_BIN`     | `gh`           | Path/name of the GitHub CLI              |
 | `PORT`       | `8787`         | Port to listen on                        |
-| `HOST`       | `127.0.0.1`    | Bind address (`0.0.0.0` for LAN access)  |
+| `HOST`       | `0.0.0.0`      | Bind address (`127.0.0.1` for local-only)|
 
 ---
 
@@ -191,7 +249,7 @@ to do without asking:
 | ---------------------- | ---------------------------------------------- | ------- |
 | **Default Approval**   | `copilot -p "<prompt>"`                        | Safest. Read-only tools auto-run; destructive actions are denied. |
 | **Granular**           | `copilot -p "<prompt>" --allow-tool 'shell(git)'` | Middle ground: only `git` shell commands are auto-approved. |
-| **Allow All**          | `copilot -p "<prompt>" --allow-all-tools`      | ⚠️ Every tool auto-approved, including arbitrary shell. Powerful and dangerous — only in trusted setups. |
+| **Allow All**          | `copilot -p "<prompt>" --allow-all`            | ⚠️ Every tool + **all file paths + all URLs** auto-approved. Required for autonomous Create PR and Deploy (fastlane writes to `/tmp`, `~/Library`, the keychain). Powerful and dangerous — only in trusted setups. |
 
 (When resuming, `--resume=<id>` is prepended to the arguments above.)
 

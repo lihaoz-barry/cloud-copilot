@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>cloud-copilot · issues console</title>
+  <style>
+    :root { color-scheme: light dark; --gap: 12px; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      max-width: 860px; margin: 0 auto; padding: 16px 14px 60px; line-height: 1.45;
+    }
+    h1 { font-size: 1.3rem; margin: 0 0 2px; }
+    .sub { color: #888; font-size: .85rem; margin: 0 0 16px; }
+    button {
+      cursor: pointer; font: inherit; border: none; border-radius: 10px;
+      padding: 8px 12px; font-weight: 600; background: #2563eb; color: #fff;
+    }
+    button.ghost { background: #8882; color: inherit; }
+    button.sm { padding: 5px 9px; font-size: .8rem; }
+    button:disabled { opacity: .5; cursor: progress; }
+
+    .repo { border: 1px solid #8883; border-radius: 12px; margin-bottom: 10px; overflow: hidden; }
+    .repo-head {
+      display: flex; align-items: center; gap: 10px; padding: 12px 14px; cursor: pointer;
+      background: #8881;
+    }
+    .repo-head:hover { background: #8882; }
+    .repo-name { font-weight: 700; }
+    .repo-meta { color: #888; font-size: .78rem; }
+    .repo-body { padding: 6px 10px 12px; display: none; }
+    .repo.open .repo-body { display: block; }
+    .caret { transition: transform .15s; }
+    .repo.open .caret { transform: rotate(90deg); }
+
+    .toolbar { display: flex; gap: 8px; align-items: center; margin: 6px 4px 10px; }
+    .toolbar .spacer { flex: 1; }
+    .muted { color: #888; font-size: .78rem; }
+
+    .issue { border-top: 1px solid #8882; padding: 10px 4px; }
+    .issue:first-child { border-top: none; }
+    .issue-top { display: flex; align-items: flex-start; gap: 8px; }
+    .issue-num { color: #888; font-variant-numeric: tabular-nums; font-size: .82rem; padding-top: 2px; }
+    .issue-title { flex: 1; font-size: .92rem; }
+    .labels { margin-top: 3px; }
+    .label {
+      display: inline-block; font-size: .68rem; padding: 1px 6px; border-radius: 999px;
+      background: #8883; color: inherit; margin-right: 4px;
+    }
+    .actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+
+    /* state dot buttons */
+    .stbtn { display: inline-flex; align-items: center; gap: 6px; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #9993; flex: none; }
+    .st-idle    { background: #8882; color: inherit; }
+    .st-working { background: #eab30833; color: #a16207; }
+    .st-working .dot, .st-deploying .dot { background: #eab308; animation: pulse 1s infinite; }
+    .st-deploying { background: #eab30833; color: #a16207; }
+    .st-success { background: #16a34a22; color: #15803d; }
+    .st-success .dot { background: #16a34a; }
+    .st-failed  { background: #dc262622; color: #b91c1c; }
+    .st-failed .dot { background: #dc2626; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+    .panel {
+      margin-top: 8px; border: 1px solid #8883; border-radius: 10px; padding: 10px;
+      background: #0b0b0e; color: #e6e6e6; font-family: ui-monospace, Menlo, monospace;
+      font-size: .8rem; white-space: pre-wrap; word-break: break-word;
+      max-height: 45vh; overflow-y: auto; display: none;
+    }
+    .panel.show { display: block; }
+    .panel .stderr { color: #b9b9b9; }
+    .panel .err { color: #ff6b6b; }
+    .panel .ok { color: #6ee787; }
+    .linkrow { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    a.btnlink {
+      text-decoration: none; display: inline-block; padding: 7px 11px; border-radius: 10px;
+      background: #8882; color: inherit; font-weight: 600; font-size: .82rem;
+    }
+    .err-inline { color: #dc2626; font-size: .8rem; padding: 8px 4px; }
+    .mode-row { margin: 0 4px 12px; font-size: .8rem; color: #888; }
+    select { font: inherit; padding: 5px 8px; border-radius: 8px; border: 1px solid #8884; background: #8881; }
+  </style>
+</head>
+<body>
+  <h1>☁️ cloud-copilot</h1>
+  <p class="sub" id="rootline">loading…</p>
+
+  <div class="mode-row">
+    Create-PR approval mode:
+    <select id="mode">
+      <option value="allow-all" selected>Allow All (autonomous)</option>
+      <option value="granular">Granular (git only)</option>
+      <option value="default">Default (safest)</option>
+    </select>
+  </div>
+
+  <div id="repos"></div>
+
+<script>
+const reposEl = document.getElementById('repos');
+const rootLine = document.getElementById('rootline');
+const modeSel = document.getElementById('mode');
+
+const STATE_LABEL = {
+  work:   { idle: 'Create PR', working: 'Creating PR…', success: 'PR created', failed: 'PR failed' },
+  deploy: { idle: 'Deploy', deploying: 'Deploying…', success: 'Deployed', failed: 'Deploy failed' },
+};
+const STATE_CLASS = {
+  idle: 'st-idle', working: 'st-working', deploying: 'st-deploying',
+  success: 'st-success', failed: 'st-failed',
+};
+
+async function loadRepos() {
+  const r = await fetch('/api/repos').then((x) => x.json());
+  rootLine.textContent = `authorized root: ${r.root} · ${r.repos.length} repos`;
+  reposEl.innerHTML = '';
+  for (const repo of r.repos) reposEl.appendChild(renderRepo(repo));
+}
+
+function renderRepo(repo) {
+  const el = document.createElement('div');
+  el.className = 'repo';
+  el.innerHTML = `
+    <div class="repo-head">
+      <span class="caret">▶</span>
+      <span class="repo-name">${escape(repo.name)}</span>
+      <span class="repo-meta">${repo.ownerRepo ? escape(repo.ownerRepo) : 'no github remote'} · ${escape(repo.branch || '')}</span>
+    </div>
+    <div class="repo-body"><div class="muted" style="padding:8px 4px">Click to load issues…</div></div>`;
+  const head = el.querySelector('.repo-head');
+  const body = el.querySelector('.repo-body');
+  let loaded = false;
+  head.addEventListener('click', async () => {
+    el.classList.toggle('open');
+    if (el.classList.contains('open') && !loaded && repo.github) {
+      loaded = true;
+      await loadIssues(repo, body);
+    }
+  });
+  if (!repo.github) {
+    body.innerHTML = '<div class="muted" style="padding:8px 4px">No github.com remote — issues unavailable.</div>';
+  }
+  return el;
+}
+
+async function loadIssues(repo, body, force = false) {
+  body.innerHTML = '<div class="muted" style="padding:8px 4px">Loading issues…</div>';
+  let data;
+  try {
+    data = await fetch(`/api/repos/${encodeURIComponent(repo.name)}/issues${force ? '?refresh=1' : ''}`)
+      .then((x) => x.json());
+  } catch (e) {
+    body.innerHTML = `<div class="err-inline">Failed to load: ${escape(e.message)}</div>`;
+    return;
+  }
+  if (data.error) {
+    body.innerHTML = `<div class="err-inline">${escape(data.error)}</div>`;
+    return;
+  }
+  const toolbar = document.createElement('div');
+  toolbar.className = 'toolbar';
+  const when = data.at ? new Date(data.at).toLocaleTimeString() : '';
+  toolbar.innerHTML = `<span class="muted">${data.issues.length} open · ${data.cached ? 'cached' : 'fresh'} ${when}</span><span class="spacer"></span>`;
+  const refresh = document.createElement('button');
+  refresh.className = 'ghost sm';
+  refresh.textContent = '↻ Refresh';
+  refresh.addEventListener('click', () => loadIssues(repo, body, true));
+  toolbar.appendChild(refresh);
+
+  body.innerHTML = '';
+  body.appendChild(toolbar);
+  for (const issue of data.issues) body.appendChild(renderIssue(repo, issue));
+}
+
+function renderIssue(repo, issue) {
+  const el = document.createElement('div');
+  el.className = 'issue';
+  const labels = (issue.labels || [])
+    .map((l) => `<span class="label">${escape(l)}</span>`)
+    .join('');
+  el.innerHTML = `
+    <div class="issue-top">
+      <span class="issue-num">#${issue.number}</span>
+      <div class="issue-title">${escape(issue.title)}
+        <div class="labels">${labels}</div>
+      </div>
+    </div>
+    <div class="actions"></div>
+    <div class="panel"></div>
+    <div class="linkrow"></div>`;
+  const actions = el.querySelector('.actions');
+  const panel = el.querySelector('.panel');
+  const linkrow = el.querySelector('.linkrow');
+
+  const st = issue.status || { work: { status: 'idle' }, deploy: { status: 'idle' } };
+
+  const workBtn = makeStateBtn('work', st.work.status);
+  const deployBtn = makeStateBtn('deploy', st.deploy.status);
+  actions.append(workBtn, deployBtn);
+
+  // If an action was still running when the page (re)loaded — e.g. you locked
+  // your phone and came back — transparently re-attach to the live job.
+  if (st.work.status === 'working') {
+    streamAction('work', workBtn, (s) => paintBtn(workBtn, 'work', s), true);
+  }
+  if (st.deploy.status === 'deploying') {
+    streamAction('deploy', deployBtn, (s) => paintBtn(deployBtn, 'deploy', s), true);
+  }
+
+  // GitHub issue link is always available.
+  const ghLink = document.createElement('a');
+  ghLink.className = 'btnlink';
+  ghLink.href = issue.url; ghLink.target = '_blank';
+  ghLink.textContent = '↗ View issue on GitHub';
+  linkrow.appendChild(ghLink);
+
+  refreshLinks();
+
+  function refreshLinks() {
+    // remove any prior PR link
+    [...linkrow.querySelectorAll('[data-pr]')].forEach((n) => n.remove());
+    if (st.work.prUrl) {
+      const pr = document.createElement('a');
+      pr.className = 'btnlink'; pr.dataset.pr = '1';
+      pr.href = st.work.prUrl; pr.target = '_blank';
+      pr.textContent = `↗ PR #${st.work.prNumber || ''}`;
+      linkrow.appendChild(pr);
+    }
+  }
+
+  function paintBtn(btn, action, s) {
+    btn.className = `stbtn ${STATE_CLASS[s] || 'st-idle'}`;
+    btn.innerHTML = `<span class="dot"></span>${STATE_LABEL[action][s] || s}`;
+  }
+
+  function makeStateBtn(action, status) {
+    const btn = document.createElement('button');
+    const paint = (s) => paintBtn(btn, action, s);
+    paint(status);
+    btn.addEventListener('click', () => onAction(action, st[action].status, btn, paint));
+    return btn;
+  }
+
+  async function onAction(action, status, btn, paint) {
+    // If already finished, clicking toggles the detail panel instead of re-running.
+    if (status === 'success' || status === 'failed') {
+      return toggleRecordPanel();
+    }
+    if (status === 'working' || status === 'deploying') return; // busy
+
+    paint(action === 'work' ? 'working' : 'deploying');
+    st[action].status = action === 'work' ? 'working' : 'deploying';
+    await streamAction(action, btn, paint, false);
+  }
+
+  // Stream (or re-attach to) an action job. `reconnect` replays a running job.
+  async function streamAction(action, btn, paint, reconnect) {
+    panel.classList.add('show');
+    if (!reconnect) panel.innerHTML = '';
+    else appendPanel(`\n[reconnecting…]\n`, 'stderr');
+
+    const url = `/api/repos/${encodeURIComponent(repo.name)}/issues/${issue.number}/${action}`;
+    const body = action === 'work' ? JSON.stringify({ mode: modeSel.value }) : '{}';
+
+    let finalStatus = null;
+    try {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      });
+      if (!resp.ok || !resp.body) {
+        appendPanel(`\n[error] HTTP ${resp.status}\n`, 'err');
+        return reconcile(action, paint); // fall back to polling the true status
+      }
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = buf.indexOf('\n\n')) !== -1) {
+          const raw = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          const evt = parseEvent(raw);
+          if (!evt) continue;
+          if (evt.event === 'chunk') appendPanel(evt.data.text, evt.data.stream === 'stderr' ? 'stderr' : null);
+          else if (evt.event === 'error') appendPanel(`\n[error] ${evt.data.message}\n`, 'err');
+          else if (evt.event === 'result') {
+            finalStatus = evt.data.status;
+            if (evt.data.prUrl) { st.work.prUrl = evt.data.prUrl; st.work.prNumber = evt.data.prNumber; }
+          }
+        }
+      }
+    } catch (e) {
+      // Connection dropped (phone locked / network blip). The job keeps running
+      // server-side — do NOT declare failure. Reconcile against the real status.
+      appendPanel(`\n[connection dropped: ${e.message}] — job still running on server, checking status…\n`, 'stderr');
+      return reconcile(action, paint);
+    }
+
+    if (finalStatus) {
+      st[action].status = finalStatus;
+      st[action].hasConversation = true;
+      paint(finalStatus);
+      refreshLinks();
+      appendPanel(`\n[${action}] finished: ${finalStatus}\n`, finalStatus === 'success' ? 'ok' : 'err');
+    } else {
+      // Stream ended without a result event — reconcile.
+      return reconcile(action, paint);
+    }
+  }
+
+  // Poll the server for the authoritative status; if the job is still running,
+  // transparently re-attach to its live stream.
+  async function reconcile(action, paint) {
+    for (let i = 0; i < 200; i++) { // ~10 min ceiling at 3s
+      let rec;
+      try {
+        rec = await fetch(
+          `/api/repos/${encodeURIComponent(repo.name)}/issues/${issue.number}/record`,
+        ).then((x) => x.json());
+      } catch {
+        await sleep(3000);
+        continue;
+      }
+      const s = rec[action].status;
+      if (s === 'success' || s === 'failed') {
+        st[action].status = s;
+        if (rec.work) { st.work.prUrl = rec.work.prUrl; st.work.prNumber = rec.work.prNumber; }
+        paint(s);
+        refreshLinks();
+        appendPanel(`\n[${action}] finished: ${s}\n`, s === 'success' ? 'ok' : 'err');
+        return;
+      }
+      // Still running server-side. Re-attach to the live stream once.
+      if (rec.live && rec.live[action]) {
+        return streamAction(action, null, paint, true);
+      }
+      await sleep(3000);
+    }
+    appendPanel(`\n[${action}] status check timed out — tap the button again to re-check.\n`, 'stderr');
+  }
+
+  function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+  let recordShown = false;
+  async function toggleRecordPanel() {
+    recordShown = !recordShown;
+    panel.classList.toggle('show', recordShown);
+    if (!recordShown) return;
+    panel.innerHTML = '<span class="stderr">loading transcript…</span>';
+    const rec = await fetch(
+      `/api/repos/${encodeURIComponent(repo.name)}/issues/${issue.number}/record`,
+    ).then((x) => x.json());
+    panel.innerHTML = '';
+    // Show whichever action the user most likely wants: prefer failed transcript,
+    // else the work transcript, else deploy.
+    const showWork = rec.work.status === 'failed' || rec.work.conversation;
+    const chosen = rec.work.status === 'failed' ? rec.work
+      : rec.deploy.status === 'failed' ? rec.deploy
+      : (rec.work.conversation ? rec.work : rec.deploy);
+    if (chosen && chosen.conversation) {
+      appendPanel(chosen.conversation);
+    } else {
+      appendPanel('(no transcript stored yet)', 'stderr');
+    }
+  }
+
+  function appendPanel(text, cls) {
+    const span = document.createElement('span');
+    if (cls) span.className = cls;
+    span.textContent = text;
+    panel.appendChild(span);
+    panel.scrollTop = panel.scrollHeight;
+  }
+
+  return el;
+}
+
+function parseEvent(raw) {
+  let event = 'message';
+  let dataLine = '';
+  for (const line of raw.split('\n')) {
+    if (line.startsWith('event:')) event = line.slice(6).trim();
+    else if (line.startsWith('data:')) dataLine += line.slice(5).trim();
+  }
+  if (!dataLine) return null;
+  try { return { event, data: JSON.parse(dataLine) }; } catch { return null; }
+}
+
+function escape(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+loadRepos();
+</script>
+</body>
+</html>

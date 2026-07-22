@@ -1,0 +1,17 @@
+{
+  "name": "cloud-copilot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimal one-button demo that launches the local GitHub Copilot CLI and streams its response back to the browser over SSE.",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

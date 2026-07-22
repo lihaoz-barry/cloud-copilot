@@ -294,9 +294,10 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
       // later killed (exitCode null) after finishing. Only require exitCode===0
       // for the weaker gh-fallback signal (avoids matching a stale PR).
       const success = fromTranscript ? Boolean(prUrl) : j.exitCode === 0 && Boolean(prUrl);
+      const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
 
       store.updateRecord(repo.name, n, (r) => {
-        r.work.status = success ? 'success' : 'failed';
+        r.work.status = status;
         r.work.exitCode = j.exitCode;
         r.work.conversation = j.conversation;
         r.work.prUrl = prUrl;
@@ -317,7 +318,7 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
 
       return {
         action: 'work',
-        status: success ? 'success' : 'failed',
+        status,
         prUrl,
         prNumber,
         sessionId: j.sessionId,
@@ -326,6 +327,15 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
   });
 
   jobs.subscribe(job, res);
+});
+
+// Abort a running PR creation for an issue.
+app.post('/api/repos/:name/issues/:n/work/cancel', (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const n = Number(req.params.n);
+  const cancelled = jobs.cancelJob(`${repo.name}#${n}:work`);
+  res.json({ cancelled });
 });
 
 // ---------------------------------------------------------------------------
@@ -382,8 +392,9 @@ app.post('/api/repos/:name/issues/:n/deploy/:pr', async (req, res) => {
         /successfully uploaded|finished successfully|uploaded to testflight|build \d+ .*uploaded/i.test(
           j.conversation,
         );
+      const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
       store.updateDeploy(repo.name, n, prNumber, (d) => {
-        d.status = success ? 'success' : 'failed';
+        d.status = status;
         d.exitCode = j.exitCode;
         d.conversation = j.conversation;
         d.sessionId = j.sessionId || d.sessionId;
@@ -392,13 +403,26 @@ app.post('/api/repos/:name/issues/:n/deploy/:pr', async (req, res) => {
       return {
         action: 'deploy',
         prNumber,
-        status: success ? 'success' : 'failed',
+        status,
         sessionId: j.sessionId,
       };
     },
   });
 
   jobs.subscribe(job, res);
+});
+
+// Abort a running deploy for a specific PR.
+app.post('/api/repos/:name/issues/:n/deploy/:pr/cancel', (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const n = Number(req.params.n);
+  const prNumber = Number(req.params.pr);
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    return res.status(400).json({ error: 'invalid PR number' });
+  }
+  const cancelled = jobs.cancelJob(`${repo.name}#${n}:deploy:${prNumber}`);
+  res.json({ cancelled });
 });
 
 // ---------------------------------------------------------------------------

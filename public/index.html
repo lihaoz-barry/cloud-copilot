@@ -79,21 +79,78 @@
       background: #8882; color: inherit; font-weight: 600; font-size: .82rem;
     }
     .err-inline { color: #dc2626; font-size: .8rem; padding: 8px 4px; }
-    .mode-row { margin: 0 4px 12px; font-size: .8rem; color: #888; }
+    .mode-row { margin: 0; font-size: .8rem; color: #888; }
     select { font: inherit; padding: 5px 8px; border-radius: 8px; border: 1px solid #8884; background: #8881; }
+
+    /* top bar with title + controls (filter lives top-right) */
+    .topbar { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
+    .topbar .grow { flex: 1; }
+    .topctrls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+    .filter { position: relative; }
+    .filter-menu {
+      position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; min-width: 220px;
+      background: Canvas; color: CanvasText; border: 1px solid #8884; border-radius: 10px;
+      box-shadow: 0 8px 30px #0006; padding: 8px; display: none; max-height: 60vh; overflow-y: auto;
+    }
+    .filter-menu.show { display: block; }
+    .filter-menu h4 { margin: 4px 6px 8px; font-size: .78rem; color: #888; font-weight: 600; }
+    .filter-menu label {
+      display: flex; align-items: center; gap: 8px; padding: 6px 6px; border-radius: 8px;
+      font-size: .85rem; cursor: pointer;
+    }
+    .filter-menu label:hover { background: #8881; }
+    .filter-actions { display: flex; gap: 6px; padding: 6px 6px 2px; border-top: 1px solid #8882; margin-top: 4px; }
+
+    /* GitHub link beside the issue title */
+    .issue-top { align-items: center; }
+    a.ghlink {
+      text-decoration: none; white-space: nowrap; padding: 5px 9px; border-radius: 9px;
+      background: #8882; color: inherit; font-weight: 600; font-size: .78rem; flex: none;
+    }
+    .logtoggle { flex: none; }
+
+    /* per-PR rows: PR number on the left, Deploy on the right, one row per PR */
+    .prlist { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+    .prrow {
+      display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+      border: 1px solid #8883; border-radius: 10px; background: #8881;
+    }
+    .prrow .spacer { flex: 1; }
+    a.prnum {
+      text-decoration: none; font-weight: 700; font-size: .84rem; color: inherit;
+      font-variant-numeric: tabular-nums;
+    }
+    .timing { color: #888; font-size: .72rem; font-variant-numeric: tabular-nums; }
+    .prlist-empty { color: #888; font-size: .78rem; padding: 2px 4px; }
   </style>
 </head>
 <body>
-  <h1>☁️ cloud-copilot</h1>
-  <p class="sub" id="rootline">loading…</p>
-
-  <div class="mode-row">
-    Create-PR approval mode:
-    <select id="mode">
-      <option value="allow-all" selected>Allow All (autonomous)</option>
-      <option value="granular">Granular (git only)</option>
-      <option value="default">Default (safest)</option>
-    </select>
+  <div class="topbar">
+    <div class="grow">
+      <h1>☁️ cloud-copilot</h1>
+      <p class="sub" id="rootline">loading…</p>
+    </div>
+    <div class="topctrls">
+      <div class="mode-row">
+        mode:
+        <select id="mode">
+          <option value="allow-all" selected>Allow All</option>
+          <option value="granular">Granular</option>
+          <option value="default">Default</option>
+        </select>
+      </div>
+      <div class="filter">
+        <button id="filterBtn" class="ghost sm">⚙ Filter</button>
+        <div id="filterMenu" class="filter-menu">
+          <h4>Show repositories</h4>
+          <div id="filterList"></div>
+          <div class="filter-actions">
+            <button id="filterAll" class="ghost sm">All</button>
+            <button id="filterNone" class="ghost sm">None</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <div id="repos"></div>
@@ -102,6 +159,11 @@
 const reposEl = document.getElementById('repos');
 const rootLine = document.getElementById('rootline');
 const modeSel = document.getElementById('mode');
+const filterBtn = document.getElementById('filterBtn');
+const filterMenu = document.getElementById('filterMenu');
+const filterList = document.getElementById('filterList');
+
+const enc = encodeURIComponent;
 
 const STATE_LABEL = {
   work:   { idle: 'Create PR', working: 'Creating PR…', success: 'PR created', failed: 'PR failed' },
@@ -112,16 +174,84 @@ const STATE_CLASS = {
   success: 'st-success', failed: 'st-failed',
 };
 
+// ---- timing helpers -------------------------------------------------------
+function fmtDur(ms) {
+  if (ms == null) return '';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60), r = s % 60;
+  if (m < 60) return `${m}m ${r}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
+// ---- per-device repo filter (persisted in localStorage) -------------------
+const LS_HIDDEN = 'cc.hiddenRepos';
+function hiddenSet() {
+  try { return new Set(JSON.parse(localStorage.getItem(LS_HIDDEN) || '[]')); }
+  catch { return new Set(); }
+}
+function saveHidden(set) {
+  localStorage.setItem(LS_HIDDEN, JSON.stringify([...set]));
+}
+function applyRepoVisibility() {
+  const hid = hiddenSet();
+  document.querySelectorAll('.repo').forEach((el) => {
+    el.style.display = hid.has(el.dataset.repo) ? 'none' : '';
+  });
+}
+function renderFilterMenu(repos) {
+  const hid = hiddenSet();
+  filterList.innerHTML = '';
+  for (const repo of repos) {
+    const label = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !hid.has(repo.name);
+    cb.addEventListener('change', () => {
+      const set = hiddenSet();
+      if (cb.checked) set.delete(repo.name); else set.add(repo.name);
+      saveHidden(set);
+      applyRepoVisibility();
+    });
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(repo.name));
+    filterList.appendChild(label);
+  }
+}
+filterBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  filterMenu.classList.toggle('show');
+});
+document.addEventListener('click', (e) => {
+  if (!filterMenu.contains(e.target) && e.target !== filterBtn) filterMenu.classList.remove('show');
+});
+document.getElementById('filterAll').addEventListener('click', () => {
+  saveHidden(new Set());
+  renderFilterMenu(window.__repos || []);
+  applyRepoVisibility();
+});
+document.getElementById('filterNone').addEventListener('click', () => {
+  saveHidden(new Set((window.__repos || []).map((r) => r.name)));
+  renderFilterMenu(window.__repos || []);
+  applyRepoVisibility();
+});
+
+// ---- repos ----------------------------------------------------------------
 async function loadRepos() {
   const r = await fetch('/api/repos').then((x) => x.json());
+  window.__repos = r.repos;
   rootLine.textContent = `authorized root: ${r.root} · ${r.repos.length} repos`;
   reposEl.innerHTML = '';
   for (const repo of r.repos) reposEl.appendChild(renderRepo(repo));
+  renderFilterMenu(r.repos);
+  applyRepoVisibility();
 }
 
 function renderRepo(repo) {
   const el = document.createElement('div');
   el.className = 'repo';
+  el.dataset.repo = repo.name;
   el.innerHTML = `
     <div class="repo-head">
       <span class="caret">▶</span>
@@ -149,7 +279,7 @@ async function loadIssues(repo, body, force = false) {
   body.innerHTML = '<div class="muted" style="padding:8px 4px">Loading issues…</div>';
   let data;
   try {
-    data = await fetch(`/api/repos/${encodeURIComponent(repo.name)}/issues${force ? '?refresh=1' : ''}`)
+    data = await fetch(`/api/repos/${enc(repo.name)}/issues${force ? '?refresh=1' : ''}`)
       .then((x) => x.json());
   } catch (e) {
     body.innerHTML = `<div class="err-inline">Failed to load: ${escape(e.message)}</div>`;
@@ -186,189 +316,273 @@ function renderIssue(repo, issue) {
       <div class="issue-title">${escape(issue.title)}
         <div class="labels">${labels}</div>
       </div>
+      <a class="ghlink" target="_blank" rel="noopener">↗ GitHub</a>
+      <button class="ghost sm logtoggle" title="Show live logs">&lt;/&gt;</button>
     </div>
     <div class="actions"></div>
-    <div class="panel"></div>
-    <div class="linkrow"></div>`;
+    <div class="prlist"></div>
+    <div class="panel"></div>`;
+
   const actions = el.querySelector('.actions');
+  const prlist = el.querySelector('.prlist');
   const panel = el.querySelector('.panel');
-  const linkrow = el.querySelector('.linkrow');
+  const ghLink = el.querySelector('.ghlink');
+  const logToggle = el.querySelector('.logtoggle');
+  ghLink.href = issue.url;
 
-  const st = issue.status || { work: { status: 'idle' }, deploy: { status: 'idle' } };
+  // Logs are hidden by default; this toggle expands the live/last transcript.
+  logToggle.addEventListener('click', () => panel.classList.toggle('show'));
 
-  const workBtn = makeStateBtn('work', st.work.status);
-  const deployBtn = makeStateBtn('deploy', st.deploy.status);
-  actions.append(workBtn, deployBtn);
+  // Per-issue live state. `st.prs` is an array of { prNumber, prUrl, deploy }.
+  const st = issue.status || { work: { status: 'idle' }, prs: [] };
+  if (!st.prs) st.prs = [];
 
-  // If an action was still running when the page (re)loaded — e.g. you locked
-  // your phone and came back — transparently re-attach to the live job.
-  if (st.work.status === 'working') {
-    streamAction('work', workBtn, (s) => paintBtn(workBtn, 'work', s), true);
+  // --- Create PR button -----------------------------------------------------
+  const workBtn = document.createElement('button');
+  const paintWork = (s) => paintBtn(workBtn, 'work', s, st.work);
+  paintWork(st.work.status);
+  workBtn.addEventListener('click', () => onWork(paintWork));
+  actions.appendChild(workBtn);
+
+  const refreshPrsBtn = document.createElement('button');
+  refreshPrsBtn.className = 'ghost sm';
+  refreshPrsBtn.textContent = '↻ PRs';
+  refreshPrsBtn.title = 'Refresh PR list from GitHub';
+  refreshPrsBtn.addEventListener('click', async () => {
+    refreshPrsBtn.disabled = true;
+    try {
+      const d = await fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/prs`).then((x) => x.json());
+      if (d.prs) mergePrs(d.prs);
+    } catch { /* ignore */ } finally { refreshPrsBtn.disabled = false; }
+  });
+  actions.appendChild(refreshPrsBtn);
+
+  renderPrs();
+
+  // Re-attach to any jobs still running server-side after a reload/reconnect.
+  if (st.work.status === 'working') streamWork(true, paintWork);
+  for (const pr of st.prs) {
+    if (pr.deploy && pr.deploy.status === 'deploying') streamDeploy(pr.prNumber, true);
   }
-  if (st.deploy.status === 'deploying') {
-    streamAction('deploy', deployBtn, (s) => paintBtn(deployBtn, 'deploy', s), true);
-  }
 
-  // GitHub issue link is always available.
-  const ghLink = document.createElement('a');
-  ghLink.className = 'btnlink';
-  ghLink.href = issue.url; ghLink.target = '_blank';
-  ghLink.textContent = '↗ View issue on GitHub';
-  linkrow.appendChild(ghLink);
-
-  refreshLinks();
-
-  function refreshLinks() {
-    // remove any prior PR link
-    [...linkrow.querySelectorAll('[data-pr]')].forEach((n) => n.remove());
-    if (st.work.prUrl) {
-      const pr = document.createElement('a');
-      pr.className = 'btnlink'; pr.dataset.pr = '1';
-      pr.href = st.work.prUrl; pr.target = '_blank';
-      pr.textContent = `↗ PR #${st.work.prNumber || ''}`;
-      linkrow.appendChild(pr);
+  // --- rendering ------------------------------------------------------------
+  function renderPrs() {
+    prlist.innerHTML = '';
+    if (!st.prs.length) {
+      prlist.innerHTML = '<div class="prlist-empty">No PRs yet — use Create PR above.</div>';
+      return;
     }
+    for (const pr of st.prs) prlist.appendChild(renderPrRow(pr));
   }
 
-  function paintBtn(btn, action, s) {
+  function renderPrRow(pr) {
+    const row = document.createElement('div');
+    row.className = 'prrow';
+    row.dataset.pr = pr.prNumber;
+
+    const link = document.createElement('a');
+    link.className = 'prnum';
+    link.href = pr.prUrl || '#';
+    link.target = '_blank'; link.rel = 'noopener';
+    link.textContent = `PR #${pr.prNumber}`;
+
+    const timing = document.createElement('span');
+    timing.className = 'timing';
+    if (pr.deploy && pr.deploy.durationMs != null) timing.textContent = `ran ${fmtDur(pr.deploy.durationMs)}`;
+
+    const spacer = document.createElement('span');
+    spacer.className = 'spacer';
+
+    const deployBtn = document.createElement('button');
+    const paintDeploy = (s) => paintBtn(deployBtn, 'deploy', s, pr.deploy);
+    paintDeploy((pr.deploy && pr.deploy.status) || 'idle');
+    deployBtn.addEventListener('click', () => onDeploy(pr, paintDeploy));
+    pr._paint = paintDeploy;
+
+    row.append(link, timing, spacer, deployBtn);
+    return row;
+  }
+
+  function paintBtn(btn, action, s, timingObj) {
     btn.className = `stbtn ${STATE_CLASS[s] || 'st-idle'}`;
     btn.innerHTML = `<span class="dot"></span>${STATE_LABEL[action][s] || s}`;
+    const dur = timingObj && timingObj.durationMs;
+    btn.title = dur != null ? `ran ${fmtDur(dur)}` : '';
   }
 
-  function makeStateBtn(action, status) {
-    const btn = document.createElement('button');
-    const paint = (s) => paintBtn(btn, action, s);
-    paint(status);
-    btn.addEventListener('click', () => onAction(action, st[action].status, btn, paint));
-    return btn;
+  function mergePrs(list) {
+    st.prs = list.map((p) => {
+      const ex = st.prs.find((x) => x.prNumber === p.prNumber);
+      return {
+        prNumber: p.prNumber, prUrl: p.prUrl, title: p.title, createdAt: p.createdAt,
+        deploy: ex ? ex.deploy : (p.deploy || { status: 'idle' }),
+      };
+    });
+    renderPrs();
   }
 
-  async function onAction(action, status, btn, paint) {
-    // If already finished, clicking toggles the detail panel instead of re-running.
-    if (status === 'success' || status === 'failed') {
-      return toggleRecordPanel();
+  function upsertLocalPr(p) {
+    if (!st.prs.find((x) => x.prNumber === p.prNumber)) {
+      st.prs.unshift({ prNumber: p.prNumber, prUrl: p.prUrl, deploy: { status: 'idle' } });
+      renderPrs();
     }
-    if (status === 'working' || status === 'deploying') return; // busy
-
-    paint(action === 'work' ? 'working' : 'deploying');
-    st[action].status = action === 'work' ? 'working' : 'deploying';
-    await streamAction(action, btn, paint, false);
   }
 
-  // Stream (or re-attach to) an action job. `reconnect` replays a running job.
-  async function streamAction(action, btn, paint, reconnect) {
-    panel.classList.add('show');
-    if (!reconnect) panel.innerHTML = '';
-    else appendPanel(`\n[reconnecting…]\n`, 'stderr');
+  function setPrTiming(prNumber, durationMs) {
+    const span = prlist.querySelector(`.prrow[data-pr="${prNumber}"] .timing`);
+    if (span && durationMs != null) span.textContent = `ran ${fmtDur(durationMs)}`;
+  }
 
-    const url = `/api/repos/${encodeURIComponent(repo.name)}/issues/${issue.number}/${action}`;
-    const body = action === 'work' ? JSON.stringify({ mode: modeSel.value }) : '{}';
+  // --- Create PR flow -------------------------------------------------------
+  async function onWork(paint) {
+    const s = st.work.status;
+    if (s === 'working') return void panel.classList.toggle('show');
+    if (s === 'success' || s === 'failed') return loadWorkTranscript();
+    st.work.status = 'working';
+    paint('working');
+    await streamWork(false, paint);
+  }
 
-    let finalStatus = null;
+  async function streamWork(reconnect, paint) {
+    if (reconnect) { st.work.status = 'working'; paint('working'); appendPanel('\n[reconnecting work…]\n', 'stderr'); }
+    const url = `/api/repos/${enc(repo.name)}/issues/${issue.number}/work`;
+    let finalStatus = null, resultData = null;
     try {
       const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body,
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: modeSel.value }),
       });
-      if (!resp.ok || !resp.body) {
-        appendPanel(`\n[error] HTTP ${resp.status}\n`, 'err');
-        return reconcile(action, paint); // fall back to polling the true status
-      }
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        let sep;
-        while ((sep = buf.indexOf('\n\n')) !== -1) {
-          const raw = buf.slice(0, sep);
-          buf = buf.slice(sep + 2);
-          const evt = parseEvent(raw);
-          if (!evt) continue;
-          if (evt.event === 'chunk') appendPanel(evt.data.text, evt.data.stream === 'stderr' ? 'stderr' : null);
-          else if (evt.event === 'error') appendPanel(`\n[error] ${evt.data.message}\n`, 'err');
-          else if (evt.event === 'result') {
-            finalStatus = evt.data.status;
-            if (evt.data.prUrl) { st.work.prUrl = evt.data.prUrl; st.work.prNumber = evt.data.prNumber; }
-          }
-        }
-      }
+      if (!resp.ok || !resp.body) { appendPanel(`\n[error] HTTP ${resp.status}\n`, 'err'); return reconcileWork(paint); }
+      await pumpSSE(resp, {
+        onChunk: (t, s) => appendPanel(t, s === 'stderr' ? 'stderr' : null),
+        onError: (m) => appendPanel(`\n[error] ${m}\n`, 'err'),
+        onResult: (d) => { finalStatus = d.status; resultData = d; },
+      });
     } catch (e) {
-      // Connection dropped (phone locked / network blip). The job keeps running
-      // server-side — do NOT declare failure. Reconcile against the real status.
-      appendPanel(`\n[connection dropped: ${e.message}] — job still running on server, checking status…\n`, 'stderr');
-      return reconcile(action, paint);
+      appendPanel(`\n[connection dropped: ${e.message}] — job still running, checking status…\n`, 'stderr');
+      return reconcileWork(paint);
     }
-
     if (finalStatus) {
-      st[action].status = finalStatus;
-      st[action].hasConversation = true;
+      st.work.status = finalStatus;
       paint(finalStatus);
-      refreshLinks();
-      appendPanel(`\n[${action}] finished: ${finalStatus}\n`, finalStatus === 'success' ? 'ok' : 'err');
+      if (resultData && resultData.prNumber) upsertLocalPr({ prNumber: resultData.prNumber, prUrl: resultData.prUrl });
+      appendPanel(`\n[work] finished: ${finalStatus}\n`, finalStatus === 'success' ? 'ok' : 'err');
     } else {
-      // Stream ended without a result event — reconcile.
-      return reconcile(action, paint);
+      return reconcileWork(paint);
     }
   }
 
-  // Poll the server for the authoritative status; if the job is still running,
-  // transparently re-attach to its live stream.
-  async function reconcile(action, paint) {
-    for (let i = 0; i < 200; i++) { // ~10 min ceiling at 3s
+  async function reconcileWork(paint) {
+    for (let i = 0; i < 200; i++) {
       let rec;
-      try {
-        rec = await fetch(
-          `/api/repos/${encodeURIComponent(repo.name)}/issues/${issue.number}/record`,
-        ).then((x) => x.json());
-      } catch {
-        await sleep(3000);
-        continue;
-      }
-      const s = rec[action].status;
+      try { rec = await fetchRecord(); } catch { await sleep(3000); continue; }
+      const s = rec.work.status;
       if (s === 'success' || s === 'failed') {
-        st[action].status = s;
-        if (rec.work) { st.work.prUrl = rec.work.prUrl; st.work.prNumber = rec.work.prNumber; }
-        paint(s);
-        refreshLinks();
-        appendPanel(`\n[${action}] finished: ${s}\n`, s === 'success' ? 'ok' : 'err');
+        st.work.status = s; paint(s); syncPrsFromRecord(rec);
+        appendPanel(`\n[work] finished: ${s}\n`, s === 'success' ? 'ok' : 'err');
         return;
       }
-      // Still running server-side. Re-attach to the live stream once.
-      if (rec.live && rec.live[action]) {
-        return streamAction(action, null, paint, true);
-      }
+      if (rec.live && rec.live.work) return streamWork(true, paint);
       await sleep(3000);
     }
-    appendPanel(`\n[${action}] status check timed out — tap the button again to re-check.\n`, 'stderr');
+    appendPanel(`\n[work] status check timed out — tap Create PR again to re-check.\n`, 'stderr');
   }
 
-  function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+  // --- Deploy flow (per PR) -------------------------------------------------
+  async function onDeploy(pr, paint) {
+    const s = (pr.deploy && pr.deploy.status) || 'idle';
+    if (s === 'deploying') return void panel.classList.toggle('show');
+    if (s === 'success' || s === 'failed') return loadDeployTranscript(pr.prNumber);
+    pr.deploy.status = 'deploying';
+    paint('deploying');
+    await streamDeploy(pr.prNumber, false, paint);
+  }
 
-  let recordShown = false;
-  async function toggleRecordPanel() {
-    recordShown = !recordShown;
-    panel.classList.toggle('show', recordShown);
-    if (!recordShown) return;
-    panel.innerHTML = '<span class="stderr">loading transcript…</span>';
-    const rec = await fetch(
-      `/api/repos/${encodeURIComponent(repo.name)}/issues/${issue.number}/record`,
-    ).then((x) => x.json());
-    panel.innerHTML = '';
-    // Show whichever action the user most likely wants: prefer failed transcript,
-    // else the work transcript, else deploy.
-    const showWork = rec.work.status === 'failed' || rec.work.conversation;
-    const chosen = rec.work.status === 'failed' ? rec.work
-      : rec.deploy.status === 'failed' ? rec.deploy
-      : (rec.work.conversation ? rec.work : rec.deploy);
-    if (chosen && chosen.conversation) {
-      appendPanel(chosen.conversation);
-    } else {
-      appendPanel('(no transcript stored yet)', 'stderr');
+  async function streamDeploy(prNumber, reconnect, paint) {
+    const pr = st.prs.find((p) => p.prNumber === prNumber);
+    if (!pr) return;
+    paint = paint || pr._paint;
+    if (reconnect) { pr.deploy.status = 'deploying'; paint('deploying'); appendPanel(`\n[reconnecting deploy PR #${prNumber}…]\n`, 'stderr'); }
+    const url = `/api/repos/${enc(repo.name)}/issues/${issue.number}/deploy/${prNumber}`;
+    let finalStatus = null;
+    try {
+      const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (!resp.ok || !resp.body) { appendPanel(`\n[error] HTTP ${resp.status}\n`, 'err'); return reconcileDeploy(prNumber, paint); }
+      await pumpSSE(resp, {
+        onChunk: (t, s) => appendPanel(t, s === 'stderr' ? 'stderr' : null),
+        onError: (m) => appendPanel(`\n[error] ${m}\n`, 'err'),
+        onResult: (d) => { finalStatus = d.status; },
+      });
+    } catch (e) {
+      appendPanel(`\n[connection dropped: ${e.message}] — deploy still running, checking status…\n`, 'stderr');
+      return reconcileDeploy(prNumber, paint);
     }
+    if (finalStatus) {
+      pr.deploy.status = finalStatus;
+      paint(finalStatus);
+      appendPanel(`\n[deploy #${prNumber}] finished: ${finalStatus}\n`, finalStatus === 'success' ? 'ok' : 'err');
+      refreshDeployTiming(prNumber, paint);
+    } else {
+      return reconcileDeploy(prNumber, paint);
+    }
+  }
+
+  async function reconcileDeploy(prNumber, paint) {
+    for (let i = 0; i < 200; i++) {
+      let rec;
+      try { rec = await fetchRecord(); } catch { await sleep(3000); continue; }
+      const prRec = (rec.prs || {})[prNumber];
+      const s = prRec && prRec.deploy && prRec.deploy.status;
+      if (s === 'success' || s === 'failed') {
+        const pr = st.prs.find((p) => p.prNumber === prNumber);
+        if (pr) { pr.deploy = { ...prRec.deploy }; paint(s); setPrTiming(prNumber, pr.deploy.durationMs); }
+        appendPanel(`\n[deploy #${prNumber}] finished: ${s}\n`, s === 'success' ? 'ok' : 'err');
+        return;
+      }
+      if (rec.live && rec.live.deploy && rec.live.deploy[prNumber]) return streamDeploy(prNumber, true, paint);
+      await sleep(3000);
+    }
+    appendPanel(`\n[deploy #${prNumber}] status check timed out — tap Deploy again.\n`, 'stderr');
+  }
+
+  async function refreshDeployTiming(prNumber) {
+    try {
+      const rec = await fetchRecord();
+      const prRec = (rec.prs || {})[prNumber];
+      const pr = st.prs.find((p) => p.prNumber === prNumber);
+      if (prRec && pr) { pr.deploy = { ...prRec.deploy }; setPrTiming(prNumber, pr.deploy.durationMs); }
+    } catch { /* ignore */ }
+  }
+
+  // --- shared helpers -------------------------------------------------------
+  function fetchRecord() {
+    return fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/record`).then((x) => x.json());
+  }
+
+  function syncPrsFromRecord(rec) {
+    const arr = Object.values(rec.prs || {})
+      .sort((a, b) => b.prNumber - a.prNumber)
+      .map((p) => ({ prNumber: p.prNumber, prUrl: p.prUrl, title: p.title, createdAt: p.createdAt, deploy: { ...p.deploy } }));
+    st.prs = arr;
+    renderPrs();
+  }
+
+  async function loadWorkTranscript() {
+    panel.classList.add('show');
+    panel.innerHTML = '<span class="stderr">loading transcript…</span>';
+    const rec = await fetchRecord();
+    panel.innerHTML = '';
+    appendPanel(rec.work.conversation || '(no transcript stored yet)', rec.work.conversation ? null : 'stderr');
+  }
+
+  async function loadDeployTranscript(prNumber) {
+    panel.classList.add('show');
+    panel.innerHTML = '<span class="stderr">loading transcript…</span>';
+    const rec = await fetchRecord();
+    panel.innerHTML = '';
+    const prRec = (rec.prs || {})[prNumber];
+    const conv = prRec && prRec.deploy && prRec.deploy.conversation;
+    appendPanel(conv || '(no transcript stored yet)', conv ? null : 'stderr');
   }
 
   function appendPanel(text, cls) {
@@ -379,7 +593,31 @@ function renderIssue(repo, issue) {
     panel.scrollTop = panel.scrollHeight;
   }
 
+  function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
   return el;
+}
+
+// Read an SSE response body, dispatching parsed events to handlers.
+async function pumpSSE(resp, { onChunk, onError, onResult }) {
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let sep;
+    while ((sep = buf.indexOf('\n\n')) !== -1) {
+      const raw = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      const evt = parseEvent(raw);
+      if (!evt) continue;
+      if (evt.event === 'chunk') onChunk && onChunk(evt.data.text, evt.data.stream);
+      else if (evt.event === 'error') onError && onError(evt.data.message);
+      else if (evt.event === 'result') onResult && onResult(evt.data);
+    }
+  }
 }
 
 function parseEvent(raw) {

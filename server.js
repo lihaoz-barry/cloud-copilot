@@ -27,7 +27,7 @@ const gh = require('./lib/gh');
 const { runCopilotSSE, writeSseHead } = require('./lib/runner');
 const jobs = require('./lib/jobs');
 
-const HOST = process.env.HOST || '127.0.0.1';
+const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 8787);
 const REPOS_ROOT = process.env.REPOS_ROOT || path.join(os.homedir(), 'repos');
 
@@ -154,9 +154,38 @@ app.get('/api/repos/:name/issues/:n/record', (req, res) => {
   // Annotate with whether a live job is still running (survives browser drop).
   record.live = {
     work: Boolean(jobs.getJob(`${repo.name}#${n}:work`)?.status === 'running'),
-    deploy: Boolean(jobs.getJob(`${repo.name}#${n}:deploy`)?.status === 'running'),
+    deploy: {},
   };
+  for (const pr of Object.values(record.prs || {})) {
+    record.live.deploy[pr.prNumber] = Boolean(
+      jobs.getJob(`${repo.name}#${n}:deploy:${pr.prNumber}`)?.status === 'running',
+    );
+  }
   res.json(record);
+});
+
+// Refresh the PR list for an issue from GitHub and merge into the store.
+app.get('/api/repos/:name/issues/:n/prs', async (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  if (!repo.github) return res.status(400).json({ error: 'repo has no github.com remote' });
+  const n = Number(req.params.n);
+  try {
+    const prs = await gh.findPrsForIssue(repo.ownerRepo, n);
+    for (const p of prs) {
+      store.upsertPr(repo.name, n, {
+        prNumber: p.number,
+        prUrl: p.url,
+        title: p.title,
+        createdAt: p.createdAt,
+        source: 'gh',
+      });
+    }
+    const record = store.getRecord(repo.name, n);
+    res.json({ prs: store.prsArray(record) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -245,6 +274,16 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
         r.work.finishedAt = new Date().toISOString();
       });
 
+      // Register the freshly created PR so it gets its own deploy button.
+      if (prNumber) {
+        store.upsertPr(repo.name, n, {
+          prNumber,
+          prUrl,
+          createdAt: new Date().toISOString(),
+          source: 'work',
+        });
+      }
+
       return {
         action: 'work',
         status: success ? 'success' : 'failed',
@@ -259,14 +298,18 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Action: Deploy (ship to TestFlight via the testflight-deploy skill)
+// Action: Deploy a specific PR (ship to TestFlight via the testflight-deploy skill)
 // ---------------------------------------------------------------------------
 
-app.post('/api/repos/:name/issues/:n/deploy', async (req, res) => {
+app.post('/api/repos/:name/issues/:n/deploy/:pr', async (req, res) => {
   const repo = resolveRepo(req.params.name);
   if (!repo) return res.status(404).json({ error: 'repo not found' });
   const n = Number(req.params.n);
-  const key = `${repo.name}#${n}:deploy`;
+  const prNumber = Number(req.params.pr);
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    return res.status(400).json({ error: 'invalid PR number' });
+  }
+  const key = `${repo.name}#${n}:deploy:${prNumber}`;
 
   writeSseHead(res);
 
@@ -276,32 +319,29 @@ app.post('/api/repos/:name/issues/:n/deploy', async (req, res) => {
     return;
   }
 
-  const record = store.getRecord(repo.name, n);
-  const prNumber = record.work.prNumber;
-
-  // Prefer deploying the PR's branch; the testflight-deploy skill knows the rest.
-  const branchClause = prNumber ? `Check out the branch for PR #${prNumber}, then ` : '';
+  // Deploy the PR's branch; the testflight-deploy skill knows the rest.
   const prompt =
-    `${branchClause}deploy the current ios-diet-expert app to TestFlight using the ` +
-    `testflight-deploy skill. Build and upload via fastlane. ` +
-    `When finished, clearly state whether the build succeeded and whether the ` +
-    `upload to TestFlight succeeded.`;
+    `Check out the branch for PR #${prNumber}, then deploy the current ` +
+    `ios-diet-expert app to TestFlight using the testflight-deploy skill. ` +
+    `Build and upload via fastlane. When finished, clearly state whether the ` +
+    `build succeeded and whether the upload to TestFlight succeeded.`;
   const args = ['-p', prompt, '--allow-all-tools'];
 
-  store.updateRecord(repo.name, n, (r) => {
-    r.deploy.status = 'deploying';
-    r.deploy.startedAt = new Date().toISOString();
-    r.deploy.conversation = '';
+  store.updateDeploy(repo.name, n, prNumber, (d) => {
+    d.status = 'deploying';
+    d.startedAt = new Date().toISOString();
+    d.finishedAt = null;
+    d.conversation = '';
   });
 
   const job = jobs.startJob(key, {
     bin: COPILOT_BIN,
     args,
     cwd: repo.path,
-    meta: { action: 'deploy' },
+    meta: { action: 'deploy', prNumber },
     onSession: (id) =>
-      store.updateRecord(repo.name, n, (r) => {
-        r.deploy.sessionId = id;
+      store.updateDeploy(repo.name, n, prNumber, (d) => {
+        d.sessionId = id;
       }),
     onDone: async (j) => {
       // Success markers emitted by fastlane / the skill's final report.
@@ -309,15 +349,16 @@ app.post('/api/repos/:name/issues/:n/deploy', async (req, res) => {
         /successfully uploaded|finished successfully|uploaded to testflight|build \d+ .*uploaded/i.test(
           j.conversation,
         );
-      store.updateRecord(repo.name, n, (r) => {
-        r.deploy.status = success ? 'success' : 'failed';
-        r.deploy.exitCode = j.exitCode;
-        r.deploy.conversation = j.conversation;
-        r.deploy.sessionId = j.sessionId || r.deploy.sessionId;
-        r.deploy.finishedAt = new Date().toISOString();
+      store.updateDeploy(repo.name, n, prNumber, (d) => {
+        d.status = success ? 'success' : 'failed';
+        d.exitCode = j.exitCode;
+        d.conversation = j.conversation;
+        d.sessionId = j.sessionId || d.sessionId;
+        d.finishedAt = new Date().toISOString();
       });
       return {
         action: 'deploy',
+        prNumber,
         status: success ? 'success' : 'failed',
         sessionId: j.sessionId,
       };

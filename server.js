@@ -95,10 +95,13 @@ function resolveRepo(name) {
 }
 
 // Map a UI mode to copilot approval flags.
+// `--allow-all` = --allow-all-tools --allow-all-paths --allow-all-urls, which is
+// required for autonomous runs that touch files outside the repo working dir
+// (e.g. fastlane writing to /tmp, ~/Library, the keychain) since -p can't prompt.
 function approvalFlags(mode) {
   switch (mode) {
     case 'allow-all':
-      return ['--allow-all-tools'];
+      return ['--allow-all'];
     case 'granular':
       return ['--allow-tool', 'shell(git)'];
     default:
@@ -139,7 +142,14 @@ app.get('/api/repos/:name/issues', async (req, res) => {
       labels: (i.labels || []).map((l) => l.name),
       status: statuses[i.number],
     }));
-    res.json({ repo: repo.name, ownerRepo: repo.ownerRepo, cached, at, issues: merged });
+    // Which issues currently have a PR-creation job running (repo-level lock).
+    const prefix = `${repo.name}#`;
+    const activeWorkIssues = jobs
+      .runningKeys()
+      .filter((k) => k.startsWith(prefix) && k.endsWith(':work'))
+      .map((k) => Number(k.slice(prefix.length, -':work'.length)))
+      .filter((n) => Number.isInteger(n));
+    res.json({ repo: repo.name, ownerRepo: repo.ownerRepo, cached, at, issues: merged, activeWorkIssues });
   } catch (err) {
     res.status(500).json({ error: err.message, stderr: (err.stderr || '').toString() });
   }
@@ -204,6 +214,27 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
   const existing = jobs.getJob(key);
   if (existing && existing.status === 'running') {
     jobs.subscribe(existing, res);
+    return;
+  }
+
+  // Repo-level lock: only one PR-creation may run per repo at a time, otherwise
+  // concurrent copilot runs collide on the same working tree.
+  const prefix = `${repo.name}#`;
+  const otherWork = jobs
+    .runningKeys()
+    .filter((k) => k.startsWith(prefix) && k.endsWith(':work') && k !== key);
+  if (otherWork.length) {
+    const busyIssue = otherWork[0].slice(prefix.length, -':work'.length);
+    const msg =
+      `Blocked: a PR creation is already running for issue #${busyIssue} in ` +
+      `${repo.name}. Only one PR creation per repo at a time.`;
+    res.write(`event: error\n`);
+    res.write(`data: ${JSON.stringify({ message: msg })}\n\n`);
+    res.write(`event: result\n`);
+    res.write(`data: ${JSON.stringify({ action: 'work', status: 'blocked', message: msg })}\n\n`);
+    res.write(`event: done\n`);
+    res.write(`data: ${JSON.stringify({ exitCode: null })}\n\n`);
+    res.end();
     return;
   }
 
@@ -325,7 +356,9 @@ app.post('/api/repos/:name/issues/:n/deploy/:pr', async (req, res) => {
     `ios-diet-expert app to TestFlight using the testflight-deploy skill. ` +
     `Build and upload via fastlane. When finished, clearly state whether the ` +
     `build succeeded and whether the upload to TestFlight succeeded.`;
-  const args = ['-p', prompt, '--allow-all-tools'];
+  // Deploy must reach files outside the repo (/tmp, ~/Library, keychain) and the
+  // network, so grant full path + URL + tool access.
+  const args = ['-p', prompt, '--allow-all'];
 
   store.updateDeploy(repo.name, n, prNumber, (d) => {
     d.status = 'deploying';

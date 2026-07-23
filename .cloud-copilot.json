@@ -1,0 +1,6 @@
+{
+  "deploy": {
+    "type": "shell",
+    "command": "npm run cc:restart"
+  }
+}

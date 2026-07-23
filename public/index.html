@@ -359,6 +359,7 @@ function renderIssue(repo, issue, repoCtx) {
         <div class="labels">${labels}</div>
       </div>
       <a class="ghlink" target="_blank" rel="noopener">↗ GitHub</a>
+      <button class="iconbtn hidebtn" title="Remove this issue from the list">🗑</button>
     </div>
     <div class="actions"></div>
     <div class="worklog panel"></div>
@@ -369,7 +370,9 @@ function renderIssue(repo, issue, repoCtx) {
   const prlist = el.querySelector('.prlist');
   const worklog = el.querySelector('.worklog');
   const ghLink = el.querySelector('.ghlink');
+  const hideBtn = el.querySelector('.hidebtn');
   ghLink.href = issue.url;
+  hideBtn.addEventListener('click', () => onHide('Remove this issue from the list?'));
 
   // Per-issue live state. `st.prs` is an array of { prNumber, prUrl, deploy }.
   const st = issue.status || { work: { status: 'idle' }, prs: [] };
@@ -413,6 +416,18 @@ function renderIssue(repo, issue, repoCtx) {
   });
 
   actions.append(workBtn, workAbortBtn, workLogBtn, refreshPrsBtn);
+
+  const deleteBtn = document.createElement('button');
+  deleteBtn.className = 'iconbtn abortbtn';
+  deleteBtn.textContent = '🗑 Delete issue';
+  deleteBtn.title = 'Remove this issue from cloud-copilot (does not touch GitHub)';
+  deleteBtn.addEventListener('click', () =>
+    onHide(
+      `Delete issue #${issue.number} from cloud-copilot? This only hides it locally — it will NOT close ` +
+        `or delete the issue on GitHub. Any running work/deploy jobs for it will be cancelled first.`,
+    ),
+  );
+  actions.append(deleteBtn);
 
   paintWork(st.work.status);
   renderPrs();
@@ -774,6 +789,23 @@ function renderIssue(repo, issue, repoCtx) {
   }
   function appendWork(text, cls) { appendTo(worklog, text, cls); }
   function appendDeploy(prNumber, text, cls) { const p = deployPanel(prNumber); if (p) appendTo(p, text, cls); }
+
+  // --- Dismiss/hide (local only — never touches GitHub) --------------------
+  async function onHide(confirmMsg) {
+    if (!window.confirm(confirmMsg)) return;
+    hideBtn.disabled = true;
+    deleteBtn.disabled = true;
+    try {
+      const resp = await fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/hide`, { method: 'POST' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      repoCtx.clearActive(issue.number);
+      el.remove();
+    } catch (e) {
+      hideBtn.disabled = false;
+      deleteBtn.disabled = false;
+      window.alert(`Failed to remove issue #${issue.number}: ${e.message}`);
+    }
+  }
 
   function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 

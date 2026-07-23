@@ -933,6 +933,19 @@ app.post('/api/admin/chat', (req, res) => {
       ? req.body.sessionId
       : null;
 
+  // Optional repo scope: when set, the turn runs with cwd inside that repo
+  // (still under REPOS_ROOT) instead of the shared repos root, so Copilot can
+  // work on that repo directly rather than merely browsing it from the root.
+  const repoName = typeof req.body?.repo === 'string' ? req.body.repo.trim() : '';
+  let cwd = REPOS_ROOT;
+  if (repoName) {
+    const repo = resolveRepo(repoName);
+    if (!repo) {
+      return sendSseBlocked(res, { action: 'admin', status: 'failed', message: 'repo not found under REPOS_ROOT' });
+    }
+    cwd = repo.path;
+  }
+
   const args = [];
   if (sessionId) args.push(`--resume=${sessionId}`);
   args.push('-p', message, ...approvalFlags(mode));
@@ -940,12 +953,14 @@ app.post('/api/admin/chat', (req, res) => {
   const job = jobs.startJob(key, {
     bin: COPILOT_BIN,
     args,
-    cwd: REPOS_ROOT,
-    meta: { action: 'admin', turnId },
+    cwd,
+    meta: { action: 'admin', turnId, repo: repoName || null },
     onDone: async (j) => {
       // The job manager captures the --resume=<id> session id from the stream.
       const sid = j.sessionId;
-      if (sid) store.appendAdminTurn(sid, { userText: message, assistantText: j.conversation, mode });
+      if (sid) {
+        store.appendAdminTurn(sid, { userText: message, assistantText: j.conversation, mode, repo: repoName || null });
+      }
       return {
         action: 'admin',
         turnId,

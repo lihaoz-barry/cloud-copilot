@@ -332,6 +332,8 @@
     .tmsg-body pre code { background: none; padding: 0; }
     .tmsg-body strong { font-weight: 700; }
     .tmsg-cursor { display: inline-block; width: 7px; height: 1em; background: #6ee787; vertical-align: -2px; animation: blink 1s steps(2) infinite; }
+    .tmsg-stream { white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, Menlo, monospace; font-size: .78rem; }
+    .tmsg-stream .dim { color: #9aa0aa; }
     @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
     /* Compact summary strip parsed from the CLI's end-of-turn footer. */
     .tmsg-meta {
@@ -466,7 +468,11 @@
         </div>
       </div>
       <h1>⌨️ Admin Terminal</h1>
-      <span class="admin-root" id="adminRoot">root: …</span>
+      <label class="admin-root" style="display:inline-flex;align-items:center;gap:6px;">repo:
+        <select id="adminRepoSelect">
+          <option value="">All repos</option>
+        </select>
+      </label>
       <span class="spacer"></span>
       <button id="adminNew" class="ghost sm">✚ New conversation</button>
     </div>
@@ -1715,6 +1721,27 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec) {
   }
   renderMessages();
 
+  // Append a live assistant bubble and return its text element. Streamed chunks
+  // are appended as text nodes (the Create-PR log approach) instead of
+  // re-rendering the whole message list per chunk — the latter left the
+  // in-flight reply out of `messages` entirely, so nothing showed until the
+  // turn finished (and it silently drops on mobile besides).
+  function appendLiveAssistant(mode) {
+    const empty = messagesEl.querySelector('.chat-empty');
+    if (empty) empty.remove();
+    const bubble = document.createElement('div');
+    bubble.className = 'chat-bubble chat-assistant';
+    const metaEl = document.createElement('div');
+    metaEl.className = 'chat-meta';
+    metaEl.textContent = `Copilot · ${mode}`;
+    const textEl = document.createElement('div');
+    textEl.className = 'chat-text';
+    bubble.append(metaEl, textEl);
+    messagesEl.appendChild(bubble);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return textEl;
+  }
+
   function setSending(sending) {
     sendBtn.disabled = sending;
     inputEl.disabled = sending;
@@ -1726,7 +1753,10 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec) {
     const userMsg = { role: 'user', text: mode === 'apply' ? `[execute plan] ${text}` : text, mode, at: new Date().toISOString() };
     messages.push(userMsg);
     renderMessages();
-    const assistantMsg = { role: 'assistant', text: '', mode, at: new Date().toISOString() };
+    // Live streaming bubble — append chunks incrementally so the reply shows in
+    // real time (mobile-safe), instead of only appearing once the turn ends.
+    const textEl = appendLiveAssistant(mode);
+    let raw = '';
     let finalStatus = null;
     try {
       const resp = await fetch(`/api/repos/${enc(repoName)}/issues/${issueNumber}/prs/${prNumber}/chat`, {
@@ -1734,19 +1764,21 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec) {
         body: JSON.stringify({ message: text, mode }),
       });
       if (!resp.ok || !resp.body) {
-        assistantMsg.text = `[error] HTTP ${resp.status}`;
-        messages.push(assistantMsg); renderMessages(); setSending(false); return;
+        raw = `[error] HTTP ${resp.status}`;
+        textEl.appendChild(document.createTextNode(raw));
+        messages.push({ role: 'assistant', text: raw, mode, at: new Date().toISOString() });
+        setSending(false); return;
       }
       await pumpSSE(resp, {
-        onChunk: (t) => { assistantMsg.text += t; renderMessages(); },
-        onError: (m) => { assistantMsg.text += `\n[error] ${m}`; },
+        onChunk: (t) => { raw += t; textEl.appendChild(document.createTextNode(t)); messagesEl.scrollTop = messagesEl.scrollHeight; },
+        onError: (m) => { const s = `\n[error] ${m}`; raw += s; textEl.appendChild(document.createTextNode(s)); },
         onResult: (d) => { finalStatus = d.status; },
       });
     } catch (e) {
-      assistantMsg.text += `\n[connection dropped: ${e.message}]`;
+      const s = `\n[connection dropped: ${e.message}]`;
+      raw += s; textEl.appendChild(document.createTextNode(s));
     }
-    messages.push(assistantMsg);
-    renderMessages();
+    messages.push({ role: 'assistant', text: raw, mode, at: new Date().toISOString() });
     setSending(false);
 
     if (mode === 'plan' && finalStatus === 'success') {
@@ -1875,7 +1907,7 @@ function initAdminTerminal() {
   const abortBtn = document.getElementById('termAbort');
   const modeSel = document.getElementById('termMode');
   const statusEl = document.getElementById('termStatus');
-  const rootEl = document.getElementById('adminRoot');
+  const repoSel = document.getElementById('adminRepoSelect');
   const newBtn = document.getElementById('adminNew');
   const menuBtn = document.getElementById('adminMenuBtn');
   const historyMenu = document.getElementById('adminHistoryMenu');
@@ -1885,6 +1917,7 @@ function initAdminTerminal() {
   let activeTurn = null; // { turnId, asstBody, raw } while a turn streams/reconnects
 
   const LS_ADMIN_TURN = 'cc.adminActiveTurn';
+  const LS_ADMIN_REPO = 'cc.adminRepo';
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const makeTurnId = () =>
     (window.crypto && crypto.randomUUID)
@@ -1903,10 +1936,35 @@ function initAdminTerminal() {
     try { await fetch(`/api/admin/chat/${encodeURIComponent(t.turnId)}/cancel`, { method: 'POST' }); } catch { /* ignore */ }
   }
 
+  // Populate the repo picker from the same repos-under-REPOS_ROOT listing the
+  // Home tab uses, so the admin chat can be scoped to work directly inside one
+  // repo instead of only browsing the whole root read-only.
+  function setSelectedRepo(name) {
+    repoSel.value = name && [...repoSel.options].some((o) => o.value === name) ? name : '';
+    localStorage.setItem(LS_ADMIN_REPO, repoSel.value);
+  }
+
   fetch('/api/repos')
     .then((r) => r.json())
-    .then((d) => { if (d && d.root) rootEl.textContent = `root: ${d.root}`; })
+    .then((d) => {
+      const repos = (d && d.repos) || [];
+      const saved = localStorage.getItem(LS_ADMIN_REPO) || '';
+      repos.forEach((r) => {
+        const opt = document.createElement('option');
+        opt.value = r.name;
+        opt.textContent = r.name;
+        repoSel.appendChild(opt);
+      });
+      setSelectedRepo(saved);
+      // Reflect a restored repo selection in the still-empty placeholder (the
+      // static HTML default assumes "All repos") if nothing has loaded yet.
+      if (!sessionId && !activeTurn && logEl.querySelector('.term-empty')) {
+        logEl.innerHTML = `<div class="term-empty">${emptyStateHtml()}</div>`;
+      }
+    })
     .catch(() => {});
+
+  repoSel.addEventListener('change', () => setSelectedRepo(repoSel.value));
 
   function clearEmpty() {
     const empty = logEl.querySelector('.term-empty');
@@ -1945,7 +2003,7 @@ function initAdminTerminal() {
         item.className = `admin-history-item${c.sessionId === sessionId ? ' active' : ''}`;
         item.innerHTML =
           `<span class="ahi-main"><span class="ahi-title"></span>` +
-          `<div class="ahi-meta">${c.messageCount} msgs · ${timeAgo(c.updatedAt)}</div></span>` +
+          `<div class="ahi-meta">${c.repo ? `📁 ${escape(c.repo)} · ` : ''}${c.messageCount} msgs · ${timeAgo(c.updatedAt)}</div></span>` +
           `<button class="ahi-del" title="Delete conversation" aria-label="Delete conversation">🗑</button>`;
         item.querySelector('.ahi-title').textContent = c.title || '(untitled)';
         item.addEventListener('click', (e) => {
@@ -1985,6 +2043,7 @@ function initAdminTerminal() {
       if (!r.ok) return;
       const chat = await r.json();
       sessionId = chat.sessionId;
+      setSelectedRepo(chat.repo || '');
       logEl.innerHTML = '';
       (chat.messages || []).forEach((m) => {
         const body = addMessage(m.role === 'user' ? 'user' : 'assistant');
@@ -2001,10 +2060,16 @@ function initAdminTerminal() {
     }
   }
 
+  function emptyStateHtml() {
+    return repoSel.value
+      ? `New Copilot CLI session working in <b>${escape(repoSel.value)}</b>.<br>Ask anything — it can read and edit files in that repo.`
+      : 'New Copilot CLI session rooted at your repos folder.<br>Ask anything — it can see every repo at once.';
+  }
+
   function startNewConversation() {
     cancelActiveTurn();
     sessionId = null;
-    logEl.innerHTML = '<div class="term-empty">New Copilot CLI session rooted at your repos folder.<br>Ask anything — it can see every repo at once.</div>';
+    logEl.innerHTML = `<div class="term-empty">${emptyStateHtml()}</div>`;
     statusEl.textContent = '';
   }
 
@@ -2036,17 +2101,32 @@ function initAdminTerminal() {
     sendBtn.disabled = sending;
     inputEl.disabled = sending;
     modeSel.disabled = sending;
+    repoSel.disabled = sending;
     abortBtn.hidden = !sending;
     statusEl.textContent = sending ? 'Copilot is thinking…' : '';
   }
 
-  function renderActive() {
-    if (!activeTurn) return;
-    // Footer is parsed out here too, so the raw "Resume …" text never flashes
-    // in the log — the chip strip is shown once the turn finishes.
-    const { html } = renderAssistant(activeTurn.raw);
-    activeTurn.asstBody.innerHTML = html + '<span class="tmsg-cursor"></span>';
+  // Stream chunks in by appending text nodes (the Create-PR log approach),
+  // NOT by re-rendering the whole reply per chunk — repeated innerHTML rewrites
+  // during a streaming fetch read silently fail to repaint on mobile Safari.
+  // The tidy markdown + chip render happens once at the end in finishTurn.
+  function appendActiveChunk(t, streamName) {
+    if (!activeTurn || !activeTurn.streamEl) return;
+    activeTurn.raw += t;
+    const node = document.createElement('span');
+    if (streamName === 'stderr') node.className = 'dim';
+    node.textContent = t;
+    activeTurn.streamEl.appendChild(node);
     logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // On a job re-subscribe the server replays the whole transcript as one chunk
+  // preceded by meta{replay:true}; clear both the buffer and the DOM so it
+  // isn't doubled.
+  function resetActiveStream() {
+    if (!activeTurn || !activeTurn.streamEl) return;
+    activeTurn.raw = '';
+    activeTurn.streamEl.textContent = '';
   }
 
   function finishTurn(status, finalSession, note) {
@@ -2073,9 +2153,9 @@ function initAdminTerminal() {
     let finalSession = null, status = null, gone = false;
     try {
       await pumpSSE(resp, {
-        onMeta: (m) => { if (m && m.replay && activeTurn) activeTurn.raw = ''; },
-        onChunk: (t) => { if (!activeTurn) return; activeTurn.raw += t; renderActive(); },
-        onError: (m) => { if (activeTurn) activeTurn.raw += `\n[error] ${m}`; },
+        onMeta: (m) => { if (m && m.replay) resetActiveStream(); },
+        onChunk: (t, s) => appendActiveChunk(t, s),
+        onError: (m) => appendActiveChunk(`\n[error] ${m}`, 'stderr'),
         onResult: (d) => {
           if (!d) return;
           if (d.sessionId) finalSession = d.sessionId;
@@ -2115,10 +2195,10 @@ function initAdminTerminal() {
     const userBody = addMessage('user');
     userBody.textContent = text;
     const asstBody = addMessage('assistant');
-    asstBody.innerHTML = '<span class="tmsg-cursor"></span>';
+    asstBody.innerHTML = '<span class="tmsg-stream"></span><span class="tmsg-cursor"></span>';
 
     const turnId = makeTurnId();
-    activeTurn = { turnId, asstBody, raw: '' };
+    activeTurn = { turnId, asstBody, raw: '', streamEl: asstBody.querySelector('.tmsg-stream') };
     localStorage.setItem(LS_ADMIN_TURN, JSON.stringify({ turnId, sessionId, text }));
     setSending(true);
 
@@ -2127,18 +2207,17 @@ function initAdminTerminal() {
       resp = await fetch('/api/admin/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, mode: modeSel.value, sessionId, turnId }),
+        body: JSON.stringify({ message: text, mode: modeSel.value, sessionId, turnId, repo: repoSel.value }),
       });
     } catch {
       // Couldn't reach the server to start — the job may still have launched,
       // so try reconnecting rather than giving up.
-      activeTurn.raw += '\n[connection dropped — reconnecting…]';
-      renderActive();
+      appendActiveChunk('\n[connection dropped — reconnecting…]', 'stderr');
       return reconnectLoop();
     }
     if (!resp.ok || !resp.body) { finishTurn('failed', null, `HTTP ${resp.status}`); return; }
     if (!(await consumeStream(resp))) {
-      if (activeTurn) { activeTurn.raw += '\n[connection dropped — reconnecting…]'; renderActive(); }
+      if (activeTurn) appendActiveChunk('\n[connection dropped — reconnecting…]', 'stderr');
       await reconnectLoop();
     }
   }
@@ -2153,8 +2232,8 @@ function initAdminTerminal() {
     clearEmpty();
     if (saved.text) { const ub = addMessage('user'); ub.textContent = saved.text; }
     const asstBody = addMessage('assistant');
-    asstBody.innerHTML = '<span class="tmsg-cursor"></span>';
-    activeTurn = { turnId: saved.turnId, asstBody, raw: '' };
+    asstBody.innerHTML = '<span class="tmsg-stream"></span><span class="tmsg-cursor"></span>';
+    activeTurn = { turnId: saved.turnId, asstBody, raw: '', streamEl: asstBody.querySelector('.tmsg-stream') };
     setSending(true);
     let resp;
     try { resp = await fetch(`/api/admin/chat/${encodeURIComponent(saved.turnId)}/stream`); }
@@ -2169,8 +2248,7 @@ function initAdminTerminal() {
   });
   abortBtn.addEventListener('click', async () => {
     if (!activeTurn) return;
-    activeTurn.raw += '\n[abort requested…]';
-    renderActive();
+    appendActiveChunk('\n[abort requested…]', 'stderr');
     try { await fetch(`/api/admin/chat/${encodeURIComponent(activeTurn.turnId)}/cancel`, { method: 'POST' }); } catch { /* ignore */ }
     // The job then emits result(aborted)+done, which the live stream turns into
     // a finished turn.

@@ -5,12 +5,33 @@ your LAN/VPN. From your phone you can:
 
 - browse the git repos under an **authorized root** (`REPOS_ROOT`), with a
   per-device **repo filter** (checkbox show/hide, persisted in `localStorage`)
-- expand a repo to see its **GitHub issues** (fetched via `gh`, cached, refreshable)
-- **Create PR** — Copilot implements the issue end-to-end and opens a PR
-- **Deploy per PR** — every PR gets its own **Deploy** button; ship it to TestFlight
-  via the `testflight-deploy` skill
-- **Abort** a running Create PR or Deploy (kills the whole process group); aborted
-  runs get their own state and can be re-run after a confirm
+- expand a repo to see its **GitHub issues** (fetched via `gh`, cached, refreshable);
+  every expand also **auto-discovers PRs** referencing those issues (one `gh pr
+  list` call, matched in-process) so the pipeline is populated without a manual
+  step — a per-issue **↻ PRs** button remains for an explicit, always-live re-check
+- run every PR through a **3-stage pipeline — Create PR → Deploy → Merge** — shown
+  as one row per PR with a colored pill per stage (blue = planned, yellow =
+  running, green = done, red = failed), each with its own collapsible log
+- **Deploy is per-repo configurable**: iOS repos ship to TestFlight via the
+  `testflight-deploy` skill; other repos (cloud-copilot itself included) just run
+  a shell command you define (e.g. restart the local service) — see
+  [`.cloud-copilot.json`](#per-repo-deploy-config-cloud-copilotjson) below
+- **Merge** (`gh pr merge --merge --delete-branch`) unlocks once Deploy succeeds;
+  you can still force it early behind a confirm if you're confident
+- **click a PR** to open its own **detail page** (`#/pr/<repo>/<issue>/<pr>`,
+  bookmarkable/shareable) — same pipeline, plus a **Deploy History** list (every
+  build number/version/status the PR has ever shipped, not just the latest) and
+  a **chat panel** to keep iterating on the PR's code — see
+  [Chat with a PR](#chat-with-a-pr-plan--apply) below
+- **pin any issue** (📌, next to its GitHub link) to a "Pinned" section at the very
+  top of the page — persisted per-device in `localStorage`, no server state; a
+  pinned card is a fully live clone of the issue (same Create PR / Deploy /
+  Merge pipeline), just easier to find across repos
+- a **floating "⏩ Depth" control** (bottom-right, stays put while you scroll) lets
+  you pick how far a run auto-advances — Create PR only, through Deploy, or all
+  the way through Merge — so one click on Create PR can walk the whole pipeline
+- **Abort** a running Create PR, Deploy, or Merge (kills the whole process group);
+  aborted runs get their own state and can be re-run after a confirm
 - watch every run **stream live** in **collapsible per-action logs** (hidden by
   default), with success/failure shown **on the issue** and lifecycle timing cached
 - **one PR creation per repo at a time** — other issues in that repo are greyed out
@@ -29,25 +50,105 @@ the Issues + PR flow through `gh` + `copilot -p`.
 
 Per-issue state is a small machine persisted to `data/state.json`. Each issue keeps
 one **work** (Create PR) record plus a map of **PRs**, and every PR carries its own
-**deploy** lifecycle (status, start/finish, `durationMs`, transcript):
+**deploy** and **merge** lifecycle (status, start/finish, `durationMs`, transcript):
 
-| Action     | idle        | running          | success         | failed / aborted                |
-| ---------- | ----------- | ---------------- | --------------- | ------------------------------- |
-| Create PR  | `Create PR` | `Creating PR…` 🟡 | issue turns 🟢  | `PR failed` 🔴 / `PR aborted`   |
-| Deploy     | `Deploy`    | `Deploying…` 🟡   | `Deployed` 🟢   | `Deploy failed` 🔴 / `Aborted`  |
+| Stage      | idle              | running           | success         | failed / aborted                |
+| ---------- | ----------------- | ----------------- | --------------- | -------------------------------- |
+| Create PR  | `Create PR` 🔵    | `Creating PR…` 🟡  | issue turns 🟢  | `PR failed` 🔴 / `PR aborted`    |
+| Deploy     | `Deploy` 🔵       | `Deploying…` 🟡    | `Deployed` 🟢   | `Deploy failed` 🔴 / `Aborted`   |
+| Merge      | `🔒 Merge` 🔵 (dim until Deploy succeeds) | `Merging…` 🟡 | `Merged` 🟢 | `Merge failed` 🔴 / `Aborted` |
+
+Each PR renders as one row across all three stages — a **Create PR | Deploy |
+Merge** pipeline, matching the state machine above: blue = planned, yellow =
+running, green = done, red = failed.
 
 - **Success shows on the issue**, not the button: on a created PR the issue gets a
   green border + green `#number`, and the **Create PR** button stays "Create PR".
 - **Per-action logs** are hidden by default. A small `▤` toggle by **Create PR**
-  reveals the creation log; each PR row has `▤ logs` toggles for its deploy log.
-- **Abort**: while running, Create PR and each Deploy show a red `⨯ Abort` button.
-  Confirming signals the whole process group (copilot + fastlane/xcodebuild), so
+  reveals the creation log; each PR row has `▤` toggles for its Deploy and Merge logs.
+- **Abort**: while running, Create PR / Deploy / Merge each show a red `⨯` button.
+  Confirming signals the whole process group (copilot + fastlane/xcodebuild/gh), so
   subprocesses die too; the run ends in an `aborted` state you can re-run.
 - **Re-deploy**: clicking Deploy on a finished/failed/aborted PR asks to confirm
-  before starting a new TestFlight build.
-- Success/failure is decided by the CLI **exit code** plus detection: a PR URL in the
-  transcript (fallback: `gh pr list` referencing the issue) for Create PR; a fastlane/
-  TestFlight success marker for Deploy.
+  before starting a new run.
+- **Merge is gated on Deploy succeeding** — the Merge cell stays a dimmed, locked
+  `🔒 Merge` until then. You can still click it early; it asks you to confirm a
+  **force-merge** that skips the gate.
+- Success/failure is decided by the CLI/command **exit code** plus detection: a PR
+  URL in the transcript (fallback: `gh pr list` referencing the issue) for Create
+  PR; a fastlane/TestFlight success marker for an `ios-testflight` Deploy (plain
+  exit code for a `shell` Deploy); `gh pr merge`'s own exit code for Merge.
+- **Build number / version for `ios-testflight` deploys are never guessed from
+  text.** Before invoking Copilot, the server checks out the PR's branch and
+  computes `buildNumber = git rev-list --count HEAD` (the same value `fastlane
+  beta` itself defaults to) and reads `version` straight from the Xcode
+  project's own `MARKETING_VERSION`. Both are then **pinned explicitly** —
+  `fastlane beta build:<n> version:<v>` — so what cloud-copilot records and
+  displays is guaranteed to match what was actually built, not inferred
+  after the fact from the agent's free-form report.
+
+### Auto-run depth
+
+A floating **⏩ Depth** button (top-right, fixed — stays visible while you scroll)
+opens a drawer with three options for how far a run should auto-advance once you
+click **Create PR**:
+
+| Depth | Behavior |
+| ----- | -------- |
+| **Create PR only** (default) | Stop once the PR is created — today's original behavior. |
+| **…through Deploy** | After Create PR succeeds, automatically run Deploy. |
+| **…through Merge** | Keep going through Deploy, then Merge — no further clicks. |
+
+A stage only advances on **success**; a failure or abort at any point simply stops
+the chain. The choice is saved per-device in `localStorage`.
+
+### Per-repo deploy config (`.cloud-copilot.json`)
+
+Deploy is dispatched per-repo. Drop a `.cloud-copilot.json` at a repo's root:
+
+```json
+{ "deploy": { "type": "ios-testflight" } }
+```
+```json
+{ "deploy": { "type": "shell", "command": "npm run cc:restart" } }
+```
+
+- **`ios-testflight`** — runs Copilot with the `testflight-deploy` skill, exactly
+  like the original hardcoded flow. If no config file is present, a repo with an
+  `.xcodeproj`/`.xcworkspace` at its root is auto-detected as `ios-testflight`.
+- **`shell`** — checks out the PR's branch, then runs `command` directly (no
+  agent involved — it's deterministic). cloud-copilot dogfoods this on itself: see
+  its own [`.cloud-copilot.json`](.cloud-copilot.json) and the `cc:restart` script
+  in [`package.json`](package.json), which kills the running `node server.js` and
+  starts a fresh one — the same restart done by hand during development.
+- No config and no Xcode project detected → Deploy is disabled with a message
+  pointing here. cloud-copilot never guesses a shell command for an unconfigured
+  repo.
+
+### Chat with a PR (plan → apply)
+
+Click any PR to open its detail page (`#/pr/<repo>/<issue>/<pr>`). Below the same
+pipeline you get:
+
+- **Deploy History** — every past deploy attempt for that PR (build number,
+  version, status, timestamp), archived automatically whenever a new Deploy
+  starts. The pipeline above only ever shows the *current* attempt; this list is
+  where the full history lives.
+- **Chat with this PR** — describe a change in plain text. It's a **two-turn**
+  flow:
+  1. **Send (plan)** resumes the PR's own conversation (or, on the very first
+     turn, the original Create-PR session, so it has full context) and asks
+     Copilot to read the code and propose a plan **without touching any
+     files** — enforced by running with the same restrictive `default`
+     approval mode as read-only actions, not just prompted.
+  2. Once a plan comes back, the button becomes **Execute this plan** — this
+     resumes the *same* session and actually implements it: commits and pushes
+     **to the existing PR branch** (no new PR, no force-push), so PR history on
+     GitHub is just new commits, same as pushing manually.
+  - A successful "Execute this plan" **resets Deploy and re-locks Merge** for
+    that PR (the old build no longer reflects the new code) — the just-applied
+    turn's page reload shows this immediately, and the previous Deploy attempt
+    is preserved in Deploy History rather than lost.
 
 ---
 
@@ -56,13 +157,17 @@ one **work** (Create PR) record plus a map of **PRs**, and every PR carries its 
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
 | GET  | `/api/repos` | List git repos under `REPOS_ROOT` (with remotes). |
-| GET  | `/api/repos/:name/issues[?refresh=1]` | List open issues (cached 5 min) merged with local status; includes `activeWorkIssues` (repo lock). |
-| GET  | `/api/repos/:name/issues/:n/record` | Full stored record (work + per-PR deploy, transcripts, `live` flags). |
-| GET  | `/api/repos/:name/issues/:n/prs` | Refresh the PR list for an issue from GitHub. |
+| GET  | `/api/repos/:name/issues[?refresh=1]` | List open issues (cached 5 min) merged with local status; includes `activeWorkIssues` (repo lock). Also auto-discovers and persists PRs referencing these issues (one whole-repo `gh pr list`, cached 5 min, `?refresh=1` bypasses it too). |
+| GET  | `/api/repos/:name/issues/:n/record` | Full stored record (work + per-PR deploy/merge, transcripts, `live` flags). |
+| GET  | `/api/repos/:name/issues/:n/prs` | Force-refresh the PR list for one issue from GitHub — always live, bypasses the whole-repo PR cache. |
 | POST | `/api/repos/:name/issues/:n/work` | **Create PR** — SSE stream. Body: `{ "mode": "allow-all" }`. |
 | POST | `/api/repos/:name/issues/:n/work/cancel` | Abort the running PR creation. |
-| POST | `/api/repos/:name/issues/:n/deploy/:pr` | **Deploy a specific PR** — SSE stream. |
+| POST | `/api/repos/:name/issues/:n/deploy/:pr` | **Deploy a specific PR** — SSE stream. Dispatched per the repo's `.cloud-copilot.json`. |
 | POST | `/api/repos/:name/issues/:n/deploy/:pr/cancel` | Abort the running deploy for that PR. |
+| POST | `/api/repos/:name/issues/:n/merge/:pr` | **Merge a specific PR** — SSE stream. Body: `{ "force": false }`. Blocked unless Deploy succeeded, unless `force: true`. |
+| POST | `/api/repos/:name/issues/:n/merge/:pr/cancel` | Abort the running merge for that PR. |
+| POST | `/api/repos/:name/issues/:n/prs/:pr/chat` | **Chat with a PR** — SSE stream. Body: `{ "message": "...", "mode": "plan"\|"apply" }`. `plan` is read-only (default approval flags); `apply` implements + pushes to the existing branch and resets Deploy/Merge on success. |
+| POST | `/api/repos/:name/issues/:n/prs/:pr/chat/cancel` | Abort the running chat turn for that PR. |
 | POST | `/api/run` | Simple one-shot demo (prompt + optional `sessionId` resume). |
 
 ### SSE events
@@ -70,7 +175,7 @@ one **work** (Create PR) record plus a map of **PRs**, and every PR carries its 
 `meta` (command) → `chunk` (`{stream,text}` streamed output) → `session`
 (`{sessionId}`) → `result` (`{action,status,prUrl?,prNumber?}`, where `status` is
 `success`/`failed`/`aborted`, or `blocked` when the repo lock rejects a second
-Create PR) → `done` (`{exitCode}`).
+Create PR, or Merge is attempted before Deploy has succeeded) → `done` (`{exitCode}`).
 
 ---
 
@@ -280,15 +385,17 @@ session). The "running mode" selector here controls *tool approval policy*, not 
 
 ```
 cloud-copilot/
-├── package.json        # express dependency, `npm start`
-├── server.js           # Express app: repos/issues/work/deploy routes + state machine
+├── package.json        # express dependency, `npm start`, `cc:restart` (self deploy)
+├── .cloud-copilot.json # this repo's own deploy config (shell -> cc:restart)
+├── server.js           # Express app: repos/issues/work/deploy/merge routes + state machine
 ├── lib/
-│   ├── gh.js           # enumerate repos, list issues/PRs via `gh` (cached)
+│   ├── gh.js           # enumerate repos, list issues/PRs/single-PR via `gh` (cached)
 │   ├── store.js        # per-issue status persisted to data/state.json
 │   ├── jobs.js         # durable job manager: child outlives the browser connection
-│   └── runner.js       # spawn copilot, stream SSE, capture transcript + session id
+│   ├── runner.js       # spawn copilot, stream SSE, capture transcript + session id
+│   └── repoConfig.js   # loads a repo's .cloud-copilot.json (or auto-detects iOS)
 ├── public/
-│   └── index.html      # repos → issues → Create PR / Deploy console
+│   └── index.html      # repos → issues → Create PR / Deploy / Merge pipeline console
 ├── data/               # state.json (gitignored)
 ├── .gitignore
 └── README.md

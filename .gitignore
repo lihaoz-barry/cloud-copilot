@@ -4,6 +4,7 @@ npm-debug.log*
 .env
 data/
 server.js.bak
+server.log
 
 # secrets / local deploy config — never commit
 *.p8

@@ -170,6 +170,14 @@
       background: #8882; color: inherit; font-weight: 600; font-size: .78rem; flex: none;
     }
 
+    /* dismiss/hide icon — small & subtle, matches .ahi-del; red hint on hover */
+    .hidebtn {
+      cursor: pointer; font: inherit; border: none; border-radius: 8px;
+      padding: 4px 7px; font-size: .82rem; line-height: 1; background: transparent;
+      color: inherit; opacity: .5; flex: none; touch-action: manipulation;
+    }
+    .hidebtn:hover { opacity: 1; color: #dc2626; background: #dc262622; }
+
     /* pin-to-top toggle — sized for tapping, like the other icon buttons */
     .pinbtn {
       cursor: pointer; font: inherit; border: 1px solid #8884; border-radius: 9px;
@@ -790,11 +798,11 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         <span class="spacer"></span>
         <button class="pinbtn" title="Pin to top">📌</button>
         <a class="ghlink" target="_blank" rel="noopener">↗ GitHub</a>
+        <button class="hidebtn" title="Remove this issue from the list" aria-label="Remove this issue from the list">🗑</button>
       </div>
       <div class="issue-title">${escape(issue.title)}
         <div class="labels">${labels}</div>
       </div>
-      <button class="iconbtn hidebtn" title="Remove this issue from the list">🗑</button>
     </div>
     <div class="actions"></div>
     <div class="worklog panel"></div>

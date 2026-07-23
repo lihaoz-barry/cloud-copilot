@@ -887,6 +887,125 @@ app.post('/api/run', (req, res) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Admin terminal: a free-form Copilot CLI conversation rooted at REPOS_ROOT.
+//
+// Unlike the per-issue actions, this isn't tied to a repo/issue/PR — it's a
+// plain chat session with the local Copilot CLI whose working directory is the
+// authorized repos root, so it can see every repo at once. Each turn resumes
+// the previous session (via --resume) so the conversation carries context.
+// The chosen approval mode (bypass = --allow-all, granular, default) is applied
+// per turn. Streams over SSE; killing the browser connection kills the child.
+// ---------------------------------------------------------------------------
+// Each turn runs as a detached job keyed by a client-supplied `turnId`, so the
+// child process outlives the (fragile) mobile HTTP connection: if the phone
+// drops mid-answer the job keeps running server-side and the client can
+// re-subscribe (GET .../stream) to replay everything so far + resume live —
+// exactly like the Create PR log. Killing the browser only unsubscribes.
+const ADMIN_TURN_RE = /^[\w-]{6,64}$/;
+
+app.post('/api/admin/chat', (req, res) => {
+  const turnId = typeof req.body?.turnId === 'string' && ADMIN_TURN_RE.test(req.body.turnId)
+    ? req.body.turnId
+    : null;
+  if (!turnId) return res.status(400).json({ error: 'turnId is required' });
+  const key = `admin:${turnId}`;
+
+  writeSseHead(res);
+
+  // Reconnect: if this turn's job is already running (duplicate POST after a
+  // flaky send), just attach to it instead of starting a second copilot.
+  const existing = jobs.getJob(key);
+  if (existing) {
+    jobs.subscribe(existing, res);
+    return;
+  }
+
+  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  if (!message) return sendSseBlocked(res, { action: 'admin', status: 'failed', message: 'message is required' });
+
+  // "bypass" is the UI label for --allow-all (unattended, no approval prompts).
+  const rawMode = req.body?.mode === 'bypass' ? 'allow-all' : req.body?.mode;
+  const mode = ['default', 'allow-all', 'granular'].includes(rawMode) ? rawMode : 'default';
+
+  const sessionId =
+    typeof req.body?.sessionId === 'string' && /^[0-9a-fA-F-]{8,}$/.test(req.body.sessionId)
+      ? req.body.sessionId
+      : null;
+
+  const args = [];
+  if (sessionId) args.push(`--resume=${sessionId}`);
+  args.push('-p', message, ...approvalFlags(mode));
+
+  const job = jobs.startJob(key, {
+    bin: COPILOT_BIN,
+    args,
+    cwd: REPOS_ROOT,
+    meta: { action: 'admin', turnId },
+    onDone: async (j) => {
+      // The job manager captures the --resume=<id> session id from the stream.
+      const sid = j.sessionId;
+      if (sid) store.appendAdminTurn(sid, { userText: message, assistantText: j.conversation, mode });
+      return {
+        action: 'admin',
+        turnId,
+        status: j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed',
+        sessionId: sid,
+      };
+    },
+  });
+
+  jobs.subscribe(job, res);
+});
+
+// Re-subscribe to an in-flight (or recently finished, within the job manager's
+// retention window) admin turn — replays the full transcript so far, then
+// streams live to completion. Powers reconnect after a dropped connection.
+app.get('/api/admin/chat/:turnId/stream', (req, res) => {
+  const turnId = req.params.turnId;
+  writeSseHead(res);
+  if (!ADMIN_TURN_RE.test(turnId)) {
+    return sendSseBlocked(res, { action: 'admin', turnId, status: 'failed', message: 'invalid turnId' });
+  }
+  const job = jobs.getJob(`admin:${turnId}`);
+  if (!job) {
+    // Job already reaped (or never existed) — tell the client it's gone so it
+    // can fall back to loading the persisted transcript from history.
+    res.write(`event: result\n`);
+    res.write(`data: ${JSON.stringify({ action: 'admin', turnId, status: 'gone' })}\n\n`);
+    res.write(`event: done\n`);
+    res.write(`data: ${JSON.stringify({ exitCode: null, gone: true })}\n\n`);
+    return res.end();
+  }
+  jobs.subscribe(job, res);
+});
+
+// Abort a running admin turn (SIGTERM the whole process group).
+app.post('/api/admin/chat/:turnId/cancel', (req, res) => {
+  const cancelled = jobs.cancelJob(`admin:${req.params.turnId}`);
+  res.json({ cancelled });
+});
+
+// List past admin terminal conversations (title, timestamps, message count),
+// newest first — powers the history menu in the Admin Terminal page.
+app.get('/api/admin/chats', (req, res) => {
+  res.json({ chats: store.listAdminChats() });
+});
+
+// Full transcript for one past admin conversation, so the UI can replay it
+// and resume the session (via --resume=<id>) on the next message.
+app.get('/api/admin/chats/:sessionId', (req, res) => {
+  const chat = store.getAdminChat(req.params.sessionId);
+  if (!chat) return res.status(404).json({ error: 'conversation not found' });
+  res.json(chat);
+});
+
+app.delete('/api/admin/chats/:sessionId', (req, res) => {
+  const existed = store.deleteAdminChat(req.params.sessionId);
+  if (!existed) return res.status(404).json({ error: 'conversation not found' });
+  res.json({ ok: true });
+});
+
 app.listen(PORT, HOST, () => {
   console.log(`cloud-copilot running at http://${HOST}:${PORT}`);
   console.log(`Authorized repos root: ${REPOS_ROOT}`);

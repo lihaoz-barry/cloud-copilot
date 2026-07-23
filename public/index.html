@@ -272,9 +272,153 @@
 
     .pritem { display: flex; flex-direction: column; gap: 6px; }
     .prlog { margin-top: 0; }
+
+    /* ---- floating top nav switcher (Home / Admin / TestFlight) ------------ */
+    body { padding-top: 60px; }
+    .navbar {
+      position: fixed; top: 10px; left: 50%; transform: translateX(-50%); z-index: 60;
+      display: flex; gap: 4px; padding: 4px; border-radius: 999px;
+      background: color-mix(in srgb, Canvas 82%, transparent);
+      backdrop-filter: saturate(1.6) blur(12px); -webkit-backdrop-filter: saturate(1.6) blur(12px);
+      border: 1px solid #8884; box-shadow: 0 6px 24px #0005;
+    }
+    .nav-tab {
+      background: transparent; color: inherit; border: none; cursor: pointer;
+      font: inherit; font-weight: 600; font-size: .82rem; padding: 7px 14px; border-radius: 999px;
+      opacity: .6; white-space: nowrap; touch-action: manipulation;
+    }
+    .nav-tab:hover { opacity: .85; }
+    .nav-tab.active { opacity: 1; background: #2563eb; color: #fff; }
+
+    /* ---- Admin terminal page --------------------------------------------- */
+    #adminView { max-width: 860px; margin: 0 auto; padding: 8px 14px 90px; }
+    .admin-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+    .admin-head h1 { font-size: 1.2rem; margin: 0; }
+    .admin-root {
+      font-family: ui-monospace, Menlo, monospace; font-size: .74rem; color: #888;
+      background: #8881; padding: 3px 8px; border-radius: 8px; word-break: break-all;
+    }
+    .admin-head .spacer { flex: 1; }
+    .term {
+      border: 1px solid #8883; border-radius: 14px; overflow: hidden;
+      display: flex; flex-direction: column; background: #0b0b0e;
+      height: calc(100vh - 200px); min-height: 340px;
+    }
+    .term-log {
+      flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px;
+    }
+    .term-empty { color: #6b7280; font-size: .84rem; margin: auto; text-align: center; padding: 20px; }
+    .tmsg { display: flex; flex-direction: column; gap: 4px; max-width: 92%; }
+    .tmsg.user { align-self: flex-end; align-items: flex-end; }
+    .tmsg.assistant { align-self: flex-start; }
+    .tmsg-role {
+      font-size: .66rem; text-transform: uppercase; letter-spacing: .04em; color: #6b7280; font-weight: 700;
+    }
+    .tmsg-body {
+      font-size: .82rem; line-height: 1.5; border-radius: 12px; padding: 9px 12px; word-break: break-word;
+    }
+    .tmsg.user .tmsg-body { background: #2563eb; color: #fff; }
+    .tmsg.assistant .tmsg-body { background: #17171c; color: #e6e6e6; border: 1px solid #ffffff12; }
+    .tmsg-body p { margin: 0 0 8px; }
+    .tmsg-body p:last-child { margin-bottom: 0; }
+    .tmsg-body pre {
+      background: #05050799; border: 1px solid #ffffff14; border-radius: 8px; padding: 10px 12px;
+      overflow-x: auto; margin: 8px 0; font-family: ui-monospace, Menlo, monospace; font-size: .76rem;
+    }
+    .tmsg-body code {
+      font-family: ui-monospace, Menlo, monospace; font-size: .78em;
+      background: #ffffff1a; padding: 1px 5px; border-radius: 5px;
+    }
+    .tmsg-body pre code { background: none; padding: 0; }
+    .tmsg-body strong { font-weight: 700; }
+    .tmsg-cursor { display: inline-block; width: 7px; height: 1em; background: #6ee787; vertical-align: -2px; animation: blink 1s steps(2) infinite; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+    /* Compact summary strip parsed from the CLI's end-of-turn footer. */
+    .tmsg-meta {
+      display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; padding-top: 7px;
+      border-top: 1px solid #ffffff10;
+    }
+    .tmsg-meta .mchip {
+      font-size: .64rem; color: #8b909a; background: #ffffff0a; border-radius: 6px;
+      padding: 2px 7px; font-family: ui-monospace, Menlo, monospace; white-space: nowrap;
+    }
+    .tmsg-meta .mchip-diff { color: #6ee787; background: #6ee78714; }
+    .term-inputbar {
+      display: flex; flex-direction: column; gap: 8px; padding: 10px; border-top: 1px solid #ffffff12;
+      background: #101014;
+    }
+    .term-input {
+      /* 16px min: iOS Safari auto-zooms the whole page when a focused form
+         control's font-size is < 16px. Keeping it at 16px avoids that jarring
+         zoom while leaving pinch-zoom fully available. */
+      width: 100%; font: inherit; font-size: 16px; padding: 10px 12px; border-radius: 10px;
+      border: 1px solid #ffffff1f; background: #05050799; color: #e6e6e6; resize: vertical; min-height: 46px;
+      font-family: ui-monospace, Menlo, monospace;
+    }
+    .term-input:focus { outline: none; border-color: #2563eb; }
+    .term-controls { display: flex; align-items: center; gap: 8px; }
+    .term-controls .spacer { flex: 1; }
+    .term-controls label { font-size: .74rem; color: #9aa0aa; display: flex; align-items: center; gap: 6px; }
+    .term-controls select {
+      /* 16px min — see .term-input note (prevents iOS focus auto-zoom). */
+      font-size: 16px; background: #05050799; color: #e6e6e6; border-color: #ffffff1f;
+    }
+    .term-send { padding: 8px 16px; }
+    .term-status { font-size: .72rem; color: #9aa0aa; padding: 0 2px; min-height: 1em; }
+    #adminMenuBtn { font-size: 1rem; line-height: 1; padding: 6px 10px; }
+    /* Compact history popover anchored right under the hamburger (no full-screen drawer). */
+    .admin-menu-wrap { position: relative; display: inline-flex; }
+    .admin-history-menu {
+      position: absolute; top: calc(100% + 6px); left: 0; z-index: 50;
+      width: min(300px, 82vw); max-height: 52vh; overflow: hidden;
+      background: #16161c; border: 1px solid #ffffff22; border-radius: 12px;
+      box-shadow: 0 14px 34px #000b; display: flex; flex-direction: column;
+      animation: ahmPop .14s ease-out;
+    }
+    .admin-history-menu[hidden] { display: none; }
+    @keyframes ahmPop { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+    .admin-history-menu .ahm-head {
+      font-size: .66rem; text-transform: uppercase; letter-spacing: .05em;
+      color: #7d828c; padding: 9px 12px 5px;
+    }
+    .admin-history-list { overflow-y: auto; padding: 4px 6px 6px; }
+    .admin-history-item {
+      display: flex; align-items: center; gap: 6px; width: 100%;
+      padding: 9px 10px; border-radius: 9px; margin-bottom: 4px;
+      background: transparent; border: 1px solid transparent; cursor: pointer;
+      text-align: left; color: #e6e6e6;
+    }
+    .admin-history-item:hover { background: #ffffff0d; }
+    .admin-history-item.active { background: #2563eb22; border-color: #2563eb55; }
+    .admin-history-item .ahi-main { flex: 1; min-width: 0; }
+    .admin-history-item .ahi-title {
+      font-size: .82rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .admin-history-item .ahi-meta { font-size: .68rem; color: #9aa0aa; margin-top: 2px; }
+    .admin-history-item .ahi-del {
+      opacity: 0; background: none; border: none; color: #9aa0aa; cursor: pointer;
+      font-size: .82rem; padding: 2px 5px; border-radius: 6px;
+    }
+    .admin-history-item:hover .ahi-del { opacity: 1; }
+    .admin-history-item .ahi-del:hover { color: #f87171; background: #ffffff12; }
+
+    /* ---- TestFlight placeholder page -------------------------------------- */
+    #testflightView { max-width: 860px; margin: 0 auto; padding: 8px 14px 60px; }
+    .placeholder {
+      border: 1px dashed #8884; border-radius: 14px; padding: 48px 24px; text-align: center;
+      color: #888; margin-top: 20px;
+    }
+    .placeholder .big { font-size: 2.4rem; margin-bottom: 8px; }
+    .placeholder h2 { margin: 0 0 6px; font-size: 1.1rem; color: inherit; }
   </style>
 </head>
 <body>
+  <nav class="navbar">
+    <button class="nav-tab active" data-tab="home">🏠 Home</button>
+    <button class="nav-tab" data-tab="admin">⌨️ Admin</button>
+    <button class="nav-tab" data-tab="testflight">✈️ TestFlight</button>
+  </nav>
+
   <div id="mainView">
     <div class="topbar">
       <div class="grow">
@@ -309,6 +453,53 @@
   </div>
 
   <div id="prDetailView" style="display:none"></div>
+
+  <div id="adminView" style="display:none">
+    <div class="admin-head">
+      <div class="admin-menu-wrap">
+        <button id="adminMenuBtn" class="ghost sm iconbtn" title="Conversation history" aria-label="Conversation history">☰</button>
+        <div id="adminHistoryMenu" class="admin-history-menu" hidden>
+          <div class="ahm-head">Conversation history</div>
+          <div id="adminHistoryList" class="admin-history-list">
+            <div class="term-empty">Loading…</div>
+          </div>
+        </div>
+      </div>
+      <h1>⌨️ Admin Terminal</h1>
+      <span class="admin-root" id="adminRoot">root: …</span>
+      <span class="spacer"></span>
+      <button id="adminNew" class="ghost sm">✚ New conversation</button>
+    </div>
+    <div class="term">
+      <div class="term-log" id="termLog">
+        <div class="term-empty">New Copilot CLI session rooted at your repos folder.<br>Ask anything — it can see every repo at once.</div>
+      </div>
+      <div class="term-inputbar">
+        <textarea id="termInput" class="term-input" rows="2" placeholder="Type a message…  (⌘/Ctrl+Enter to send)"></textarea>
+        <div class="term-controls">
+          <label>permission:
+            <select id="termMode">
+              <option value="bypass" selected>Bypass</option>
+              <option value="granular">Granular</option>
+              <option value="default">Default</option>
+            </select>
+          </label>
+          <span class="spacer"></span>
+          <button id="termAbort" class="iconbtn abortbtn" hidden>⨯ Abort</button>
+          <button id="termSend" class="term-send">Send</button>
+        </div>
+        <div class="term-status" id="termStatus"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="testflightView" style="display:none">
+    <div class="placeholder">
+      <div class="big">✈️</div>
+      <h2>TestFlight Builds</h2>
+      <p>Coming soon — this page will list your recent TestFlight builds and their status.</p>
+    </div>
+  </div>
 
   <button id="depthFab" class="ghost depth-fab" title="Set pipeline auto-run depth">⏩ Depth</button>
   <div id="depthScrim" class="depth-scrim"></div>
@@ -1358,6 +1549,31 @@ function escape(s) {
 // ---- PR detail page: hash route #/pr/<repo>/<issue>/<pr> -------------------
 const mainView = document.getElementById('mainView');
 const prDetailView = document.getElementById('prDetailView');
+const adminView = document.getElementById('adminView');
+const testflightView = document.getElementById('testflightView');
+
+// ---- top-level tab switcher (Home / Admin / TestFlight) --------------------
+let currentTab = 'home';
+function applyTab() {
+  document.querySelectorAll('.nav-tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === currentTab));
+  adminView.style.display = currentTab === 'admin' ? '' : 'none';
+  testflightView.style.display = currentTab === 'testflight' ? '' : 'none';
+  depthFab.style.display = currentTab === 'home' ? '' : 'none';
+  if (currentTab === 'home') {
+    route();
+  } else {
+    mainView.style.display = 'none';
+    prDetailView.style.display = 'none';
+  }
+}
+function setTab(tab) {
+  currentTab = tab;
+  applyTab();
+  if (tab === 'admin') initAdminTerminal();
+}
+document.querySelectorAll('.nav-tab').forEach((b) => {
+  b.addEventListener('click', () => setTab(b.dataset.tab));
+});
 
 function parseHash() {
   const m = decodeURIComponent(location.hash).match(/^#\/pr\/([^/]+)\/(\d+)\/(\d+)$/);
@@ -1366,6 +1582,7 @@ function parseHash() {
 }
 
 function route() {
+  if (currentTab !== 'home') return;
   const parsed = parseHash();
   if (parsed) {
     mainView.style.display = 'none';
@@ -1565,6 +1782,402 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec) {
   });
 
   return wrap;
+}
+
+// ---- Admin terminal: free-form Copilot CLI chat rooted at REPOS_ROOT -------
+function mdToHtml(text) {
+  // Escape first, then apply a tiny, safe subset of markdown. Order matters:
+  // fenced code blocks are pulled out before inline formatting so their
+  // contents aren't reinterpreted.
+  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const blocks = [];
+  let s = text.replace(/```(?:[\w-]*)\n?([\s\S]*?)```/g, (_, code) => {
+    blocks.push(`<pre><code>${esc(code.replace(/\n$/, ''))}</code></pre>`);
+    return `\u0000${blocks.length - 1}\u0000`;
+  });
+  s = esc(s);
+  s = s.replace(/`([^`\n]+)`/g, (_, c) => `<code>${c}</code>`);
+  s = s.replace(/\*\*([^*\n]+)\*\*/g, (_, b) => `<strong>${b}</strong>`);
+  // paragraphs / line breaks
+  s = s
+    .split(/\n{2,}/)
+    .map((para) => `<p>${para.replace(/\n/g, '<br>')}</p>`)
+    .join('');
+  s = s.replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[Number(i)]);
+  return s;
+}
+
+// The Copilot CLI appends a plain-text summary footer after each turn, e.g.
+//   Changes    +0 -0
+//   AI Credits 6.74 (5m 9s)
+//   Tokens     ↑ 49.8k (24.8k cached, 24.9k written) • ↓ 15
+//   Resume     copilot --resume=<id>
+// Split that block off the answer so we can render a tidy chip strip instead of
+// dumping raw internal noise (the Resume/session id and token counts) into chat.
+function splitCopilotFooter(raw) {
+  const text = String(raw || '');
+  // The Resume line is the footer's fingerprint — only strip when it's present.
+  if (!/^Resume\s+copilot\s+--resume=/m.test(text)) return { body: text, meta: null };
+  const isLabel = (l) => /^(Changes|AI Credits|Tokens|Resume)\b/.test(l.trim());
+  const lines = text.replace(/\s+$/, '').split('\n');
+  let i = lines.length - 1;
+  const footer = [];
+  while (i >= 0) {
+    const t = lines[i].trim();
+    if (t === '') { i--; continue; }
+    if (isLabel(lines[i])) { footer.unshift(t); i--; continue; }
+    break;
+  }
+  if (!footer.some((l) => /^Resume\b/.test(l))) return { body: text, meta: null };
+  const body = lines.slice(0, i + 1).join('\n').replace(/\s+$/, '');
+  const meta = {};
+  for (const l of footer) {
+    let m;
+    if ((m = l.match(/^Changes\s+(.+)$/))) meta.changes = m[1].trim();
+    else if ((m = l.match(/^AI Credits\s+([\d.]+)\s*(?:\(([^)]+)\))?/))) { meta.credits = m[1]; meta.duration = (m[2] || '').trim(); }
+    else if ((m = l.match(/^Tokens\s+(.+)$/))) meta.tokens = m[1].trim();
+    // Resume line: intentionally dropped.
+  }
+  return { body, meta };
+}
+
+// Build the compact chip strip. Keeps only what's useful (duration, credits,
+// non-zero file changes); tokens are folded into a tooltip; resume is dropped.
+function footerHtml(meta) {
+  if (!meta) return '';
+  const chips = [];
+  if (meta.duration) chips.push(`<span class="mchip" title="Response time">⏱ ${escape(meta.duration)}</span>`);
+  if (meta.credits) {
+    const tip = meta.tokens ? `Tokens ${meta.tokens}` : 'AI credits used this session';
+    chips.push(`<span class="mchip" title="${escape(tip)}">◆ ${escape(meta.credits)}</span>`);
+  }
+  if (meta.changes && !/^\+?0\s+-?0$/.test(meta.changes)) {
+    chips.push(`<span class="mchip mchip-diff" title="File changes">Δ ${escape(meta.changes)}</span>`);
+  }
+  return chips.length ? `<div class="tmsg-meta">${chips.join('')}</div>` : '';
+}
+
+// Render an assistant turn: clean answer body + chip strip, footer stripped.
+function renderAssistant(raw) {
+  const { body, meta } = splitCopilotFooter(raw);
+  const hasBody = body.trim().length > 0;
+  return { html: hasBody ? mdToHtml(body) : '', footer: footerHtml(meta), hasBody };
+}
+
+let adminInited = false;
+function initAdminTerminal() {
+  if (adminInited) return;
+  adminInited = true;
+
+  const logEl = document.getElementById('termLog');
+  const inputEl = document.getElementById('termInput');
+  const sendBtn = document.getElementById('termSend');
+  const abortBtn = document.getElementById('termAbort');
+  const modeSel = document.getElementById('termMode');
+  const statusEl = document.getElementById('termStatus');
+  const rootEl = document.getElementById('adminRoot');
+  const newBtn = document.getElementById('adminNew');
+  const menuBtn = document.getElementById('adminMenuBtn');
+  const historyMenu = document.getElementById('adminHistoryMenu');
+  const historyListEl = document.getElementById('adminHistoryList');
+
+  let sessionId = null;
+  let activeTurn = null; // { turnId, asstBody, raw } while a turn streams/reconnects
+
+  const LS_ADMIN_TURN = 'cc.adminActiveTurn';
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const makeTurnId = () =>
+    (window.crypto && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `t${Date.now()}${Math.random().toString(16).slice(2, 10)}`;
+
+  // Stop tracking (and kill) the in-flight turn — used when the user navigates
+  // to another conversation or starts a new one. The server job is cancelled so
+  // it doesn't keep running headless.
+  async function cancelActiveTurn() {
+    if (!activeTurn) return;
+    const t = activeTurn;
+    activeTurn = null;
+    localStorage.removeItem(LS_ADMIN_TURN);
+    setSending(false);
+    try { await fetch(`/api/admin/chat/${encodeURIComponent(t.turnId)}/cancel`, { method: 'POST' }); } catch { /* ignore */ }
+  }
+
+  fetch('/api/repos')
+    .then((r) => r.json())
+    .then((d) => { if (d && d.root) rootEl.textContent = `root: ${d.root}`; })
+    .catch(() => {});
+
+  function clearEmpty() {
+    const empty = logEl.querySelector('.term-empty');
+    if (empty) empty.remove();
+  }
+
+  function timeAgo(iso) {
+    if (!iso) return '';
+    const diffMs = Date.now() - new Date(iso).getTime();
+    const mins = Math.round(diffMs / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.round(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    const days = Math.round(hrs / 24);
+    return `${days}d ago`;
+  }
+
+  async function loadHistoryList() {
+    historyListEl.innerHTML = '<div class="term-empty">Loading…</div>';
+    try {
+      const ctrl = new AbortController();
+      const to = setTimeout(() => ctrl.abort(), 8000);
+      const r = await fetch('/api/admin/chats', { signal: ctrl.signal });
+      clearTimeout(to);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json();
+      const chats = (d && d.chats) || [];
+      if (!chats.length) {
+        historyListEl.innerHTML = '<div class="term-empty">No past conversations yet.</div>';
+        return;
+      }
+      historyListEl.innerHTML = '';
+      chats.forEach((c) => {
+        const item = document.createElement('button');
+        item.className = `admin-history-item${c.sessionId === sessionId ? ' active' : ''}`;
+        item.innerHTML =
+          `<span class="ahi-main"><span class="ahi-title"></span>` +
+          `<div class="ahi-meta">${c.messageCount} msgs · ${timeAgo(c.updatedAt)}</div></span>` +
+          `<button class="ahi-del" title="Delete conversation" aria-label="Delete conversation">🗑</button>`;
+        item.querySelector('.ahi-title').textContent = c.title || '(untitled)';
+        item.addEventListener('click', (e) => {
+          if (e.target.closest('.ahi-del')) return;
+          loadConversation(c.sessionId);
+        });
+        item.querySelector('.ahi-del').addEventListener('click', async (e) => {
+          e.stopPropagation();
+          await fetch(`/api/admin/chats/${encodeURIComponent(c.sessionId)}`, { method: 'DELETE' });
+          if (c.sessionId === sessionId) startNewConversation();
+          loadHistoryList();
+        });
+        historyListEl.appendChild(item);
+      });
+    } catch (e) {
+      const why = e && e.name === 'AbortError' ? 'timed out' : 'failed';
+      historyListEl.innerHTML = `<div class="term-empty">Couldn’t load history (${why}). Tap ☰ to retry.</div>`;
+    }
+  }
+
+  function openHistory() {
+    historyMenu.hidden = false;
+    loadHistoryList();
+  }
+  function closeHistory() {
+    historyMenu.hidden = true;
+  }
+  function toggleHistory() {
+    if (historyMenu.hidden) openHistory();
+    else closeHistory();
+  }
+
+  async function loadConversation(id) {
+    await cancelActiveTurn();
+    try {
+      const r = await fetch(`/api/admin/chats/${encodeURIComponent(id)}`);
+      if (!r.ok) return;
+      const chat = await r.json();
+      sessionId = chat.sessionId;
+      logEl.innerHTML = '';
+      (chat.messages || []).forEach((m) => {
+        const body = addMessage(m.role === 'user' ? 'user' : 'assistant');
+        if (m.role === 'user') body.textContent = m.text || '';
+        else { const { html, footer } = renderAssistant(m.text || ''); body.innerHTML = html + footer; }
+      });
+      if (!chat.messages || !chat.messages.length) {
+        logEl.innerHTML = '<div class="term-empty">This conversation has no messages yet.</div>';
+      }
+      statusEl.textContent = '';
+      closeHistory();
+    } catch {
+      /* ignore load failures — the drawer stays open so the user can retry */
+    }
+  }
+
+  function startNewConversation() {
+    cancelActiveTurn();
+    sessionId = null;
+    logEl.innerHTML = '<div class="term-empty">New Copilot CLI session rooted at your repos folder.<br>Ask anything — it can see every repo at once.</div>';
+    statusEl.textContent = '';
+  }
+
+  menuBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleHistory(); });
+  // Tap anywhere outside the popover (or press Esc) to dismiss it.
+  document.addEventListener('click', (e) => {
+    if (historyMenu.hidden) return;
+    if (historyMenu.contains(e.target) || e.target === menuBtn) return;
+    closeHistory();
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeHistory(); });
+
+  function addMessage(role) {
+    clearEmpty();
+    const wrap = document.createElement('div');
+    wrap.className = `tmsg ${role}`;
+    const roleEl = document.createElement('div');
+    roleEl.className = 'tmsg-role';
+    roleEl.textContent = role === 'user' ? 'You' : 'Copilot';
+    const body = document.createElement('div');
+    body.className = 'tmsg-body';
+    wrap.append(roleEl, body);
+    logEl.appendChild(wrap);
+    logEl.scrollTop = logEl.scrollHeight;
+    return body;
+  }
+
+  function setSending(sending) {
+    sendBtn.disabled = sending;
+    inputEl.disabled = sending;
+    modeSel.disabled = sending;
+    abortBtn.hidden = !sending;
+    statusEl.textContent = sending ? 'Copilot is thinking…' : '';
+  }
+
+  function renderActive() {
+    if (!activeTurn) return;
+    // Footer is parsed out here too, so the raw "Resume …" text never flashes
+    // in the log — the chip strip is shown once the turn finishes.
+    const { html } = renderAssistant(activeTurn.raw);
+    activeTurn.asstBody.innerHTML = html + '<span class="tmsg-cursor"></span>';
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function finishTurn(status, finalSession, note) {
+    if (!activeTurn) return;
+    const { asstBody, raw } = activeTurn;
+    const { html: bodyHtml, footer, hasBody } = renderAssistant(raw);
+    let html = hasBody ? bodyHtml : '';
+    if (status === 'aborted') html += '<p style="color:#eab308">[aborted]</p>';
+    if (note) html += `<p class="err">[${escape(note)}]</p>`;
+    asstBody.innerHTML = (html || '<p style="color:#9aa0aa">(no output)</p>') + footer;
+    if (finalSession) sessionId = finalSession;
+    localStorage.removeItem(LS_ADMIN_TURN);
+    activeTurn = null;
+    setSending(false);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // Pump one SSE stream (a fresh POST or a reconnect GET). Returns true if the
+  // turn reached a terminal 'result' event (finished / aborted / gone); false
+  // if the connection dropped before completion, so the caller reconnects.
+  // On a job re-subscribe the server replays the whole transcript as one chunk
+  // preceded by meta{replay:true} — we reset `raw` there so it isn't doubled.
+  async function consumeStream(resp) {
+    let finalSession = null, status = null, gone = false;
+    try {
+      await pumpSSE(resp, {
+        onMeta: (m) => { if (m && m.replay && activeTurn) activeTurn.raw = ''; },
+        onChunk: (t) => { if (!activeTurn) return; activeTurn.raw += t; renderActive(); },
+        onError: (m) => { if (activeTurn) activeTurn.raw += `\n[error] ${m}`; },
+        onResult: (d) => {
+          if (!d) return;
+          if (d.sessionId) finalSession = d.sessionId;
+          if (d.status) status = d.status;
+          if (d.status === 'gone') gone = true;
+        },
+      });
+    } catch {
+      return false; // dropped mid-stream — not terminal
+    }
+    if (gone) { finishTurn(null, null, 'session no longer running — open history for the saved reply'); return true; }
+    if (status) { finishTurn(status, finalSession); return true; }
+    return false; // stream ended with no result — treat as a drop, reconnect
+  }
+
+  // Keep re-subscribing to the running job until it completes. The job outlives
+  // the HTTP connection server-side, so a dropped phone/wifi just resumes here.
+  async function reconnectLoop() {
+    for (let i = 0; i < 300 && activeTurn; i++) {
+      await sleep(2000);
+      if (!activeTurn) return;
+      let resp;
+      try {
+        resp = await fetch(`/api/admin/chat/${encodeURIComponent(activeTurn.turnId)}/stream`);
+      } catch { continue; }
+      if (!resp.ok || !resp.body) continue;
+      if (await consumeStream(resp)) return;
+    }
+    if (activeTurn) finishTurn('failed', null, 'reconnect timed out — open history to see the saved reply');
+  }
+
+  async function send() {
+    const text = inputEl.value.trim();
+    if (!text || activeTurn) return;
+    inputEl.value = '';
+
+    const userBody = addMessage('user');
+    userBody.textContent = text;
+    const asstBody = addMessage('assistant');
+    asstBody.innerHTML = '<span class="tmsg-cursor"></span>';
+
+    const turnId = makeTurnId();
+    activeTurn = { turnId, asstBody, raw: '' };
+    localStorage.setItem(LS_ADMIN_TURN, JSON.stringify({ turnId, sessionId, text }));
+    setSending(true);
+
+    let resp;
+    try {
+      resp = await fetch('/api/admin/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text, mode: modeSel.value, sessionId, turnId }),
+      });
+    } catch {
+      // Couldn't reach the server to start — the job may still have launched,
+      // so try reconnecting rather than giving up.
+      activeTurn.raw += '\n[connection dropped — reconnecting…]';
+      renderActive();
+      return reconnectLoop();
+    }
+    if (!resp.ok || !resp.body) { finishTurn('failed', null, `HTTP ${resp.status}`); return; }
+    if (!(await consumeStream(resp))) {
+      if (activeTurn) { activeTurn.raw += '\n[connection dropped — reconnecting…]'; renderActive(); }
+      await reconnectLoop();
+    }
+  }
+
+  // On (re)entering the Admin tab, resume any turn that was still streaming when
+  // the page was last closed/reloaded.
+  async function maybeReconnect() {
+    let saved;
+    try { saved = JSON.parse(localStorage.getItem(LS_ADMIN_TURN) || 'null'); } catch { saved = null; }
+    if (!saved || !saved.turnId) return;
+    if (saved.sessionId) sessionId = saved.sessionId;
+    clearEmpty();
+    if (saved.text) { const ub = addMessage('user'); ub.textContent = saved.text; }
+    const asstBody = addMessage('assistant');
+    asstBody.innerHTML = '<span class="tmsg-cursor"></span>';
+    activeTurn = { turnId: saved.turnId, asstBody, raw: '' };
+    setSending(true);
+    let resp;
+    try { resp = await fetch(`/api/admin/chat/${encodeURIComponent(saved.turnId)}/stream`); }
+    catch { return reconnectLoop(); }
+    if (!resp.ok || !resp.body) { return reconnectLoop(); }
+    if (!(await consumeStream(resp))) await reconnectLoop();
+  }
+
+  sendBtn.addEventListener('click', send);
+  inputEl.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); send(); }
+  });
+  abortBtn.addEventListener('click', async () => {
+    if (!activeTurn) return;
+    activeTurn.raw += '\n[abort requested…]';
+    renderActive();
+    try { await fetch(`/api/admin/chat/${encodeURIComponent(activeTurn.turnId)}/cancel`, { method: 'POST' }); } catch { /* ignore */ }
+    // The job then emits result(aborted)+done, which the live stream turns into
+    // a finished turn.
+  });
+  newBtn.addEventListener('click', startNewConversation);
+
+  maybeReconnect();
 }
 
 loadRepos().then(route);

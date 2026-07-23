@@ -170,6 +170,14 @@
       background: #8882; color: inherit; font-weight: 600; font-size: .78rem; flex: none;
     }
 
+    /* dismiss/hide icon — small & subtle, matches .ahi-del; red hint on hover */
+    .hidebtn {
+      cursor: pointer; font: inherit; border: none; border-radius: 6px;
+      padding: 2px 5px; font-size: .72rem; line-height: 1; background: transparent;
+      color: inherit; opacity: .5; flex: none; touch-action: manipulation;
+    }
+    .hidebtn:hover { opacity: 1; color: #dc2626; background: #dc262622; }
+
     /* pin-to-top toggle — sized for tapping, like the other icon buttons */
     .pinbtn {
       cursor: pointer; font: inherit; border: 1px solid #8884; border-radius: 9px;
@@ -256,6 +264,9 @@
     .iconbtn[hidden] { display: none; }
     .abortbtn { border-color: #dc262699; color: #dc2626; }
     .abortbtn:hover { background: #dc262622; }
+    .iconbtn.smallbtn {
+      padding: 4px 8px; min-height: 26px; min-width: 26px; font-size: .72rem;
+    }
 
     /* success / failure indicated ON the issue, not on the button */
     .issue { border-left: 3px solid transparent; padding-left: 8px; transition: border-color .2s, opacity .2s; }
@@ -790,6 +801,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         <span class="spacer"></span>
         <button class="pinbtn" title="Pin to top">📌</button>
         <a class="ghlink" target="_blank" rel="noopener">↗ GitHub</a>
+        <button class="hidebtn" title="Remove this issue from the list" aria-label="Remove this issue from the list">🗑</button>
       </div>
       <div class="issue-title">${escape(issue.title)}
         <div class="labels">${labels}</div>
@@ -804,7 +816,9 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   const prlist = el.querySelector('.prlist');
   const worklog = el.querySelector('.worklog');
   const ghLink = el.querySelector('.ghlink');
+  const hideBtn = el.querySelector('.hidebtn');
   ghLink.href = issue.url;
+  hideBtn.addEventListener('click', () => onHide('Remove this issue from the list?'));
 
   const pinBtn = el.querySelector('.pinbtn');
   const paintPin = () => pinBtn.classList.toggle('active', isPinned(repo.name, issue.number));
@@ -857,6 +871,18 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   });
 
   actions.append(workBtn, workAbortBtn, workLogBtn, refreshPrsBtn);
+
+  const deleteBtn = document.createElement('button');
+  deleteBtn.className = 'iconbtn abortbtn smallbtn';
+  deleteBtn.textContent = '🗑 Delete issue';
+  deleteBtn.title = 'Remove this issue from cloud-copilot (does not touch GitHub)';
+  deleteBtn.addEventListener('click', () =>
+    onHide(
+      `Delete issue #${issue.number} from cloud-copilot? This only hides it locally — it will NOT close ` +
+        `or delete the issue on GitHub. Any running work/deploy jobs for it will be cancelled first.`,
+    ),
+  );
+  actions.append(deleteBtn);
 
   paintWork(st.work.status);
   renderPrs();
@@ -1507,6 +1533,23 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   function appendWork(text, cls) { appendTo(worklog, text, cls); }
   function appendDeploy(prNumber, text, cls) { const p = deployPanel(prNumber); if (p) appendTo(p, text, cls); }
   function appendMerge(prNumber, text, cls) { const p = mergePanel(prNumber); if (p) appendTo(p, text, cls); }
+
+  // --- Dismiss/hide (local only — never touches GitHub) --------------------
+  async function onHide(confirmMsg) {
+    if (!window.confirm(confirmMsg)) return;
+    hideBtn.disabled = true;
+    deleteBtn.disabled = true;
+    try {
+      const resp = await fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/hide`, { method: 'POST' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      repoCtx.clearActive(issue.number);
+      el.remove();
+    } catch (e) {
+      hideBtn.disabled = false;
+      deleteBtn.disabled = false;
+      window.alert(`Failed to remove issue #${issue.number}: ${e.message}`);
+    }
+  }
 
   function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 

@@ -173,12 +173,14 @@ app.get('/api/repos/:name/issues', async (req, res) => {
   try {
     const force = req.query.refresh === '1' || req.query.refresh === 'true';
     const { issues, cached, at } = await gh.listIssues(repo.ownerRepo, { force });
+    const dismissed = store.getDismissedNumbers(repo.name);
+    const visible = issues.filter((i) => !dismissed.has(i.number));
 
     // Auto-discover PRs referencing any of these issues — one `gh pr list`
     // call for the whole repo, matched in-process — so the pipeline is
     // populated on every expand without needing the manual "↻ PRs" click.
     const { prs: allPrs } = await gh.listAllPrs(repo.ownerRepo, { force });
-    for (const issue of issues) {
+    for (const issue of visible) {
       const matched = gh.matchPrsForIssue(allPrs, issue.number);
       for (const p of matched) {
         store.upsertPr(repo.name, issue.number, {
@@ -195,9 +197,9 @@ app.get('/api/repos/:name/issues', async (req, res) => {
       store.pruneStaleGhPrs(repo.name, issue.number, matched.map((p) => p.number));
     }
 
-    const numbers = issues.map((i) => i.number);
+    const numbers = visible.map((i) => i.number);
     const statuses = store.getStatuses(repo.name, numbers);
-    const merged = issues.map((i) => ({
+    const merged = visible.map((i) => ({
       number: i.number,
       title: i.title,
       state: i.state,
@@ -268,6 +270,27 @@ app.get('/api/repos/:name/issues/:n/prs', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Dismiss/hide an issue from the dashboard. Cancels any in-flight jobs tied to
+// it (work + every PR's deploy), then clears its tracked state and remembers
+// the dismissal so it doesn't reappear on the next issue-list refresh/poll.
+// This never touches the issue on GitHub itself.
+app.post('/api/repos/:name/issues/:n/hide', (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const n = Number(req.params.n);
+  if (!Number.isInteger(n) || n <= 0) return res.status(400).json({ error: 'invalid issue number' });
+
+  const record = store.getRecord(repo.name, n);
+  const cancelledJobs = [];
+  if (jobs.cancelJob(`${repo.name}#${n}:work`)) cancelledJobs.push('work');
+  for (const pr of Object.values(record.prs || {})) {
+    if (jobs.cancelJob(`${repo.name}#${n}:deploy:${pr.prNumber}`)) cancelledJobs.push(`deploy:${pr.prNumber}`);
+  }
+
+  store.dismissIssue(repo.name, n);
+  res.json({ ok: true, cancelledJobs });
 });
 
 // ---------------------------------------------------------------------------

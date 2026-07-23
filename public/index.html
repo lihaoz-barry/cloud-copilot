@@ -264,6 +264,9 @@
     .iconbtn[hidden] { display: none; }
     .abortbtn { border-color: #dc262699; color: #dc2626; }
     .abortbtn:hover { background: #dc262622; }
+    .iconbtn.smallbtn {
+      padding: 4px 8px; min-height: 26px; min-width: 26px; font-size: .72rem;
+    }
 
     /* success / failure indicated ON the issue, not on the button */
     .issue { border-left: 3px solid transparent; padding-left: 8px; transition: border-color .2s, opacity .2s; }
@@ -870,7 +873,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   actions.append(workBtn, workAbortBtn, workLogBtn, refreshPrsBtn);
 
   const deleteBtn = document.createElement('button');
-  deleteBtn.className = 'iconbtn abortbtn';
+  deleteBtn.className = 'iconbtn abortbtn smallbtn';
   deleteBtn.textContent = '🗑 Delete issue';
   deleteBtn.title = 'Remove this issue from cloud-copilot (does not touch GitHub)';
   deleteBtn.addEventListener('click', () =>

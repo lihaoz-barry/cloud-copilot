@@ -19,11 +19,12 @@
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 const express = require('express');
 
 const store = require('./lib/store');
 const gh = require('./lib/gh');
+const repoConfig = require('./lib/repoConfig');
 const { runCopilotSSE, writeSseHead } = require('./lib/runner');
 const jobs = require('./lib/jobs');
 
@@ -94,6 +95,47 @@ function resolveRepo(name) {
   return repos.find((r) => r.name === name) || null;
 }
 
+// Actions that check out a branch on a repo's single shared working tree —
+// Create PR, Deploy, and Chat (even "plan" mode checks out the PR's branch) —
+// must be mutually exclusive per repo, or concurrent runs collide on the same
+// checkout. Merge is excluded: it only calls `gh pr merge` via the API, no
+// local checkout involved.
+const WORKING_TREE_ACTION_RE = /^(\d+):(work|deploy|chat)(?::(\d+))?$/;
+
+// First OTHER running job (excluding `excludeKey`) that touches this repo's
+// shared working tree, or null. Used to block a second such action from
+// starting concurrently.
+function findOtherRepoBusyKey(repoName, excludeKey) {
+  const prefix = `${repoName}#`;
+  for (const k of jobs.runningKeys()) {
+    if (!k.startsWith(prefix) || k === excludeKey) continue;
+    if (WORKING_TREE_ACTION_RE.test(k.slice(prefix.length))) return k;
+  }
+  return null;
+}
+
+// The issue number behind a repo's current working-tree-touching job, if any
+// — used by the issues list so the client can grey out other issues/PRs.
+function repoBusyIssueNumber(repoName) {
+  const k = findOtherRepoBusyKey(repoName, null);
+  if (!k) return null;
+  const m = k.slice(repoName.length + 1).match(WORKING_TREE_ACTION_RE);
+  return m ? Number(m[1]) : null;
+}
+
+const BUSY_ACTION_LABEL = { work: 'a Create PR run', deploy: 'a Deploy', chat: 'a chat turn' };
+
+// Human-readable description of what's holding a repo's working-tree lock,
+// for the "blocked" message shown when a second action tries to start.
+function describeBusyKey(repoName, busyKey) {
+  const m = busyKey.slice(repoName.length + 1).match(WORKING_TREE_ACTION_RE);
+  if (!m) return `something else is already running in ${repoName}`;
+  const [, issueNum, action, prNum] = m;
+  const label = BUSY_ACTION_LABEL[action] || action;
+  const prSuffix = prNum ? ` (PR #${prNum})` : '';
+  return `${label}${prSuffix} is already running for issue #${issueNum} in ${repoName}`;
+}
+
 // Map a UI mode to copilot approval flags.
 // `--allow-all` = --allow-all-tools --allow-all-paths --allow-all-urls, which is
 // required for autonomous runs that touch files outside the repo working dir
@@ -131,6 +173,28 @@ app.get('/api/repos/:name/issues', async (req, res) => {
   try {
     const force = req.query.refresh === '1' || req.query.refresh === 'true';
     const { issues, cached, at } = await gh.listIssues(repo.ownerRepo, { force });
+
+    // Auto-discover PRs referencing any of these issues — one `gh pr list`
+    // call for the whole repo, matched in-process — so the pipeline is
+    // populated on every expand without needing the manual "↻ PRs" click.
+    const { prs: allPrs } = await gh.listAllPrs(repo.ownerRepo, { force });
+    for (const issue of issues) {
+      const matched = gh.matchPrsForIssue(allPrs, issue.number);
+      for (const p of matched) {
+        store.upsertPr(repo.name, issue.number, {
+          prNumber: p.number,
+          prUrl: p.url,
+          title: p.title,
+          createdAt: p.createdAt,
+          source: 'gh',
+        });
+      }
+      // Drop previously auto-discovered PRs that no longer match (e.g. the
+      // match heuristic got stricter, or a PR body was edited) — never
+      // touches PRs cloud-copilot itself created for this issue.
+      store.pruneStaleGhPrs(repo.name, issue.number, matched.map((p) => p.number));
+    }
+
     const numbers = issues.map((i) => i.number);
     const statuses = store.getStatuses(repo.name, numbers);
     const merged = issues.map((i) => ({
@@ -142,13 +206,11 @@ app.get('/api/repos/:name/issues', async (req, res) => {
       labels: (i.labels || []).map((l) => l.name),
       status: statuses[i.number],
     }));
-    // Which issues currently have a PR-creation job running (repo-level lock).
-    const prefix = `${repo.name}#`;
-    const activeWorkIssues = jobs
-      .runningKeys()
-      .filter((k) => k.startsWith(prefix) && k.endsWith(':work'))
-      .map((k) => Number(k.slice(prefix.length, -':work'.length)))
-      .filter((n) => Number.isInteger(n));
+    // Which issue currently holds this repo's working-tree lock (Create PR,
+    // Deploy, or Chat) — kept as an array for backward compatibility with the
+    // existing `activeWorkIssues[0]` client contract.
+    const busyIssue = repoBusyIssueNumber(repo.name);
+    const activeWorkIssues = busyIssue != null ? [busyIssue] : [];
     res.json({ repo: repo.name, ownerRepo: repo.ownerRepo, cached, at, issues: merged, activeWorkIssues });
   } catch (err) {
     res.status(500).json({ error: err.message, stderr: (err.stderr || '').toString() });
@@ -165,10 +227,18 @@ app.get('/api/repos/:name/issues/:n/record', (req, res) => {
   record.live = {
     work: Boolean(jobs.getJob(`${repo.name}#${n}:work`)?.status === 'running'),
     deploy: {},
+    merge: {},
+    chat: {},
   };
   for (const pr of Object.values(record.prs || {})) {
     record.live.deploy[pr.prNumber] = Boolean(
       jobs.getJob(`${repo.name}#${n}:deploy:${pr.prNumber}`)?.status === 'running',
+    );
+    record.live.merge[pr.prNumber] = Boolean(
+      jobs.getJob(`${repo.name}#${n}:merge:${pr.prNumber}`)?.status === 'running',
+    );
+    record.live.chat[pr.prNumber] = Boolean(
+      jobs.getJob(`${repo.name}#${n}:chat:${pr.prNumber}`)?.status === 'running',
     );
   }
   res.json(record);
@@ -181,7 +251,9 @@ app.get('/api/repos/:name/issues/:n/prs', async (req, res) => {
   if (!repo.github) return res.status(400).json({ error: 'repo has no github.com remote' });
   const n = Number(req.params.n);
   try {
-    const prs = await gh.findPrsForIssue(repo.ownerRepo, n);
+    // Manual refresh always bypasses the whole-repo PR cache — unlike the
+    // automatic discovery on repo expand, this is an explicit "check again now".
+    const prs = await gh.findPrsForIssue(repo.ownerRepo, n, { force: true });
     for (const p of prs) {
       store.upsertPr(repo.name, n, {
         prNumber: p.number,
@@ -217,25 +289,13 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
     return;
   }
 
-  // Repo-level lock: only one PR-creation may run per repo at a time, otherwise
-  // concurrent copilot runs collide on the same working tree.
-  const prefix = `${repo.name}#`;
-  const otherWork = jobs
-    .runningKeys()
-    .filter((k) => k.startsWith(prefix) && k.endsWith(':work') && k !== key);
-  if (otherWork.length) {
-    const busyIssue = otherWork[0].slice(prefix.length, -':work'.length);
-    const msg =
-      `Blocked: a PR creation is already running for issue #${busyIssue} in ` +
-      `${repo.name}. Only one PR creation per repo at a time.`;
-    res.write(`event: error\n`);
-    res.write(`data: ${JSON.stringify({ message: msg })}\n\n`);
-    res.write(`event: result\n`);
-    res.write(`data: ${JSON.stringify({ action: 'work', status: 'blocked', message: msg })}\n\n`);
-    res.write(`event: done\n`);
-    res.write(`data: ${JSON.stringify({ exitCode: null })}\n\n`);
-    res.end();
-    return;
+  // Repo-level lock: only one working-tree action (Create PR, Deploy, Chat)
+  // may run per repo at a time, otherwise concurrent runs collide on the same
+  // checkout.
+  const busyKey = findOtherRepoBusyKey(repo.name, key);
+  if (busyKey) {
+    const msg = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`;
+    return sendSseBlocked(res, { action: 'work', status: 'blocked', message: msg });
   }
 
   const mode = ['default', 'granular', 'allow-all'].includes(req.body?.mode)
@@ -339,8 +399,190 @@ app.post('/api/repos/:name/issues/:n/work/cancel', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Action: Deploy a specific PR (ship to TestFlight via the testflight-deploy skill)
+// Action: Deploy a specific PR — dispatched per-repo (ios-testflight | shell)
 // ---------------------------------------------------------------------------
+
+function sendSseBlocked(res, payload) {
+  res.write(`event: error\n`);
+  res.write(`data: ${JSON.stringify({ message: payload.message })}\n\n`);
+  res.write(`event: result\n`);
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  res.write(`event: done\n`);
+  res.write(`data: ${JSON.stringify({ exitCode: null })}\n\n`);
+  res.end();
+}
+
+function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
+  gh.getPr(repo.ownerRepo, prNumber).then((pr) => {
+    if (!pr || !pr.headRefName) {
+      const message = `Could not resolve the branch for PR #${prNumber} via gh.`;
+      store.updateDeploy(repo.name, n, prNumber, (d) => {
+        d.status = 'failed';
+        d.finishedAt = new Date().toISOString();
+        d.conversation = message;
+      });
+      return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
+    }
+
+    // Build number / version are computed HERE, deterministically, from the
+    // exact commit being shipped — never inferred afterward from the agent's
+    // free-form report. build = commit count (same source `fastlane beta`
+    // itself defaults to); version = the Xcode project's own MARKETING_VERSION.
+    let buildNumber, version;
+    try {
+      // Argument-array form — branch names come from GitHub and are never
+      // interpreted by a shell.
+      execFileSync('git', ['fetch', 'origin', pr.headRefName], { cwd: repo.path, stdio: 'ignore', timeout: 30000 });
+      execFileSync('git', ['checkout', pr.headRefName], { cwd: repo.path, stdio: 'ignore', timeout: 15000 });
+      buildNumber = Number(
+        execFileSync('git', ['rev-list', '--count', 'HEAD'], { cwd: repo.path, encoding: 'utf8', timeout: 15000 }).trim(),
+      );
+      version = repoConfig.readMarketingVersion(repo.path); // null if not found — fastlane then uses its own default
+    } catch (err) {
+      const message = `Failed to check out branch "${pr.headRefName}" / compute build number: ${err.message}`;
+      store.updateDeploy(repo.name, n, prNumber, (d) => {
+        d.status = 'failed';
+        d.finishedAt = new Date().toISOString();
+        d.conversation = message;
+      });
+      return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
+    }
+
+    const versionArg = version ? ` version:${version}` : '';
+    const prompt =
+      `The branch for PR #${prNumber} is already checked out. Deploy the current ` +
+      `${repo.name} app to TestFlight using the testflight-deploy skill, running ` +
+      `\`fastlane beta build:${buildNumber}${versionArg}\` (do not change the build/version ` +
+      `numbers — they're already pinned). When finished, clearly state whether the ` +
+      `build succeeded and whether the upload to TestFlight succeeded. Note: Xcode's ` +
+      `export step can silently reassign the build number, so grep the fastlane log for ` +
+      `its own "finished processing the build" line and quote that line verbatim (exact ` +
+      `numbers, no paraphrasing) — that's the number Apple actually assigned, which may ` +
+      `differ from what was requested.`;
+    // Deploy must reach files outside the repo (/tmp, ~/Library, keychain) and the
+    // network, so grant full path + URL + tool access.
+    const args = ['-p', prompt, '--allow-all'];
+
+    const job = jobs.startJob(key, {
+      bin: COPILOT_BIN,
+      args,
+      cwd: repo.path,
+      meta: { action: 'deploy', prNumber },
+      onSession: (id) =>
+        store.updateDeploy(repo.name, n, prNumber, (d) => {
+          d.sessionId = id;
+        }),
+      onDone: async (j) => {
+        // Success markers emitted by fastlane / the skill's final report.
+        // "finished processing the build" is fastlane's own real completion
+        // line (confirmed against a live deploy) — the earlier patterns alone
+        // missed it and mis-marked a genuinely successful upload as failed.
+        const success =
+          /successfully uploaded|finished successfully|finished processing the build|uploaded to testflight|build \d+ .*uploaded/i.test(
+            j.conversation,
+          );
+        const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
+        // Xcode's export step can silently bump the build number past what we
+        // asked fastlane to use (confirmed: pinned 63, Apple actually got 68).
+        // When fastlane's own completion line ("...build 1.0 - 68 for...") is
+        // present, trust THAT over our own precomputed input — it's the number
+        // Apple actually has, not just what we requested.
+        const confirmed = success
+          ? (() => {
+              // Tolerate markdown emphasis (**68**) around the numbers — this
+              // matches the agent's own summary line, not fastlane's raw log
+              // (which Copilot CLI collapses in the stored transcript).
+              const m = j.conversation.match(
+                /finished processing the build\s+\**([\d.]+)\**\s*-\s*\**(\d+)\**\s*for/i,
+              );
+              return m ? { version: m[1], buildNumber: Number(m[2]) } : null;
+            })()
+          : null;
+        const finalBuildNumber = confirmed ? confirmed.buildNumber : buildNumber;
+        const finalVersion = confirmed ? confirmed.version : version;
+        store.updateDeploy(repo.name, n, prNumber, (d) => {
+          d.status = status;
+          d.exitCode = j.exitCode;
+          d.conversation = j.conversation;
+          d.sessionId = j.sessionId || d.sessionId;
+          d.finishedAt = new Date().toISOString();
+          if (success) {
+            d.buildNumber = finalBuildNumber;
+            d.version = finalVersion;
+          }
+        });
+        return {
+          action: 'deploy',
+          prNumber,
+          status,
+          sessionId: j.sessionId,
+          buildNumber: success ? finalBuildNumber : null,
+          version: success ? finalVersion : null,
+        };
+      },
+    });
+
+    jobs.subscribe(job, res);
+  });
+}
+
+function runShellDeploy({ res, repo, n, prNumber, key, command }) {
+  gh.getPr(repo.ownerRepo, prNumber).then((pr) => {
+    if (!pr || !pr.headRefName) {
+      const message = `Could not resolve the branch for PR #${prNumber} via gh.`;
+      store.updateDeploy(repo.name, n, prNumber, (d) => {
+        d.status = 'failed';
+        d.finishedAt = new Date().toISOString();
+        d.conversation = message;
+      });
+      return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
+    }
+
+    // Argument-array form (never a shell string) so the branch name — which
+    // comes from GitHub and could in principle contain shell metacharacters —
+    // is never interpreted by a shell.
+    try {
+      execFileSync('git', ['fetch', 'origin', pr.headRefName], {
+        cwd: repo.path,
+        stdio: 'ignore',
+        timeout: 30000,
+      });
+      execFileSync('git', ['checkout', pr.headRefName], { cwd: repo.path, stdio: 'ignore', timeout: 15000 });
+    } catch (err) {
+      const message = `Failed to check out branch "${pr.headRefName}": ${err.message}`;
+      store.updateDeploy(repo.name, n, prNumber, (d) => {
+        d.status = 'failed';
+        d.finishedAt = new Date().toISOString();
+        d.conversation = message;
+      });
+      return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
+    }
+
+    // The deploy command itself is trusted repo-local config (from
+    // `.cloud-copilot.json`, authored by whoever owns the repo under
+    // REPOS_ROOT) — not attacker-controlled input, so a shell string is fine
+    // here (same trust boundary as REPOS_ROOT itself).
+    const job = jobs.startJob(key, {
+      bin: 'bash',
+      args: ['-lc', command],
+      cwd: repo.path,
+      meta: { action: 'deploy', prNumber },
+      onDone: async (j) => {
+        const success = j.exitCode === 0;
+        const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
+        store.updateDeploy(repo.name, n, prNumber, (d) => {
+          d.status = status;
+          d.exitCode = j.exitCode;
+          d.conversation = j.conversation;
+          d.finishedAt = new Date().toISOString();
+        });
+        return { action: 'deploy', prNumber, status };
+      },
+    });
+
+    jobs.subscribe(job, res);
+  });
+}
 
 app.post('/api/repos/:name/issues/:n/deploy/:pr', async (req, res) => {
   const repo = resolveRepo(req.params.name);
@@ -352,64 +594,41 @@ app.post('/api/repos/:name/issues/:n/deploy/:pr', async (req, res) => {
   }
   const key = `${repo.name}#${n}:deploy:${prNumber}`;
 
-  writeSseHead(res);
-
   const existing = jobs.getJob(key);
   if (existing && existing.status === 'running') {
+    writeSseHead(res);
     jobs.subscribe(existing, res);
     return;
   }
 
-  // Deploy the PR's branch; the testflight-deploy skill knows the rest.
-  const prompt =
-    `Check out the branch for PR #${prNumber}, then deploy the current ` +
-    `ios-diet-expert app to TestFlight using the testflight-deploy skill. ` +
-    `Build and upload via fastlane. When finished, clearly state whether the ` +
-    `build succeeded and whether the upload to TestFlight succeeded.`;
-  // Deploy must reach files outside the repo (/tmp, ~/Library, keychain) and the
-  // network, so grant full path + URL + tool access.
-  const args = ['-p', prompt, '--allow-all'];
+  const deployConfig = repoConfig.loadDeployConfig(repo.path);
+  if (!deployConfig.type) {
+    return res.status(400).json({
+      error:
+        deployConfig.error ||
+        `Deploy not configured for ${repo.name}. Add a .cloud-copilot.json at the repo root (see README).`,
+    });
+  }
 
-  store.updateDeploy(repo.name, n, prNumber, (d) => {
-    d.status = 'deploying';
-    d.startedAt = new Date().toISOString();
-    d.finishedAt = null;
-    d.conversation = '';
-  });
+  writeSseHead(res);
 
-  const job = jobs.startJob(key, {
-    bin: COPILOT_BIN,
-    args,
-    cwd: repo.path,
-    meta: { action: 'deploy', prNumber },
-    onSession: (id) =>
-      store.updateDeploy(repo.name, n, prNumber, (d) => {
-        d.sessionId = id;
-      }),
-    onDone: async (j) => {
-      // Success markers emitted by fastlane / the skill's final report.
-      const success =
-        /successfully uploaded|finished successfully|uploaded to testflight|build \d+ .*uploaded/i.test(
-          j.conversation,
-        );
-      const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
-      store.updateDeploy(repo.name, n, prNumber, (d) => {
-        d.status = status;
-        d.exitCode = j.exitCode;
-        d.conversation = j.conversation;
-        d.sessionId = j.sessionId || d.sessionId;
-        d.finishedAt = new Date().toISOString();
-      });
-      return {
-        action: 'deploy',
-        prNumber,
-        status,
-        sessionId: j.sessionId,
-      };
-    },
-  });
+  // Repo-level lock: Deploy checks out a branch on the same shared working
+  // tree as Create PR/Chat, so it must be mutually exclusive with them too.
+  const busyKey = findOtherRepoBusyKey(repo.name, key);
+  if (busyKey) {
+    const msg = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`;
+    return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'blocked', message: msg });
+  }
 
-  jobs.subscribe(job, res);
+  // Archives the previous terminal deploy (if any) into deployHistory before
+  // resetting `deploy` to a fresh in-progress state.
+  store.startNewDeploy(repo.name, n, prNumber);
+
+  if (deployConfig.type === 'shell') {
+    runShellDeploy({ res, repo, n, prNumber, key, command: deployConfig.command });
+  } else {
+    runIosTestflightDeploy({ res, repo, n, prNumber, key });
+  }
 });
 
 // Abort a running deploy for a specific PR.
@@ -422,6 +641,215 @@ app.post('/api/repos/:name/issues/:n/deploy/:pr/cancel', (req, res) => {
     return res.status(400).json({ error: 'invalid PR number' });
   }
   const cancelled = jobs.cancelJob(`${repo.name}#${n}:deploy:${prNumber}`);
+  res.json({ cancelled });
+});
+
+// ---------------------------------------------------------------------------
+// Action: Merge a specific PR (gh pr merge --merge --delete-branch)
+// ---------------------------------------------------------------------------
+
+app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const n = Number(req.params.n);
+  const prNumber = Number(req.params.pr);
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    return res.status(400).json({ error: 'invalid PR number' });
+  }
+  const key = `${repo.name}#${n}:merge:${prNumber}`;
+  const force = Boolean(req.body?.force);
+
+  writeSseHead(res);
+
+  const existing = jobs.getJob(key);
+  if (existing && existing.status === 'running') {
+    jobs.subscribe(existing, res);
+    return;
+  }
+
+  if (!force) {
+    const record = store.getRecord(repo.name, n);
+    const pr = record.prs[prNumber];
+    const deployStatus = pr && pr.deploy && pr.deploy.status;
+    if (deployStatus !== 'success') {
+      const message =
+        `Blocked: Deploy for PR #${prNumber} has not succeeded (status: ${deployStatus || 'idle'}). ` +
+        `Merge requires a successful Deploy, or force-merge to skip.`;
+      return sendSseBlocked(res, { action: 'merge', prNumber, status: 'blocked', message });
+    }
+  }
+
+  store.updateMerge(repo.name, n, prNumber, (m) => {
+    m.status = 'merging';
+    m.forced = force;
+    m.startedAt = new Date().toISOString();
+    m.finishedAt = null;
+    m.conversation = '';
+  });
+
+  const baseRefName = await gh.getPr(repo.ownerRepo, prNumber).then((pr) => pr?.baseRefName || null);
+
+  const job = jobs.startJob(key, {
+    bin: gh.GH_BIN,
+    args: ['pr', 'merge', String(prNumber), '--repo', repo.ownerRepo, '--merge', '--delete-branch'],
+    cwd: repo.path,
+    meta: { action: 'merge', prNumber },
+    onDone: async (j) => {
+      const success = j.exitCode === 0;
+      const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
+      store.updateMerge(repo.name, n, prNumber, (m) => {
+        m.status = status;
+        m.exitCode = j.exitCode;
+        m.conversation = j.conversation;
+        m.finishedAt = new Date().toISOString();
+      });
+      if (success && baseRefName) {
+        // Best-effort: bring the local clone back to the base branch, like the
+        // manual `git checkout main && git pull` done after a manual merge.
+        try {
+          execFileSync('git', ['checkout', baseRefName], { cwd: repo.path, stdio: 'ignore', timeout: 15000 });
+          execFileSync('git', ['pull', 'origin', baseRefName], {
+            cwd: repo.path,
+            stdio: 'ignore',
+            timeout: 30000,
+          });
+        } catch {
+          /* best-effort only — merge itself already succeeded */
+        }
+      }
+      return { action: 'merge', prNumber, status };
+    },
+  });
+
+  jobs.subscribe(job, res);
+});
+
+// Abort a running merge for a specific PR.
+app.post('/api/repos/:name/issues/:n/merge/:pr/cancel', (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const n = Number(req.params.n);
+  const prNumber = Number(req.params.pr);
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    return res.status(400).json({ error: 'invalid PR number' });
+  }
+  const cancelled = jobs.cancelJob(`${repo.name}#${n}:merge:${prNumber}`);
+  res.json({ cancelled });
+});
+
+// ---------------------------------------------------------------------------
+// Action: Chat with a PR — plan → apply iteration on its existing branch
+// ---------------------------------------------------------------------------
+
+app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const n = Number(req.params.n);
+  const prNumber = Number(req.params.pr);
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    return res.status(400).json({ error: 'invalid PR number' });
+  }
+  const mode = req.body?.mode === 'apply' ? 'apply' : 'plan';
+  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  if (!message) return res.status(400).json({ error: 'message is required' });
+  const key = `${repo.name}#${n}:chat:${prNumber}`;
+
+  const existing = jobs.getJob(key);
+  if (existing && existing.status === 'running') {
+    writeSseHead(res);
+    jobs.subscribe(existing, res);
+    return;
+  }
+
+  writeSseHead(res);
+
+  // Repo-level lock: even a "plan" turn checks out the PR's branch on the
+  // same shared working tree as Create PR/Deploy, so it must be mutually
+  // exclusive with them too.
+  const busyKey = findOtherRepoBusyKey(repo.name, key);
+  if (busyKey) {
+    const msg = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`;
+    return sendSseBlocked(res, { action: 'chat', prNumber, mode, status: 'blocked', message: msg });
+  }
+
+  const record = store.getRecord(repo.name, n);
+  const pr = record.prs[prNumber];
+  // Resume the PR-specific chat session once one exists (later turns); the
+  // very first turn resumes the original Create-PR session instead, so the
+  // conversation starts with full context of what was already built.
+  const resumeId = (pr && pr.chat && pr.chat.sessionId) || record.work.sessionId || null;
+
+  const prInfo = await gh.getPr(repo.ownerRepo, prNumber);
+  if (!prInfo || !prInfo.headRefName) {
+    const message2 = `Could not resolve the branch for PR #${prNumber} via gh.`;
+    return sendSseBlocked(res, { action: 'chat', prNumber, mode, status: 'failed', message: message2 });
+  }
+  try {
+    execFileSync('git', ['fetch', 'origin', prInfo.headRefName], { cwd: repo.path, stdio: 'ignore', timeout: 30000 });
+    execFileSync('git', ['checkout', prInfo.headRefName], { cwd: repo.path, stdio: 'ignore', timeout: 15000 });
+  } catch (err) {
+    const message2 = `Failed to check out branch "${prInfo.headRefName}": ${err.message}`;
+    return sendSseBlocked(res, { action: 'chat', prNumber, mode, status: 'failed', message: message2 });
+  }
+
+  store.appendChatMessage(repo.name, n, prNumber, { role: 'user', text: message, mode });
+
+  const args = [];
+  if (resumeId) args.push(`--resume=${resumeId}`);
+  if (mode === 'plan') {
+    // Read-only: propose a plan, do not touch files. Enforced via approval
+    // flags (default = file edits denied), not just the prompt wording.
+    const prompt =
+      `The branch for PR #${prNumber} is already checked out. Do NOT modify any files. ` +
+      `Read the relevant code and propose a concrete plan for the following request, ` +
+      `ending with a clear plan summary: ${message}`;
+    args.push('-p', prompt, ...approvalFlags('default'));
+  } else {
+    // Implement the plan from the resumed conversation, on the SAME branch.
+    const prompt =
+      `Implement the plan from our conversation for this request: ${message}\n\n` +
+      `Commit and push the changes to the EXISTING branch for PR #${prNumber} ` +
+      `(do not open a new PR, do not force-push). Confirm what you committed and pushed.`;
+    args.push('-p', prompt, '--allow-all');
+  }
+
+  const job = jobs.startJob(key, {
+    bin: COPILOT_BIN,
+    args,
+    cwd: repo.path,
+    meta: { action: 'chat', prNumber, mode },
+    onSession: (id) =>
+      store.updateRecord(repo.name, n, (r) => {
+        const pr2 = r.prs[prNumber];
+        if (pr2) {
+          if (!pr2.chat) pr2.chat = { sessionId: null, messages: [] };
+          pr2.chat.sessionId = id;
+        }
+      }),
+    onDone: async (j) => {
+      const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
+      store.appendChatMessage(repo.name, n, prNumber, { role: 'assistant', text: j.conversation, mode });
+      // New commits landed — the old Deploy/Merge no longer reflect this code.
+      if (mode === 'apply' && status === 'success') {
+        store.resetForNewCommits(repo.name, n, prNumber);
+      }
+      return { action: 'chat', prNumber, mode, status, sessionId: j.sessionId };
+    },
+  });
+
+  jobs.subscribe(job, res);
+});
+
+// Abort a running chat turn for a specific PR.
+app.post('/api/repos/:name/issues/:n/prs/:pr/chat/cancel', (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const n = Number(req.params.n);
+  const prNumber = Number(req.params.pr);
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    return res.status(400).json({ error: 'invalid PR number' });
+  }
+  const cancelled = jobs.cancelJob(`${repo.name}#${n}:chat:${prNumber}`);
   res.json({ cancelled });
 });
 

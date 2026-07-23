@@ -6,7 +6,8 @@
   "type": "commonjs",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "cc:restart": "pkill -f 'node server.js' 2>/dev/null; sleep 1; (nohup npm start > server.log 2>&1 & disown); sleep 2; curl -sf -o /dev/null http://127.0.0.1:${PORT:-8787}"
   },
   "dependencies": {
     "express": "^4.19.2"

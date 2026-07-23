@@ -240,6 +240,36 @@
     .chat-actions { display: flex; gap: 8px; align-items: center; }
     .chat-empty { color: #888; font-size: .8rem; padding: 4px 0 10px; }
 
+    /* ---- Image attachments: paperclip button + drop target + preview chips */
+    .attach-btn {
+      cursor: pointer; font: inherit; border: 1px solid #8884; border-radius: 9px;
+      padding: 8px 10px; min-height: 36px; min-width: 36px; font-size: .95rem;
+      background: transparent; color: inherit;
+    }
+    .attach-btn:hover { background: #8881; }
+    .attach-previews {
+      display: flex; flex-wrap: wrap; gap: 6px; padding: 0;
+    }
+    .attach-previews:empty { display: none; }
+    .attach-chip {
+      position: relative; width: 56px; height: 56px; border-radius: 8px; overflow: hidden;
+      border: 1px solid #8884; flex: none;
+    }
+    .attach-chip img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .attach-chip .attach-remove {
+      position: absolute; top: 0; right: 0; background: #000a; color: #fff; border: none;
+      width: 18px; height: 18px; line-height: 18px; text-align: center; font-size: .7rem;
+      cursor: pointer; border-radius: 0 0 0 6px;
+    }
+    .attach-dropzone.attach-dragover {
+      outline: 2px dashed #2563eb; outline-offset: 2px; background: #2563eb0d;
+    }
+    .msg-attach-images { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+    .msg-attach-images img {
+      width: 72px; height: 72px; object-fit: cover; border-radius: 8px; border: 1px solid #8884;
+      cursor: zoom-in;
+    }
+
     /* per-PR rows: PR number on the left, Deploy on the right, one row per PR */
     .prlist { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
     .prrow {
@@ -492,7 +522,9 @@
         <div class="term-empty">New Copilot CLI session rooted at your repos folder.<br>Ask anything — it can see every repo at once.</div>
       </div>
       <div class="term-inputbar">
-        <textarea id="termInput" class="term-input" rows="2" placeholder="Type a message…  (⌘/Ctrl+Enter to send)"></textarea>
+        <div class="attach-previews" id="termAttachPreviews"></div>
+        <textarea id="termInput" class="term-input attach-dropzone" rows="2" placeholder="Type a message…  (⌘/Ctrl+Enter to send)"></textarea>
+        <input type="file" id="termAttachInput" accept="image/*" multiple hidden>
         <div class="term-controls">
           <label>permission:
             <select id="termMode">
@@ -502,6 +534,7 @@
             </select>
           </label>
           <span class="spacer"></span>
+          <button id="termAttachBtn" class="attach-btn" type="button" title="Attach image" aria-label="Attach image">📎</button>
           <button id="termAbort" class="iconbtn abortbtn" hidden>⨯ Abort</button>
           <button id="termSend" class="term-send">Send</button>
         </div>
@@ -1595,6 +1628,101 @@ function escape(s) {
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// ---- Image attachments: shared drag-and-drop + click-to-upload picker ------
+// Used by both the Admin Terminal composer and each per-PR chat panel. Keeps
+// a small in-memory list of { name, dataUrl, mimeType } images for the turn
+// currently being composed, with thumbnail previews and per-image removal.
+const MAX_ATTACH_IMAGES = 4;
+
+function createAttachmentPicker({ dropTarget, fileInput, attachBtn, previewsEl }) {
+  let items = []; // [{ id, name, dataUrl }]
+
+  function render() {
+    previewsEl.innerHTML = '';
+    for (const it of items) {
+      const chip = document.createElement('div');
+      chip.className = 'attach-chip';
+      const img = document.createElement('img');
+      img.src = it.dataUrl;
+      img.alt = it.name;
+      const rm = document.createElement('button');
+      rm.className = 'attach-remove';
+      rm.type = 'button';
+      rm.title = 'Remove';
+      rm.textContent = '✕';
+      rm.addEventListener('click', () => {
+        items = items.filter((x) => x.id !== it.id);
+        render();
+      });
+      chip.append(img, rm);
+      previewsEl.appendChild(chip);
+    }
+  }
+
+  function readFile(file) {
+    if (!file || !file.type || !file.type.startsWith('image/')) return;
+    if (items.length >= MAX_ATTACH_IMAGES) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      items.push({ id: `${Date.now()}${Math.random().toString(16).slice(2)}`, name: file.name || 'image', dataUrl: reader.result });
+      render();
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function addFiles(fileList) {
+    [...fileList].slice(0, MAX_ATTACH_IMAGES - items.length).forEach(readFile);
+  }
+
+  if (attachBtn && fileInput) {
+    attachBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+      addFiles(fileInput.files);
+      fileInput.value = ''; // allow re-selecting the same file later
+    });
+  }
+
+  if (dropTarget) {
+    ['dragenter', 'dragover'].forEach((evt) =>
+      dropTarget.addEventListener(evt, (e) => {
+        e.preventDefault();
+        dropTarget.classList.add('attach-dragover');
+      }));
+    ['dragleave', 'drop'].forEach((evt) =>
+      dropTarget.addEventListener(evt, (e) => {
+        e.preventDefault();
+        dropTarget.classList.remove('attach-dragover');
+      }));
+    dropTarget.addEventListener('drop', (e) => {
+      const files = e.dataTransfer && e.dataTransfer.files;
+      if (files && files.length) addFiles(files);
+    });
+    // Paste-to-attach: screenshots copied to the clipboard land here too.
+    dropTarget.addEventListener('paste', (e) => {
+      const files = [...(e.clipboardData?.items || [])]
+        .filter((it) => it.kind === 'file' && it.type.startsWith('image/'))
+        .map((it) => it.getAsFile());
+      if (files.length) addFiles(files);
+    });
+  }
+
+  return {
+    getImages: () => items.map(({ name, dataUrl }) => ({ name, dataUrl })),
+    clear: () => { items = []; render(); },
+    hasImages: () => items.length > 0,
+  };
+}
+
+// Render an already-sent message's image attachments (from a persisted
+// transcript or the live turn just sent) as small clickable thumbnails.
+function renderMsgImages(images) {
+  if (!images || !images.length) return '';
+  const imgs = images
+    .map((im) => `<img src="${escape(im.url || im.dataUrl)}" alt="${escape(im.name || 'attachment')}" loading="lazy">`)
+    .join('');
+  return `<div class="msg-attach-images">${imgs}</div>`;
+}
+
 // ---- PR detail page: hash route #/pr/<repo>/<issue>/<pr> -------------------
 const mainView = document.getElementById('mainView');
 const prDetailView = document.getElementById('prDetailView');
@@ -1726,8 +1854,11 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec) {
     <h3>Chat with this PR</h3>
     <div class="chat-messages"></div>
     <div class="chat-inputrow">
-      <textarea class="chat-input" rows="3" placeholder="Describe a change… e.g. &quot;add a dark mode toggle&quot;"></textarea>
+      <div class="attach-previews chat-attach-previews"></div>
+      <textarea class="chat-input attach-dropzone" rows="3" placeholder="Describe a change… e.g. &quot;add a dark mode toggle&quot;"></textarea>
+      <input type="file" class="chat-attach-input" accept="image/*" multiple hidden>
       <div class="chat-actions">
+        <button class="attach-btn chat-attach-btn" type="button" title="Attach image" aria-label="Attach image">📎</button>
         <button class="chat-send">Send (plan)</button>
         <button class="iconbtn abortbtn chat-abort" hidden>⨯ Abort</button>
       </div>
@@ -1737,6 +1868,15 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec) {
   const inputEl = wrap.querySelector('.chat-input');
   const sendBtn = wrap.querySelector('.chat-send');
   const abortBtn = wrap.querySelector('.chat-abort');
+  const attachBtn = wrap.querySelector('.chat-attach-btn');
+  const attachInput = wrap.querySelector('.chat-attach-input');
+  const attachPreviewsEl = wrap.querySelector('.chat-attach-previews');
+  const attachments = createAttachmentPicker({
+    dropTarget: inputEl,
+    fileInput: attachInput,
+    attachBtn,
+    previewsEl: attachPreviewsEl,
+  });
 
   const messages = ((prRec && prRec.chat && prRec.chat.messages) || []).slice();
   let awaitingApply = false;
@@ -1758,6 +1898,7 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec) {
       textEl.className = 'chat-text';
       textEl.textContent = m.text;
       bubble.append(metaEl, textEl);
+      if (m.images && m.images.length) bubble.insertAdjacentHTML('beforeend', renderMsgImages(m.images));
       messagesEl.appendChild(bubble);
     }
     messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -1791,9 +1932,15 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec) {
     abortBtn.hidden = !sending;
   }
 
-  async function sendTurn(mode, text) {
+  async function sendTurn(mode, text, images) {
     setSending(true);
-    const userMsg = { role: 'user', text: mode === 'apply' ? `[execute plan] ${text}` : text, mode, at: new Date().toISOString() };
+    const userMsg = {
+      role: 'user',
+      text: mode === 'apply' ? `[execute plan] ${text}` : text,
+      mode,
+      images: images || [],
+      at: new Date().toISOString(),
+    };
     messages.push(userMsg);
     renderMessages();
     // Live streaming bubble — append chunks incrementally so the reply shows in
@@ -1804,7 +1951,7 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec) {
     try {
       const resp = await fetch(`/api/repos/${enc(repoName)}/issues/${issueNumber}/prs/${prNumber}/chat`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, mode }),
+        body: JSON.stringify({ message: text, mode, images: images || [] }),
       });
       if (!resp.ok || !resp.body) {
         raw = `[error] HTTP ${resp.status}`;
@@ -1846,8 +1993,10 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec) {
     }
     const text = inputEl.value.trim();
     if (!text) return;
+    const images = attachments.getImages();
     inputEl.value = '';
-    sendTurn('plan', text);
+    attachments.clear();
+    sendTurn('plan', text, images);
   });
 
   abortBtn.addEventListener('click', async () => {
@@ -1955,6 +2104,15 @@ function initAdminTerminal() {
   const menuBtn = document.getElementById('adminMenuBtn');
   const historyMenu = document.getElementById('adminHistoryMenu');
   const historyListEl = document.getElementById('adminHistoryList');
+  const attachBtn = document.getElementById('termAttachBtn');
+  const attachInput = document.getElementById('termAttachInput');
+  const attachPreviewsEl = document.getElementById('termAttachPreviews');
+  const attachments = createAttachmentPicker({
+    dropTarget: inputEl,
+    fileInput: attachInput,
+    attachBtn,
+    previewsEl: attachPreviewsEl,
+  });
 
   let sessionId = null;
   let activeTurn = null; // { turnId, asstBody, raw } while a turn streams/reconnects
@@ -2092,6 +2250,7 @@ function initAdminTerminal() {
         const body = addMessage(m.role === 'user' ? 'user' : 'assistant');
         if (m.role === 'user') body.textContent = m.text || '';
         else { const { html, footer } = renderAssistant(m.text || ''); body.innerHTML = html + footer; }
+        if (m.images && m.images.length) body.insertAdjacentHTML('beforeend', renderMsgImages(m.images));
       });
       if (!chat.messages || !chat.messages.length) {
         logEl.innerHTML = '<div class="term-empty">This conversation has no messages yet.</div>';
@@ -2233,10 +2392,13 @@ function initAdminTerminal() {
   async function send() {
     const text = inputEl.value.trim();
     if (!text || activeTurn) return;
+    const images = attachments.getImages();
     inputEl.value = '';
+    attachments.clear();
 
     const userBody = addMessage('user');
     userBody.textContent = text;
+    if (images.length) userBody.insertAdjacentHTML('beforeend', renderMsgImages(images));
     const asstBody = addMessage('assistant');
     asstBody.innerHTML = '<span class="tmsg-stream"></span><span class="tmsg-cursor"></span>';
 
@@ -2250,7 +2412,7 @@ function initAdminTerminal() {
       resp = await fetch('/api/admin/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, mode: modeSel.value, sessionId, turnId, repo: repoSel.value }),
+        body: JSON.stringify({ message: text, mode: modeSel.value, sessionId, turnId, repo: repoSel.value, images }),
       });
     } catch {
       // Couldn't reach the server to start — the job may still have launched,

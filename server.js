@@ -81,9 +81,25 @@ function resolveCopilotBin() {
 const COPILOT_BIN = resolveCopilotBin();
 
 const app = express();
-// Raised from the default 100kb so a couple of base64-encoded image
-// attachments (screenshots, mockups) fit in a chat turn's JSON body.
-app.use(express.json({ limit: '20mb' }));
+// Raised from the default 100kb so multiple base64-encoded image attachments
+// (phone photos/screenshots) fit in a chat turn's JSON body. Sized for up to
+// MAX_IMAGES_PER_TURN (4) images at MAX_IMAGE_BYTES (8MB) each: 4 * 8MB raw
+// becomes ~43MB once base64-encoded, plus JSON/text overhead, so 40mb gives
+// enough headroom to avoid tripping a 413 on a full-size multi-image turn.
+app.use(express.json({ limit: '40mb' }));
+// Turn body-parser's bare 413 (PayloadTooLargeError) and JSON parse errors
+// into a friendly JSON response instead of a bodyless/plain-text failure.
+app.use((err, req, res, next) => {
+  if (err && (err.type === 'entity.too.large' || err.status === 413)) {
+    return res.status(413).json({
+      error: 'Attachment(s) too large. Please use smaller/fewer images and try again.',
+    });
+  }
+  if (err && err.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'Malformed request body.' });
+  }
+  next(err);
+});
 app.use(express.static('public'));
 // Serve saved chat-attachment images back to the browser so past
 // conversations still show what was attached when their transcript reloads.

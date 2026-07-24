@@ -1589,6 +1589,17 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   return el;
 }
 
+// Turn a failed fetch response into a readable message: prefer the server's
+// JSON `{ error }` body (e.g. "Attachment(s) too large...") over a bare
+// "HTTP 413"/"HTTP 500" so users know what actually went wrong.
+async function friendlyHttpError(resp) {
+  try {
+    const data = await resp.clone().json();
+    if (data && data.error) return data.error;
+  } catch { /* not JSON — fall back to status code */ }
+  return `HTTP ${resp.status}`;
+}
+
 // Read an SSE response body, dispatching parsed events to handlers.
 async function pumpSSE(resp, { onChunk, onError, onResult, onMeta }) {
   const reader = resp.body.getReader();
@@ -1954,7 +1965,7 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec) {
         body: JSON.stringify({ message: text, mode, images: images || [] }),
       });
       if (!resp.ok || !resp.body) {
-        raw = `[error] HTTP ${resp.status}`;
+        raw = `[error] ${await friendlyHttpError(resp)}`;
         textEl.appendChild(document.createTextNode(raw));
         messages.push({ role: 'assistant', text: raw, mode, at: new Date().toISOString() });
         setSending(false); return;
@@ -2420,7 +2431,7 @@ function initAdminTerminal() {
       appendActiveChunk('\n[connection dropped — reconnecting…]', 'stderr');
       return reconnectLoop();
     }
-    if (!resp.ok || !resp.body) { finishTurn('failed', null, `HTTP ${resp.status}`); return; }
+    if (!resp.ok || !resp.body) { finishTurn('failed', null, await friendlyHttpError(resp)); return; }
     if (!(await consumeStream(resp))) {
       if (activeTurn) appendActiveChunk('\n[connection dropped — reconnecting…]', 'stderr');
       await reconnectLoop();

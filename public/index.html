@@ -1670,12 +1670,55 @@ function createAttachmentPicker({ dropTarget, fileInput, attachBtn, previewsEl }
     }
   }
 
+  // Downscale + re-encode as JPEG so full-resolution phone photos (often
+  // 10-15MB) shrink to a small fraction of that before being base64-encoded
+  // into the chat turn's JSON body, keeping well clear of the server's
+  // upload limit even with multiple attachments per turn.
+  const ATTACH_MAX_DIMENSION = 1600;
+  const ATTACH_JPEG_QUALITY = 0.8;
+
+  function compressImage(dataUrl, mimeType) {
+    return new Promise((resolve) => {
+      // Skip re-encoding formats canvas can't losslessly preserve as-is
+      // (e.g. GIF animations) or that are already small/simple.
+      if (mimeType === 'image/gif' || mimeType === 'image/svg+xml') {
+        resolve(dataUrl);
+        return;
+      }
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, ATTACH_MAX_DIMENSION / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(dataUrl);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, w, h);
+        try {
+          const out = canvas.toDataURL('image/jpeg', ATTACH_JPEG_QUALITY);
+          // Only use the compressed version if it's actually smaller.
+          resolve(out.length < dataUrl.length ? out : dataUrl);
+        } catch {
+          resolve(dataUrl);
+        }
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    });
+  }
+
   function readFile(file) {
     if (!file || !file.type || !file.type.startsWith('image/')) return;
     if (items.length >= MAX_ATTACH_IMAGES) return;
     const reader = new FileReader();
-    reader.onload = () => {
-      items.push({ id: `${Date.now()}${Math.random().toString(16).slice(2)}`, name: file.name || 'image', dataUrl: reader.result });
+    reader.onload = async () => {
+      const dataUrl = await compressImage(reader.result, file.type);
+      items.push({ id: `${Date.now()}${Math.random().toString(16).slice(2)}`, name: file.name || 'image', dataUrl });
       render();
     };
     reader.readAsDataURL(file);

@@ -149,6 +149,12 @@ pipeline you get:
     that PR (the old build no longer reflects the new code) — the just-applied
     turn's page reload shows this immediately, and the previous Deploy attempt
     is preserved in Deploy History rather than lost.
+  - **Image attachments**: drag an image onto the message box, paste a
+    screenshot, or tap the 📎 button (opens the native photo picker on mobile)
+    to attach up to 4 images to a turn. Attached images are passed to Copilot
+    via `--attachment` and stay visible as thumbnails in the conversation
+    history after reload. The same attachment support is available in the
+    Admin Terminal composer.
 
 ---
 

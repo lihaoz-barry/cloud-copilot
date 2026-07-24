@@ -27,6 +27,7 @@ const gh = require('./lib/gh');
 const repoConfig = require('./lib/repoConfig');
 const { runCopilotSSE, writeSseHead } = require('./lib/runner');
 const jobs = require('./lib/jobs');
+const { UPLOADS_DIR, saveUploadedImages, cleanupOldUploads } = require('./lib/attachments');
 
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 8787);
@@ -80,8 +81,34 @@ function resolveCopilotBin() {
 const COPILOT_BIN = resolveCopilotBin();
 
 const app = express();
-app.use(express.json());
+// Raised from the default 100kb so multiple base64-encoded image attachments
+// (phone photos/screenshots) fit in a chat turn's JSON body. Sized for up to
+// MAX_IMAGES_PER_TURN (4) images at MAX_IMAGE_BYTES (8MB) each: 4 * 8MB raw
+// becomes ~43MB once base64-encoded, plus JSON/text overhead, so 40mb gives
+// enough headroom to avoid tripping a 413 on a full-size multi-image turn.
+app.use(express.json({ limit: '40mb' }));
+// Turn body-parser's bare 413 (PayloadTooLargeError) and JSON parse errors
+// into a friendly JSON response instead of a bodyless/plain-text failure.
+app.use((err, req, res, next) => {
+  if (err && (err.type === 'entity.too.large' || err.status === 413)) {
+    return res.status(413).json({
+      error: 'Attachment(s) too large. Please use smaller/fewer images and try again.',
+    });
+  }
+  if (err && err.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'Malformed request body.' });
+  }
+  next(err);
+});
 app.use(express.static('public'));
+// Serve saved chat-attachment images back to the browser so past
+// conversations still show what was attached when their transcript reloads.
+app.use('/uploads', express.static(UPLOADS_DIR));
+
+// Sweep uploaded chat images past their retention window so disk usage from
+// attachments doesn't grow unbounded; run at startup and periodically.
+cleanupOldUploads();
+setInterval(cleanupOldUploads, 6 * 60 * 60 * 1000).unref();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -815,10 +842,16 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
     return sendSseBlocked(res, { action: 'chat', prNumber, mode, status: 'failed', message: message2 });
   }
 
-  store.appendChatMessage(repo.name, n, prNumber, { role: 'user', text: message, mode });
+  // Attached screenshots/mockups (if any) — saved to disk so they can be
+  // passed to the CLI via --attachment and redisplayed from history later.
+  const savedImages = saveUploadedImages(req.body?.images);
+  const imageRefs = savedImages.map((img) => ({ url: img.url, name: img.name }));
+
+  store.appendChatMessage(repo.name, n, prNumber, { role: 'user', text: message, mode, images: imageRefs });
 
   const args = [];
   if (resumeId) args.push(`--resume=${resumeId}`);
+  for (const img of savedImages) args.push('--attachment', img.path);
   if (mode === 'plan') {
     // Read-only: propose a plan, do not touch files. Enforced via approval
     // flags (default = file edits denied), not just the prompt wording.
@@ -971,6 +1004,11 @@ app.post('/api/admin/chat', (req, res) => {
 
   const args = [];
   if (sessionId) args.push(`--resume=${sessionId}`);
+  // Attached screenshots/mockups (if any) — saved to disk so they can be
+  // passed to the CLI via --attachment and redisplayed from history later.
+  const savedImages = saveUploadedImages(req.body?.images);
+  const imageRefs = savedImages.map((img) => ({ url: img.url, name: img.name }));
+  for (const img of savedImages) args.push('--attachment', img.path);
   args.push('-p', message, ...approvalFlags(mode));
 
   const job = jobs.startJob(key, {
@@ -982,7 +1020,13 @@ app.post('/api/admin/chat', (req, res) => {
       // The job manager captures the --resume=<id> session id from the stream.
       const sid = j.sessionId;
       if (sid) {
-        store.appendAdminTurn(sid, { userText: message, assistantText: j.conversation, mode, repo: repoName || null });
+        store.appendAdminTurn(sid, {
+          userText: message,
+          assistantText: j.conversation,
+          mode,
+          repo: repoName || null,
+          images: imageRefs,
+        });
       }
       return {
         action: 'admin',

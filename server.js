@@ -294,6 +294,152 @@ app.post('/api/repos/:name/issues/:n/hide', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// PreIssues — lightweight "idea sticky notes" that iterate (via a Copilot CLI
+// chat) into a full issue draft, then get created as a real GitHub issue.
+// ---------------------------------------------------------------------------
+
+const PREISSUE_ID_RE = /^[0-9a-fA-F-]{8,64}$/;
+
+// Pull the last fenced ```json {...} ``` block out of a chat transcript and
+// parse it as the current issue draft { title, body }. Copilot is prompted to
+// always end its reply with one, so the frontend can show a live draft
+// preview without any extra structured-output plumbing.
+function extractDraft(text) {
+  const matches = [...String(text || '').matchAll(/```json\s*([\s\S]*?)```/g)];
+  if (!matches.length) return null;
+  const last = matches[matches.length - 1][1];
+  try {
+    const parsed = JSON.parse(last);
+    if (parsed && typeof parsed.title === 'string') {
+      return { title: parsed.title, body: typeof parsed.body === 'string' ? parsed.body : '' };
+    }
+  } catch {
+    /* not valid JSON — no draft update this turn */
+  }
+  return null;
+}
+
+app.get('/api/repos/:name/preissues', (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  res.json({ preIssues: store.listPreIssues(repo.name) });
+});
+
+app.post('/api/repos/:name/preissues', (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+  if (!text) return res.status(400).json({ error: 'text is required' });
+  const pre = store.createPreIssue(repo.name, text);
+  res.json({ preIssue: pre });
+});
+
+app.delete('/api/repos/:name/preissues/:id', (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const { id } = req.params;
+  if (!PREISSUE_ID_RE.test(id)) return res.status(400).json({ error: 'invalid id' });
+  jobs.cancelJob(`${repo.name}:preissue:${id}`);
+  const deleted = store.deletePreIssue(repo.name, id);
+  if (!deleted) return res.status(404).json({ error: 'preissue not found' });
+  res.json({ ok: true });
+});
+
+// Conversational iteration: chat with the local Copilot CLI (read-only, no
+// working-tree checkout needed) to expand a PreIssue's short text into a full
+// issue draft. Streams over SSE, resuming the same session turn to turn.
+app.post('/api/repos/:name/preissues/:id/chat', async (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const { id } = req.params;
+  if (!PREISSUE_ID_RE.test(id)) return res.status(400).json({ error: 'invalid id' });
+  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  if (!message) return res.status(400).json({ error: 'message is required' });
+
+  const pre = store.getPreIssue(repo.name, id);
+  if (!pre) return res.status(404).json({ error: 'preissue not found' });
+
+  const key = `${repo.name}:preissue:${id}`;
+  writeSseHead(res);
+
+  const existing = jobs.getJob(key);
+  if (existing && existing.status === 'running') {
+    jobs.subscribe(existing, res);
+    return;
+  }
+
+  store.appendPreIssueChatMessage(repo.name, id, { role: 'user', text: message });
+
+  const resumeId = pre.chat && pre.chat.sessionId;
+  const args = [];
+  if (resumeId) args.push(`--resume=${resumeId}`);
+  const draftHint = pre.draft
+    ? `The current draft is:\n\`\`\`json\n${JSON.stringify(pre.draft)}\n\`\`\`\n`
+    : '';
+  const prompt =
+    `You are helping turn a quick idea into a well-formed GitHub issue for this repo. ` +
+    `Do NOT modify any files — this is a read-only conversation; you may look at the ` +
+    `codebase for context if useful. The original idea was: "${pre.text}". ${draftHint}` +
+    `The user just said: ${message}\n\n` +
+    `Reply conversationally, then ALWAYS end your reply with the current best draft as a ` +
+    `fenced json block of the exact shape {"title": "...", "body": "..."} (a short, clear ` +
+    `title and a body with motivation + concrete acceptance criteria).`;
+  args.push('-p', prompt, ...approvalFlags('default'));
+
+  const job = jobs.startJob(key, {
+    bin: COPILOT_BIN,
+    args,
+    cwd: repo.path,
+    meta: { action: 'preissue-chat', id },
+    onSession: (sid) => store.setPreIssueSession(repo.name, id, sid),
+    onDone: async (j) => {
+      const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
+      store.appendPreIssueChatMessage(repo.name, id, { role: 'assistant', text: j.conversation });
+      const draft = extractDraft(j.conversation);
+      if (draft) store.setPreIssueDraft(repo.name, id, draft);
+      return { action: 'preissue-chat', id, status, sessionId: j.sessionId, draft };
+    },
+  });
+
+  jobs.subscribe(job, res);
+});
+
+app.post('/api/repos/:name/preissues/:id/chat/cancel', (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const { id } = req.params;
+  const cancelled = jobs.cancelJob(`${repo.name}:preissue:${id}`);
+  res.json({ cancelled });
+});
+
+// One-click promotion: create a real GitHub issue from the current draft.
+app.post('/api/repos/:name/preissues/:id/create-issue', async (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  if (!repo.github) return res.status(400).json({ error: 'repo has no github.com remote' });
+  const { id } = req.params;
+  if (!PREISSUE_ID_RE.test(id)) return res.status(400).json({ error: 'invalid id' });
+
+  const pre = store.getPreIssue(repo.name, id);
+  if (!pre) return res.status(404).json({ error: 'preissue not found' });
+  if (pre.status === 'converted') {
+    return res.status(409).json({ error: 'already converted', issueNumber: pre.issueNumber, issueUrl: pre.issueUrl });
+  }
+  const draft = pre.draft;
+  if (!draft || !draft.title) {
+    return res.status(400).json({ error: 'no draft yet — chat with it first to build a title/body' });
+  }
+
+  try {
+    const { url, number } = await gh.createIssue(repo.ownerRepo, draft.title, draft.body || '');
+    store.markPreIssueConverted(repo.name, id, { issueNumber: number, issueUrl: url });
+    res.json({ ok: true, issueNumber: number, issueUrl: url });
+  } catch (err) {
+    res.status(500).json({ error: err.message, stderr: (err.stderr || '').toString() });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Action: Create PR (implement the issue end-to-end and open a PR)
 // ---------------------------------------------------------------------------
 

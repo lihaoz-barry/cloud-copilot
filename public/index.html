@@ -445,14 +445,40 @@
     .admin-history-item:hover .ahi-del { opacity: 1; }
     .admin-history-item .ahi-del:hover { color: #f87171; background: #ffffff12; }
 
-    /* ---- TestFlight placeholder page -------------------------------------- */
-    #testflightView { max-width: 860px; margin: 0 auto; padding: 8px 14px 60px; }
+    /* ---- TestFlight page ---------------------------------------------------- */
+    #testflightView { max-width: 900px; margin: 0 auto; padding: 8px 14px 60px; }
     .placeholder {
       border: 1px dashed #8884; border-radius: 14px; padding: 48px 24px; text-align: center;
       color: #888; margin-top: 20px;
     }
     .placeholder .big { font-size: 2.4rem; margin-bottom: 8px; }
     .placeholder h2 { margin: 0 0 6px; font-size: 1.1rem; color: inherit; }
+    .tf-toolbar { display: flex; align-items: center; gap: 10px; margin: 4px 0 14px; }
+    .tf-toolbar h2 { margin: 0; font-size: 1.1rem; flex: 1; }
+    .tf-card {
+      border: 1px solid #8883; border-radius: 12px; padding: 12px 14px; margin-bottom: 10px;
+      background: #ffffff06;
+    }
+    .tf-card-top { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+    .tf-app { font-weight: 600; }
+    .tf-ver { color: #9aa0aa; font-size: .85rem; }
+    .tf-pr { margin-left: auto; font-size: .85rem; }
+    .tf-pr a { color: inherit; text-decoration: none; opacity: .85; }
+    .tf-pr a:hover { text-decoration: underline; }
+    .tf-what {
+      margin: 8px 0 10px; padding: 8px 10px; border-radius: 8px; background: #ffffff08;
+      font-size: .85rem; color: #c8ccd4;
+    }
+    .tf-what .lbl { color: #9aa0aa; font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; display: block; margin-bottom: 2px; }
+    .tf-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .tf-when { font-size: .78rem; color: #9aa0aa; }
+    .tf-spacer { flex: 1; }
+    .tf-mergebtn {
+      border: 1px solid #8884; background: #ffffff0d; color: inherit; border-radius: 8px;
+      padding: 5px 12px; font-size: .82rem; cursor: pointer;
+    }
+    .tf-mergebtn:hover { background: #ffffff1a; }
+    .tf-mergebtn:disabled { opacity: .5; cursor: default; }
   </style>
 </head>
 <body>
@@ -548,11 +574,11 @@
   </div>
 
   <div id="testflightView" style="display:none">
-    <div class="placeholder">
-      <div class="big">✈️</div>
-      <h2>TestFlight Builds</h2>
-      <p>Coming soon — this page will list your recent TestFlight builds and their status.</p>
+    <div class="tf-toolbar">
+      <h2>✈️ TestFlight Builds</h2>
+      <button id="tfRefreshBtn" class="ghost" type="button">↻ Refresh</button>
     </div>
+    <div id="tfList"></div>
   </div>
 
   <button id="depthFab" class="ghost depth-fab" title="Set pipeline auto-run depth">⏩ Depth</button>
@@ -1817,10 +1843,155 @@ function setTab(tab) {
   currentTab = tab;
   applyTab();
   if (tab === 'admin') initAdminTerminal();
+  if (tab === 'testflight') loadTestflightBuilds();
 }
 document.querySelectorAll('.nav-tab').forEach((b) => {
   b.addEventListener('click', () => setTab(b.dataset.tab));
 });
+
+// ---- TestFlight overview page: every build ever shipped, across all repos,
+// with its PR's title shown as the "What to Test" note and a one-click Merge
+// button that reuses the same merge SSE endpoint as the PR detail page. -----
+const tfList = document.getElementById('tfList');
+const tfRefreshBtn = document.getElementById('tfRefreshBtn');
+tfRefreshBtn.addEventListener('click', () => loadTestflightBuilds());
+
+function tfTimeAgo(iso) {
+  if (!iso) return '';
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const mins = Math.round(diffMs / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.round(hrs / 24);
+  return `${days}d ago`;
+}
+
+async function loadTestflightBuilds() {
+  tfList.innerHTML = '<div class="placeholder"><div class="big">✈️</div><p>Loading builds…</p></div>';
+  let builds;
+  try {
+    const r = await fetch('/api/testflight/builds');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    ({ builds } = await r.json());
+  } catch (e) {
+    tfList.innerHTML = `<div class="placeholder"><div class="big">⚠️</div><h2>Couldn't load builds</h2><p>${escape(e.message)}</p></div>`;
+    return;
+  }
+  if (!builds.length) {
+    tfList.innerHTML =
+      '<div class="placeholder"><div class="big">✈️</div><h2>No builds yet</h2>' +
+      '<p>Deploy a PR from the Home tab and it will show up here with its version, build number, and merge status.</p></div>';
+    return;
+  }
+  tfList.innerHTML = '';
+  for (const b of builds) tfList.appendChild(renderTfCard(b));
+}
+
+function renderTfCard(b) {
+  const card = document.createElement('div');
+  card.className = 'tf-card';
+
+  const top = document.createElement('div');
+  top.className = 'tf-card-top';
+  const app = document.createElement('span');
+  app.className = 'tf-app';
+  app.textContent = b.repo;
+  const ver = document.createElement('span');
+  ver.className = 'tf-ver';
+  ver.textContent = b.version ? `${b.version} (${b.buildNumber ?? '?'})` : b.buildNumber ? `build ${b.buildNumber}` : '';
+  const dstatus = document.createElement('span');
+  dstatus.className = `stbtn ${STATE_CLASS[b.deployStatus] || 'st-idle'}`;
+  dstatus.innerHTML = `<span class="dot"></span>${escape(STATE_LABEL.deploy[b.deployStatus] || b.deployStatus)}`;
+  const prLink = document.createElement('span');
+  prLink.className = 'tf-pr';
+  if (b.prUrl) {
+    prLink.innerHTML = `<a href="${b.prUrl}" target="_blank" rel="noopener">PR #${b.prNumber}</a>`;
+  } else {
+    prLink.textContent = `PR #${b.prNumber}`;
+  }
+  top.append(app, ver, dstatus, prLink);
+
+  const what = document.createElement('div');
+  what.className = 'tf-what';
+  what.innerHTML = `<span class="lbl">What to test</span>${escape(b.changelog || b.title || '(no notes captured for this build)')}`;
+
+  const row = document.createElement('div');
+  row.className = 'tf-row';
+  const when = document.createElement('span');
+  when.className = 'tf-when';
+  when.textContent = b.finishedAt ? `deployed ${tfTimeAgo(b.finishedAt)}` : b.startedAt ? `started ${tfTimeAgo(b.startedAt)}` : '';
+  row.appendChild(when);
+  const spacer = document.createElement('span');
+  spacer.className = 'tf-spacer';
+  row.appendChild(spacer);
+
+  if (b.current && b.merge) {
+    const ms = b.merge.status;
+    if (ms === 'success') {
+      const pill = document.createElement('span');
+      pill.className = `stbtn ${STATE_CLASS.success}`;
+      pill.innerHTML = `<span class="dot"></span>Merged${b.merge.forced ? ' (forced)' : ''}`;
+      row.appendChild(pill);
+    } else if (ms === 'merging') {
+      const pill = document.createElement('span');
+      pill.className = `stbtn ${STATE_CLASS.merging}`;
+      pill.innerHTML = `<span class="dot"></span>Merging…`;
+      row.appendChild(pill);
+    } else {
+      const btn = document.createElement('button');
+      btn.className = 'tf-mergebtn';
+      btn.textContent = ms === 'failed' || ms === 'aborted' ? 'Retry merge' : 'Merge';
+      btn.addEventListener('click', () => onTfMerge(b, btn));
+      row.appendChild(btn);
+    }
+  }
+
+  card.append(top, what, row);
+  return card;
+}
+
+async function onTfMerge(b, btn) {
+  const deployOk = b.deployStatus === 'success';
+  let force = false;
+  if (!deployOk) {
+    if (!window.confirm(`Deploy for PR #${b.prNumber} hasn't succeeded (status: ${b.deployStatus}). Merge anyway?`)) return;
+    force = true;
+  } else if (!window.confirm(`Merge PR #${b.prNumber} into its base branch now?`)) {
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = 'Merging…';
+  try {
+    const resp = await fetch(`/api/repos/${enc(b.repo)}/issues/${b.issueNumber}/merge/${b.prNumber}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force }),
+    });
+    if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+    let finalStatus = null, resultData = null;
+    await pumpSSE(resp, {
+      onResult: (d) => { finalStatus = d.status; resultData = d; },
+    });
+    if (finalStatus === 'success') {
+      btn.textContent = 'Merged';
+    } else if (finalStatus === 'blocked') {
+      window.alert((resultData && resultData.message) || 'Merge blocked.');
+      btn.disabled = false;
+      btn.textContent = 'Merge';
+    } else {
+      btn.textContent = 'Merge failed — retry';
+      btn.disabled = false;
+    }
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'Merge failed — retry';
+    window.alert(`Merge request failed: ${e.message}`);
+  } finally {
+    loadTestflightBuilds();
+  }
+}
 
 function parseHash() {
   const m = decodeURIComponent(location.hash).match(/^#\/pr\/([^/]+)\/(\d+)\/(\d+)$/);

@@ -192,6 +192,20 @@ app.get('/api/repos', (req, res) => {
   res.json({ root: REPOS_ROOT, repos });
 });
 
+// ---------------------------------------------------------------------------
+// TestFlight overview — every build ever shipped via the ios-testflight
+// deploy path (current + archived deploy attempts), across all repos/issues,
+// flattened for a single cross-repo page: version/build, the PR (and its
+// title as the "What to Test" note), and whether it's been merged yet.
+// ---------------------------------------------------------------------------
+app.get('/api/testflight/builds', (req, res) => {
+  const builds = store.listAllBuilds().map((b) => ({
+    ...b,
+    ownerRepo: resolveRepo(b.repo)?.ownerRepo || null,
+  }));
+  res.json({ builds });
+});
+
 app.get('/api/repos/:name/issues', async (req, res) => {
   const repo = resolveRepo(req.params.name);
   if (!repo) return res.status(404).json({ error: 'repo not found under REPOS_ROOT' });
@@ -608,6 +622,19 @@ function sendSseBlocked(res, payload) {
   res.end();
 }
 
+// Builds the "What to Test" text TestFlight testers see, from the PR title
+// (falling back to a generic version/build string). Strips characters that
+// could break out of the single-quoted shell argument the agent is told to
+// pass to `fastlane beta` — the PR title comes from GitHub and is never
+// trusted as shell-safe.
+function buildChangelog(pr, issueNumber, version, buildNumber) {
+  const raw = (pr && pr.title) || '';
+  const cleaned = raw.replace(/['"`$\\]/g, '').replace(/\s+/g, ' ').trim();
+  const suffix = issueNumber ? ` (closes #${issueNumber})` : '';
+  const text = cleaned ? `${cleaned}${suffix}` : `v${version || '1.0'} (build ${buildNumber})`;
+  return text.slice(0, 500); // TestFlight "What to Test" is short; keep it well under Apple's limit
+}
+
 function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
   gh.getPr(repo.ownerRepo, prNumber).then((pr) => {
     if (!pr || !pr.headRefName) {
@@ -645,16 +672,20 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
     }
 
     const versionArg = version ? ` version:${version}` : '';
+    // "What to Test" text testers see in TestFlight — derived from the PR
+    // title so builds are self-describing instead of shipping with no notes.
+    const changelog = buildChangelog(pr, n, version, buildNumber);
     const prompt =
       `The branch for PR #${prNumber} is already checked out. Deploy the current ` +
       `${repo.name} app to TestFlight using the testflight-deploy skill, running ` +
-      `\`fastlane beta build:${buildNumber}${versionArg}\` (do not change the build/version ` +
-      `numbers — they're already pinned). When finished, clearly state whether the ` +
-      `build succeeded and whether the upload to TestFlight succeeded. Note: Xcode's ` +
-      `export step can silently reassign the build number, so grep the fastlane log for ` +
-      `its own "finished processing the build" line and quote that line verbatim (exact ` +
-      `numbers, no paraphrasing) — that's the number Apple actually assigned, which may ` +
-      `differ from what was requested.`;
+      `\`fastlane beta build:${buildNumber}${versionArg} changelog:'${changelog}'\` (do not ` +
+      `change the build/version numbers or the changelog text — they're already pinned; ` +
+      `the changelog becomes testers' "What to Test" note in TestFlight, so it must be passed ` +
+      `through exactly as given). When finished, clearly state whether the build succeeded and ` +
+      `whether the upload to TestFlight succeeded. Note: Xcode's export step can silently ` +
+      `reassign the build number, so grep the fastlane log for its own "finished processing ` +
+      `the build" line and quote that line verbatim (exact numbers, no paraphrasing) — that's ` +
+      `the number Apple actually assigned, which may differ from what was requested.`;
     // Deploy must reach files outside the repo (/tmp, ~/Library, keychain) and the
     // network, so grant full path + URL + tool access.
     const args = ['-p', prompt, '--allow-all'];
@@ -705,6 +736,7 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
           if (success) {
             d.buildNumber = finalBuildNumber;
             d.version = finalVersion;
+            d.changelog = changelog;
           }
         });
         return {

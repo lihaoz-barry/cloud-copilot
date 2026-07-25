@@ -497,6 +497,10 @@
 
   <div id="prDetailView" style="display:none"></div>
 
+  <div id="preIssuesListView" style="display:none"></div>
+
+  <div id="preIssueDetailView" style="display:none"></div>
+
   <div id="adminView" style="display:none">
     <div class="admin-head">
       <div class="admin-menu-wrap">
@@ -781,6 +785,14 @@ async function loadIssues(repo, body, force = false) {
   toolbar.className = 'toolbar';
   const when = data.at ? new Date(data.at).toLocaleTimeString() : '';
   toolbar.innerHTML = `<span class="muted">${data.issues.length} open · ${data.cached ? 'cached' : 'fresh'} ${when}</span><span class="spacer"></span>`;
+  const preIssuesBtn = document.createElement('button');
+  preIssuesBtn.className = 'ghost sm';
+  preIssuesBtn.textContent = '📝 PreIssues';
+  preIssuesBtn.addEventListener('click', () => {
+    location.hash = `#/preissues/${encodeURIComponent(repo.name)}`;
+  });
+  toolbar.appendChild(preIssuesBtn);
+
   const refresh = document.createElement('button');
   refresh.className = 'ghost sm';
   refresh.textContent = '↻ Refresh';
@@ -1780,6 +1792,8 @@ function renderMsgImages(images) {
 // ---- PR detail page: hash route #/pr/<repo>/<issue>/<pr> -------------------
 const mainView = document.getElementById('mainView');
 const prDetailView = document.getElementById('prDetailView');
+const preIssuesListView = document.getElementById('preIssuesListView');
+const preIssueDetailView = document.getElementById('preIssueDetailView');
 const adminView = document.getElementById('adminView');
 const testflightView = document.getElementById('testflightView');
 
@@ -1795,6 +1809,8 @@ function applyTab() {
   } else {
     mainView.style.display = 'none';
     prDetailView.style.display = 'none';
+    preIssuesListView.style.display = 'none';
+    preIssueDetailView.style.display = 'none';
   }
 }
 function setTab(tab) {
@@ -1812,16 +1828,43 @@ function parseHash() {
   return { repo: m[1], issueNumber: Number(m[2]), prNumber: Number(m[3]) };
 }
 
+function parsePreIssuesHash() {
+  const m = decodeURIComponent(location.hash).match(/^#\/preissues\/([^/]+)$/);
+  return m ? { repo: m[1] } : null;
+}
+
+function parsePreIssueDetailHash() {
+  const m = decodeURIComponent(location.hash).match(/^#\/preissue\/([^/]+)\/([^/]+)$/);
+  return m ? { repo: m[1], id: m[2] } : null;
+}
+
+function hideAllHomeViews() {
+  mainView.style.display = 'none';
+  prDetailView.style.display = 'none';
+  preIssuesListView.style.display = 'none';
+  preIssueDetailView.style.display = 'none';
+}
+
 function route() {
   if (currentTab !== 'home') return;
   const parsed = parseHash();
+  const preList = parsePreIssuesHash();
+  const preDetail = parsePreIssueDetailHash();
   if (parsed) {
-    mainView.style.display = 'none';
+    hideAllHomeViews();
     prDetailView.style.display = '';
     renderPrDetail(parsed.repo, parsed.issueNumber, parsed.prNumber);
+  } else if (preDetail) {
+    hideAllHomeViews();
+    preIssueDetailView.style.display = '';
+    renderPreIssueDetail(preDetail.repo, preDetail.id);
+  } else if (preList) {
+    hideAllHomeViews();
+    preIssuesListView.style.display = '';
+    renderPreIssuesList(preList.repo);
   } else {
+    hideAllHomeViews();
     mainView.style.display = '';
-    prDetailView.style.display = 'none';
   }
 }
 window.addEventListener('hashchange', route);
@@ -2060,6 +2103,315 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec) {
   });
 
   return wrap;
+}
+
+// ---- PreIssues: idea sticky notes -> chat-drafted issue -> real GitHub issue
+function preIssuesBackHref(repoName) {
+  return `#/preissues/${encodeURIComponent(repoName)}`;
+}
+
+async function renderPreIssuesList(repoName) {
+  preIssuesListView.innerHTML = '<p class="muted" style="padding:16px">Loading…</p>';
+
+  const wrap = document.createElement('div');
+  wrap.style.maxWidth = '860px';
+  wrap.style.margin = '0 auto';
+  wrap.style.padding = '16px 14px 60px';
+
+  const back = document.createElement('a');
+  back.href = '#';
+  back.className = 'backlink';
+  back.textContent = '← Back to all repos';
+  wrap.appendChild(back);
+
+  const h1 = document.createElement('h1');
+  h1.textContent = `📝 PreIssues · ${repoName}`;
+  wrap.appendChild(h1);
+
+  const createRow = document.createElement('div');
+  createRow.className = 'chat-inputrow';
+  createRow.innerHTML = `
+    <textarea class="pre-new-input" rows="2" placeholder="Jot down an idea in a sentence or two…"></textarea>
+    <div class="chat-actions"><button class="pre-new-send">+ Add PreIssue</button></div>`;
+  wrap.appendChild(createRow);
+
+  const listEl = document.createElement('div');
+  listEl.className = 'pre-list';
+  wrap.appendChild(listEl);
+
+  preIssuesListView.innerHTML = '';
+  preIssuesListView.appendChild(wrap);
+
+  const inputEl = createRow.querySelector('.pre-new-input');
+  const sendBtn = createRow.querySelector('.pre-new-send');
+  sendBtn.addEventListener('click', async () => {
+    const text = inputEl.value.trim();
+    if (!text) return;
+    sendBtn.disabled = true;
+    try {
+      const resp = await fetch(`/api/repos/${enc(repoName)}/preissues`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      if (resp.ok) {
+        inputEl.value = '';
+        await load();
+      }
+    } finally {
+      sendBtn.disabled = false;
+    }
+  });
+
+  async function load() {
+    let data;
+    try {
+      data = await fetch(`/api/repos/${enc(repoName)}/preissues`).then((x) => x.json());
+    } catch (e) {
+      listEl.innerHTML = `<div class="err-inline">Failed to load: ${escape(e.message)}</div>`;
+      return;
+    }
+    if (data.error) { listEl.innerHTML = `<div class="err-inline">${escape(data.error)}</div>`; return; }
+    const items = data.preIssues || [];
+    if (!items.length) {
+      listEl.innerHTML = '<div class="muted" style="padding:8px 4px">No PreIssues yet — jot one down above.</div>';
+      return;
+    }
+    listEl.innerHTML = '';
+    for (const pre of items) {
+      const card = document.createElement('div');
+      card.className = 'issue pre-card';
+      const when = pre.createdAt ? new Date(pre.createdAt).toLocaleString() : '';
+      const statusBadge = pre.status === 'converted'
+        ? `<span class="label" style="background:#2a6">converted → #${pre.issueNumber}</span>`
+        : '';
+      card.innerHTML = `
+        <div class="issue-top">
+          <div class="issue-toprow">
+            <span class="issue-title" style="flex:1">${escape(pre.text)}</span>
+            ${statusBadge}
+          </div>
+          <div class="muted" style="padding:2px 4px">${escape(when)}</div>
+        </div>
+        <div class="toolbar" style="margin:0 4px 8px">
+          <span class="spacer"></span>
+          <button class="ghost sm pre-open">Expand →</button>
+          <button class="ghost sm pre-delete">🗑 Delete</button>
+        </div>`;
+      card.querySelector('.pre-open').addEventListener('click', () => {
+        location.hash = `#/preissue/${encodeURIComponent(repoName)}/${encodeURIComponent(pre.id)}`;
+      });
+      card.querySelector('.pre-delete').addEventListener('click', async () => {
+        if (!confirm('Delete this PreIssue?')) return;
+        await fetch(`/api/repos/${enc(repoName)}/preissues/${enc(pre.id)}`, { method: 'DELETE' });
+        load();
+      });
+      listEl.appendChild(card);
+    }
+  }
+  load();
+}
+
+async function renderPreIssueDetail(repoName, id) {
+  preIssueDetailView.innerHTML = '<p class="muted" style="padding:16px">Loading…</p>';
+
+  let data;
+  try {
+    data = await fetch(`/api/repos/${enc(repoName)}/preissues`).then((x) => x.json());
+  } catch (e) {
+    preIssueDetailView.innerHTML = `<a class="backlink" href="${preIssuesBackHref(repoName)}">← Back</a><p class="err-inline">Failed to load: ${escape(e.message)}</p>`;
+    return;
+  }
+  const pre = (data.preIssues || []).find((p) => p.id === id);
+  if (!pre) {
+    preIssueDetailView.innerHTML = `<a class="backlink" href="${preIssuesBackHref(repoName)}">← Back</a><p class="err-inline">PreIssue not found.</p>`;
+    return;
+  }
+
+  const wrap = document.createElement('div');
+  wrap.style.maxWidth = '860px';
+  wrap.style.margin = '0 auto';
+  wrap.style.padding = '16px 14px 60px';
+
+  const back = document.createElement('a');
+  back.href = preIssuesBackHref(repoName);
+  back.className = 'backlink';
+  back.textContent = '← Back to PreIssues';
+  wrap.appendChild(back);
+
+  const h1 = document.createElement('h1');
+  h1.textContent = '💡 ' + pre.text;
+  wrap.appendChild(h1);
+
+  const draftPanel = document.createElement('div');
+  draftPanel.className = 'history-panel';
+  wrap.appendChild(draftPanel);
+
+  function renderDraft() {
+    draftPanel.innerHTML = '';
+    const heading = document.createElement('h3');
+    heading.textContent = 'Issue draft';
+    draftPanel.appendChild(heading);
+    if (pre.status === 'converted') {
+      const p = document.createElement('div');
+      p.innerHTML = `Already converted → <a href="${escape(pre.issueUrl)}" target="_blank" rel="noopener">#${pre.issueNumber}</a>`;
+      draftPanel.appendChild(p);
+      return;
+    }
+    if (!pre.draft) {
+      const p = document.createElement('div');
+      p.className = 'muted';
+      p.textContent = 'No draft yet — chat below to iterate one out of the idea.';
+      draftPanel.appendChild(p);
+      return;
+    }
+    const titleEl = document.createElement('div');
+    titleEl.innerHTML = `<strong>${escape(pre.draft.title)}</strong>`;
+    const bodyEl = document.createElement('div');
+    bodyEl.className = 'muted';
+    bodyEl.style.whiteSpace = 'pre-wrap';
+    bodyEl.style.marginTop = '6px';
+    bodyEl.textContent = pre.draft.body || '';
+    draftPanel.append(titleEl, bodyEl);
+
+    const createBtn = document.createElement('button');
+    createBtn.className = 'chat-send';
+    createBtn.style.marginTop = '10px';
+    createBtn.textContent = '✅ Create Issue';
+    createBtn.addEventListener('click', async () => {
+      createBtn.disabled = true;
+      createBtn.textContent = 'Creating…';
+      try {
+        const resp = await fetch(`/api/repos/${enc(repoName)}/preissues/${enc(id)}/create-issue`, { method: 'POST' });
+        const out = await resp.json();
+        if (!resp.ok) throw new Error(out.error || `HTTP ${resp.status}`);
+        pre.status = 'converted';
+        pre.issueNumber = out.issueNumber;
+        pre.issueUrl = out.issueUrl;
+        renderDraft();
+      } catch (e) {
+        alert(`Failed to create issue: ${e.message}`);
+        createBtn.disabled = false;
+        createBtn.textContent = '✅ Create Issue';
+      }
+    });
+    draftPanel.appendChild(createBtn);
+  }
+  renderDraft();
+
+  const chatWrap = document.createElement('div');
+  chatWrap.className = 'chat-panel';
+  chatWrap.innerHTML = `
+    <h3>Iterate this into an issue</h3>
+    <div class="chat-messages"></div>
+    <div class="chat-inputrow">
+      <textarea class="chat-input" rows="3" placeholder="Add more context…"></textarea>
+      <div class="chat-actions">
+        <button class="chat-send">Send</button>
+        <button class="iconbtn abortbtn chat-abort" hidden>⨯ Abort</button>
+      </div>
+    </div>`;
+  wrap.appendChild(chatWrap);
+
+  preIssueDetailView.innerHTML = '';
+  preIssueDetailView.appendChild(wrap);
+
+  const messagesEl = chatWrap.querySelector('.chat-messages');
+  const inputEl = chatWrap.querySelector('.chat-input');
+  const sendBtn = chatWrap.querySelector('.chat-send');
+  const abortBtn = chatWrap.querySelector('.chat-abort');
+  const messages = ((pre.chat && pre.chat.messages) || []).slice();
+
+  function renderMessages() {
+    if (!messages.length) {
+      messagesEl.innerHTML = '<div class="chat-empty">No messages yet — say more about the idea below.</div>';
+      return;
+    }
+    messagesEl.innerHTML = '';
+    for (const m of messages) {
+      const bubble = document.createElement('div');
+      bubble.className = `chat-bubble chat-${m.role === 'user' ? 'user' : 'assistant'}`;
+      const metaEl = document.createElement('div');
+      metaEl.className = 'chat-meta';
+      metaEl.textContent = m.role === 'user' ? 'You' : 'Copilot';
+      const textEl = document.createElement('div');
+      textEl.className = 'chat-text';
+      textEl.textContent = m.text;
+      bubble.append(metaEl, textEl);
+      messagesEl.appendChild(bubble);
+    }
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+  renderMessages();
+
+  function appendLiveAssistant() {
+    const empty = messagesEl.querySelector('.chat-empty');
+    if (empty) empty.remove();
+    const bubble = document.createElement('div');
+    bubble.className = 'chat-bubble chat-assistant';
+    const metaEl = document.createElement('div');
+    metaEl.className = 'chat-meta';
+    metaEl.textContent = 'Copilot';
+    const textEl = document.createElement('div');
+    textEl.className = 'chat-text';
+    bubble.append(metaEl, textEl);
+    messagesEl.appendChild(bubble);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return textEl;
+  }
+
+  function setSending(sending) {
+    sendBtn.disabled = sending;
+    inputEl.disabled = sending;
+    abortBtn.hidden = !sending;
+  }
+
+  async function sendTurn(text) {
+    setSending(true);
+    messages.push({ role: 'user', text, at: new Date().toISOString() });
+    renderMessages();
+    const textEl = appendLiveAssistant();
+    let raw = '';
+    let finalDraft = null;
+    try {
+      const resp = await fetch(`/api/repos/${enc(repoName)}/preissues/${enc(id)}/chat`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text }),
+      });
+      if (!resp.ok || !resp.body) {
+        raw = `[error] HTTP ${resp.status}`;
+        textEl.appendChild(document.createTextNode(raw));
+        messages.push({ role: 'assistant', text: raw, at: new Date().toISOString() });
+        setSending(false); return;
+      }
+      await pumpSSE(resp, {
+        onChunk: (t) => { raw += t; textEl.appendChild(document.createTextNode(t)); messagesEl.scrollTop = messagesEl.scrollHeight; },
+        onError: (m) => { const s = `\n[error] ${m}`; raw += s; textEl.appendChild(document.createTextNode(s)); },
+        onResult: (d) => { finalDraft = d.draft || null; },
+      });
+    } catch (e) {
+      const s = `\n[connection dropped: ${e.message}]`;
+      raw += s; textEl.appendChild(document.createTextNode(s));
+    }
+    messages.push({ role: 'assistant', text: raw, at: new Date().toISOString() });
+    setSending(false);
+    if (finalDraft) {
+      pre.draft = finalDraft;
+      renderDraft();
+    }
+  }
+
+  sendBtn.addEventListener('click', () => {
+    const text = inputEl.value.trim();
+    if (!text) return;
+    inputEl.value = '';
+    sendTurn(text);
+  });
+
+  abortBtn.addEventListener('click', async () => {
+    try {
+      await fetch(`/api/repos/${enc(repoName)}/preissues/${enc(id)}/chat/cancel`, { method: 'POST' });
+    } catch { /* ignore */ }
+  });
 }
 
 // ---- Admin terminal: free-form Copilot CLI chat rooted at REPOS_ROOT -------

@@ -1189,11 +1189,25 @@ app.post('/api/admin/chat', (req, res) => {
   for (const img of savedImages) args.push('--attachment', img.path);
   args.push('-p', message, ...approvalFlags(mode));
 
+  // Durably buffer this turn *before* spawning the child. If this very turn
+  // asks Copilot to redeploy (which restarts this server process), the
+  // `close` handler below never gets to run — without this pre-write, the
+  // whole turn would vanish with no trace. See store.startAdminTurn.
+  store.startAdminTurn(turnId, {
+    userText: message,
+    mode,
+    repo: repoName || null,
+    images: imageRefs,
+    sessionId,
+  });
+
   const job = jobs.startJob(key, {
     bin: COPILOT_BIN,
     args,
     cwd,
     meta: { action: 'admin', turnId, repo: repoName || null },
+    onSession: (sid) => store.updateAdminTurnProgress(turnId, { sessionId: sid }),
+    onProgress: (j) => store.updateAdminTurnProgress(turnId, { assistantText: j.conversation, sessionId: j.sessionId }),
     onDone: async (j) => {
       // The job manager captures the --resume=<id> session id from the stream.
       const sid = j.sessionId;
@@ -1206,6 +1220,8 @@ app.post('/api/admin/chat', (req, res) => {
           images: imageRefs,
         });
       }
+      // Turn completed normally — the buffered copy is no longer needed.
+      store.finishAdminTurn(turnId);
       return {
         action: 'admin',
         turnId,
@@ -1270,4 +1286,11 @@ app.listen(PORT, HOST, () => {
   console.log(`cloud-copilot running at http://${HOST}:${PORT}`);
   console.log(`Authorized repos root: ${REPOS_ROOT}`);
   console.log(`Copilot binary: ${COPILOT_BIN}`);
+  // Recover any admin turn that was still in-flight when the previous
+  // process died (e.g. a chat turn triggered its own restart mid-reply) so
+  // it shows up as an "interrupted" turn instead of silently vanishing.
+  const recovered = store.reconcileInterruptedAdminTurns();
+  if (recovered.length) {
+    console.log(`Recovered ${recovered.length} interrupted admin turn(s): ${recovered.map((r) => r.turnId).join(', ')}`);
+  }
 });

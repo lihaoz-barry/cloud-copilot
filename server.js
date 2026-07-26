@@ -224,10 +224,17 @@ app.post('/api/settings/model', (req, res) => {
 // title as the "What to Test" note), and whether it's been merged yet.
 // ---------------------------------------------------------------------------
 app.get('/api/testflight/builds', (req, res) => {
-  const builds = store.listAllBuilds().map((b) => ({
-    ...b,
-    ownerRepo: resolveRepo(b.repo)?.ownerRepo || null,
-  }));
+  const builds = store
+    .listAllBuilds()
+    .map((b) => {
+      const repo = resolveRepo(b.repo);
+      return { ...b, ownerRepo: repo?.ownerRepo || null, _repo: repo };
+    })
+    // Only ever show builds shipped through the ios-testflight deploy path —
+    // repos configured for a "shell" deploy (e.g. a restart script) aren't
+    // TestFlight builds and would otherwise pollute this page.
+    .filter((b) => !b._repo || repoConfig.loadDeployConfig(b._repo.path).type === 'ios-testflight')
+    .map(({ _repo, ...b }) => b);
   res.json({ builds });
 });
 
@@ -388,7 +395,14 @@ function extractDraft(text) {
 app.get('/api/repos/:name/preissues', (req, res) => {
   const repo = resolveRepo(req.params.name);
   if (!repo) return res.status(404).json({ error: 'repo not found' });
-  res.json({ preIssues: store.listPreIssues(repo.name) });
+  // Annotate each PreIssue with whether its chat job is still running
+  // server-side — lets the client re-attach after a reload/nav-away instead
+  // of appearing "stuck" with no way to reconnect.
+  const preIssues = store.listPreIssues(repo.name).map((pre) => ({
+    ...pre,
+    live: Boolean(jobs.getJob(`${repo.name}:preissue:${pre.id}`)?.status === 'running'),
+  }));
+  res.json({ preIssues });
 });
 
 app.post('/api/repos/:name/preissues', (req, res) => {
@@ -419,21 +433,26 @@ app.post('/api/repos/:name/preissues/:id/chat', async (req, res) => {
   if (!repo) return res.status(404).json({ error: 'repo not found' });
   const { id } = req.params;
   if (!PREISSUE_ID_RE.test(id)) return res.status(400).json({ error: 'invalid id' });
-  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
-  if (!message) return res.status(400).json({ error: 'message is required' });
 
   const pre = store.getPreIssue(repo.name, id);
   if (!pre) return res.status(404).json({ error: 'preissue not found' });
 
   const key = `${repo.name}:preissue:${id}`;
-  writeSseHead(res);
 
+  // Reconnect: if a job is already running (e.g. the client navigated away
+  // and back), just re-attach — no new message required. Checking this
+  // BEFORE validating `message` is what lets a plain reconnect succeed.
   const existing = jobs.getJob(key);
   if (existing && existing.status === 'running') {
+    writeSseHead(res);
     jobs.subscribe(existing, res);
     return;
   }
 
+  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  if (!message) return res.status(400).json({ error: 'message is required' });
+
+  writeSseHead(res);
   store.appendPreIssueChatMessage(repo.name, id, { role: 'user', text: message });
 
   const resumeId = pre.chat && pre.chat.sessionId;
@@ -1003,16 +1022,19 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
     return res.status(400).json({ error: 'invalid PR number' });
   }
   const mode = req.body?.mode === 'apply' ? 'apply' : 'plan';
-  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
-  if (!message) return res.status(400).json({ error: 'message is required' });
   const key = `${repo.name}#${n}:chat:${prNumber}`;
 
+  // Reconnect: if a job is already running (e.g. the client navigated away
+  // and back), just re-attach — no new message required.
   const existing = jobs.getJob(key);
   if (existing && existing.status === 'running') {
     writeSseHead(res);
     jobs.subscribe(existing, res);
     return;
   }
+
+  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  if (!message) return res.status(400).json({ error: 'message is required' });
 
   writeSseHead(res);
 

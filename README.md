@@ -9,15 +9,20 @@ your LAN/VPN. From your phone you can:
   every expand also **auto-discovers PRs** referencing those issues (one `gh pr
   list` call, matched in-process) so the pipeline is populated without a manual
   step — a per-issue **↻ PRs** button remains for an explicit, always-live re-check
-- run every PR through a **3-stage pipeline — Create PR → Deploy → Merge** — shown
-  as one row per PR with a colored pill per stage (blue = planned, yellow =
-  running, green = done, red = failed), each with its own collapsible log
+- run every PR through a **4-stage pipeline — Create PR → Merge main → Deploy →
+  Merge** — shown as one row per PR with a colored pill per stage (blue = planned,
+  yellow = running, green = done, red = failed), each with its own collapsible log
 - **Deploy is per-repo configurable**: iOS repos ship to TestFlight via the
   `testflight-deploy` skill; other repos (cloud-copilot itself included) just run
   a shell command you define (e.g. restart the local service) — see
   [`.cloud-copilot.json`](#per-repo-deploy-config-cloud-copilotjson) below
 - **Merge** (`gh pr merge --merge --delete-branch`) unlocks once Deploy succeeds;
   you can still force it early behind a confirm if you're confident
+- **⤵ Merge main** goes the *other* way — it merges the PR's **base** branch
+  (usually `main`) **into** the PR's branch locally and pushes, so a PR that has
+  fallen behind catches up without dropping to a terminal. Conflicts are never
+  left behind: the merge is `git merge --abort`ed, the stage turns `Conflict`,
+  and the conflicting files are listed in its log for you to resolve manually
 - **click a PR** to open its own **detail page** (`#/pr/<repo>/<issue>/<pr>`,
   bookmarkable/shareable) — same pipeline, plus a **Deploy History** list (every
   build number/version/status the PR has ever shipped, not just the latest) and
@@ -30,7 +35,7 @@ your LAN/VPN. From your phone you can:
 - a **floating "⏩ Depth" control** (bottom-right, stays put while you scroll) lets
   you pick how far a run auto-advances — Create PR only, through Deploy, or all
   the way through Merge — so one click on Create PR can walk the whole pipeline
-- **Abort** a running Create PR, Deploy, or Merge (kills the whole process group);
+- **Abort** a running Create PR, Merge main, Deploy, or Merge (kills the whole process group);
   aborted runs get their own state and can be re-run after a confirm
 - watch every run **stream live** in **collapsible per-action logs** (hidden by
   default), with success/failure shown **on the issue** and lifecycle timing cached
@@ -50,27 +55,36 @@ the Issues + PR flow through `gh` + `copilot -p`.
 
 Per-issue state is a small machine persisted to `data/state.json`. Each issue keeps
 one **work** (Create PR) record plus a map of **PRs**, and every PR carries its own
-**deploy** and **merge** lifecycle (status, start/finish, `durationMs`, transcript):
+**deploy**, **merge** and **mergeMain** lifecycle (status, start/finish,
+`durationMs`, transcript):
 
 | Stage      | idle              | running           | success         | failed / aborted                |
 | ---------- | ----------------- | ----------------- | --------------- | -------------------------------- |
 | Create PR  | `Create PR` 🔵    | `Creating PR…` 🟡  | issue turns 🟢  | `PR failed` 🔴 / `PR aborted`    |
+| Merge main | `⤵ Merge main` 🔵 | `Merging main…` 🟡 | `Main merged` 🟢 | `Conflict` 🟠 / `Failed` 🔴 / `Aborted` |
 | Deploy     | `Deploy` 🔵       | `Deploying…` 🟡    | `Deployed` 🟢   | `Deploy failed` 🔴 / `Aborted`   |
 | Merge      | `🔒 Merge` 🔵 (dim until Deploy succeeds) | `Merging…` 🟡 | `Merged` 🟢 | `Merge failed` 🔴 / `Aborted` |
 
-Each PR renders as one row across all three stages — a **Create PR | Deploy |
-Merge** pipeline, matching the state machine above: blue = planned, yellow =
-running, green = done, red = failed.
+Each PR renders as one row across all four stages — a **Create PR | Merge main |
+Deploy | Merge** pipeline, matching the state machine above: blue = planned,
+yellow = running, green = done, red = failed, orange = merge conflict.
 
 - **Success shows on the issue**, not the button: on a created PR the issue gets a
   green border + green `#number`, and the **Create PR** button stays "Create PR".
 - **Per-action logs** are hidden by default. A small `▤` toggle by **Create PR**
-  reveals the creation log; each PR row has `▤` toggles for its Deploy and Merge logs.
-- **Abort**: while running, Create PR / Deploy / Merge each show a red `⨯` button.
+  reveals the creation log; each PR row has `▤` toggles for its Merge main, Deploy
+  and Merge logs.
+- **Abort**: while running, Create PR / Merge main / Deploy / Merge each show a red `⨯` button.
   Confirming signals the whole process group (copilot + fastlane/xcodebuild/gh), so
   subprocesses die too; the run ends in an `aborted` state you can re-run.
 - **Re-deploy**: clicking Deploy on a finished/failed/aborted PR asks to confirm
   before starting a new run.
+- **Merge main** (base → PR branch) runs `git fetch origin`, checks out the PR's
+  head branch, fast-forwards it to its remote, `git merge`s `origin/<base>` and
+  pushes. A conflicting merge is aborted so the shared working tree is never left
+  dirty, and the stage ends in `Conflict` with the conflicting paths in its log.
+  It takes part in the same per-repo working-tree lock as Create PR / Deploy /
+  chat, so it can never run alongside another checkout.
 - **Merge is gated on Deploy succeeding** — the Merge cell stays a dimmed, locked
   `🔒 Merge` until then. You can still click it early; it asks you to confirm a
   **force-merge** that skips the gate.
@@ -222,6 +236,8 @@ pipeline you get:
 | POST | `/api/repos/:name/issues/:n/deploy/:pr/cancel` | Abort the running deploy for that PR. |
 | POST | `/api/repos/:name/issues/:n/merge/:pr` | **Merge a specific PR** — SSE stream. Body: `{ "force": false }`. Blocked unless Deploy succeeded, unless `force: true`. |
 | POST | `/api/repos/:name/issues/:n/merge/:pr/cancel` | Abort the running merge for that PR. |
+| POST | `/api/repos/:name/issues/:n/merge-main/:pr` | **Merge the PR's base branch into the PR's branch** (the opposite direction from Merge) and push — SSE stream. Ends `success` \| `conflict` \| `failed` \| `aborted`. |
+| POST | `/api/repos/:name/issues/:n/merge-main/:pr/cancel` | Abort the running merge-main for that PR. |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat` | **Chat with a PR** — SSE stream. Body: `{ "message": "...", "mode": "plan"\|"apply" }`. `plan` is read-only (default approval flags); `apply` implements + pushes to the existing branch and resets Deploy/Merge on success. |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat/cancel` | Abort the running chat turn for that PR. |
 | POST | `/api/run` | Simple one-shot demo (prompt + optional `sessionId` resume). |
@@ -443,7 +459,7 @@ session). The "running mode" selector here controls *tool approval policy*, not 
 cloud-copilot/
 ├── package.json        # express dependency, `npm start`, `cc:restart` (self deploy)
 ├── .cloud-copilot.json # this repo's own deploy config (shell -> cc:restart)
-├── server.js           # Express app: repos/issues/work/deploy/merge routes + state machine
+├── server.js           # Express app: repos/issues/work/deploy/merge/merge-main routes + state machine
 ├── lib/
 │   ├── gh.js           # enumerate repos, list issues/PRs/single-PR via `gh` (cached)
 │   ├── store.js        # per-issue status persisted to data/state.json
@@ -451,7 +467,7 @@ cloud-copilot/
 │   ├── runner.js       # spawn copilot, stream SSE, capture transcript + session id
 │   └── repoConfig.js   # loads a repo's .cloud-copilot.json (or auto-detects iOS)
 ├── public/
-│   ├── index.html      # repos → issues → Create PR / Deploy / Merge pipeline console
+│   ├── index.html      # repos → issues → Create PR / Merge main / Deploy / Merge pipeline console
 │   ├── notify.js       # CCNotify: completion chime + system notification + toast
 │   ├── sw.js           # service worker (required for notifications on iOS)
 │   ├── manifest.webmanifest  # PWA manifest — makes "Add to Home Screen" a real app

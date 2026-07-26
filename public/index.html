@@ -14,14 +14,18 @@
   <link rel="apple-touch-icon" href="/icons/icon-192.png" />
   <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
   <style>
-    :root { color-scheme: light dark; --gap: 12px; }
+    /* Secondary text. #888 only reaches 3.5:1 on a light background, so light
+       mode needs a darker grey; dark mode keeps a lighter one. Both clear the
+       4.5:1 WCAG AA threshold the ui-test skill enforces. */
+    :root { color-scheme: light dark; --gap: 12px; --muted-fg: #6b6b6b; }
+    @media (prefers-color-scheme: dark) { :root { --muted-fg: #a1a1a1; } }
     * { box-sizing: border-box; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       max-width: 860px; margin: 0 auto; padding: 16px 14px 60px; line-height: 1.45;
     }
     h1 { font-size: 1.3rem; margin: 0 0 2px; }
-    .sub { color: #888; font-size: .85rem; margin: 0 0 16px; }
+    .sub { color: var(--muted-fg); font-size: .85rem; margin: 0 0 16px; }
     button {
       cursor: pointer; font: inherit; border: none; border-radius: 10px;
       padding: 8px 12px; font-weight: 600; background: #2563eb; color: #fff;
@@ -37,7 +41,7 @@
     }
     .repo-head:hover { background: #8882; }
     .repo-name { font-weight: 700; }
-    .repo-meta { color: #888; font-size: .78rem; }
+    .repo-meta { color: var(--muted-fg); font-size: .78rem; }
     .repo-body { padding: 6px 10px 12px; display: none; }
     .repo.open .repo-body { display: block; }
     .caret { transition: transform .15s; }
@@ -45,7 +49,7 @@
 
     .toolbar { display: flex; gap: 8px; align-items: center; margin: 6px 4px 10px; }
     .toolbar .spacer { flex: 1; }
-    .muted { color: #888; font-size: .78rem; }
+    .muted { color: var(--muted-fg); font-size: .78rem; }
 
     .issue { border-top: 1px solid #8882; padding: 10px 4px; }
     .issue:first-child { border-top: none; }
@@ -54,7 +58,7 @@
     .issue-top { display: flex; flex-direction: column; gap: 4px; }
     .issue-toprow { display: flex; align-items: center; gap: 8px; }
     .issue-toprow .spacer { flex: 1; }
-    .issue-num { color: #888; font-variant-numeric: tabular-nums; font-size: .82rem; }
+    .issue-num { color: var(--muted-fg); font-variant-numeric: tabular-nums; font-size: .82rem; }
     .issue-title { font-size: .92rem; }
     .labels { margin-top: 3px; }
     .label {
@@ -103,7 +107,7 @@
     .chev-failed, .chev-aborted { background: #dc2626; }
     .chev-locked   { background: #93a3b8; color: #eef2f7; opacity: .85; }
     .chevtools {
-      display: flex; margin-top: 6px; font-size: .74rem; color: #888;
+      display: flex; margin-top: 6px; font-size: .74rem; color: var(--muted-fg);
     }
     .chevtool { flex: 1; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
     .chevtool:first-child { justify-content: flex-start; }
@@ -121,7 +125,7 @@
     }
     .depth-drawer.show { transform: translateX(0); }
     .depth-drawer h3 { margin: 0 0 4px; font-size: 1rem; }
-    .depth-drawer .hint { color: #888; font-size: .78rem; margin: 0 0 14px; }
+    .depth-drawer .hint { color: var(--muted-fg); font-size: .78rem; margin: 0 0 14px; }
     .depth-option {
       display: flex; align-items: flex-start; gap: 10px; padding: 10px 8px; border-radius: 10px;
       cursor: pointer; margin-bottom: 6px;
@@ -129,7 +133,7 @@
     .depth-option:hover { background: #8881; }
     .depth-option input { margin-top: 3px; }
     .depth-option .lbl { font-weight: 600; font-size: .88rem; }
-    .depth-option .desc { color: #888; font-size: .76rem; margin-top: 2px; }
+    .depth-option .desc { color: var(--muted-fg); font-size: .76rem; margin-top: 2px; }
     .depth-scrim {
       position: fixed; inset: 0; z-index: 40; background: #0004; display: none;
     }
@@ -151,7 +155,7 @@
       background: #8882; color: inherit; font-weight: 600; font-size: .82rem;
     }
     .err-inline { color: #dc2626; font-size: .8rem; padding: 8px 4px; }
-    .mode-row { margin: 0; font-size: .8rem; color: #888; }
+    .mode-row { margin: 0; font-size: .8rem; color: var(--muted-fg); }
     select { font: inherit; padding: 5px 8px; border-radius: 8px; border: 1px solid #8884; background: #8881; }
 
     /* top bar with title + controls (filter lives top-right) */
@@ -165,7 +169,7 @@
       box-shadow: 0 8px 30px #0006; padding: 8px; display: none; max-height: 60vh; overflow-y: auto;
     }
     .filter-menu.show { display: block; }
-    .filter-menu h4 { margin: 4px 6px 8px; font-size: .78rem; color: #888; font-weight: 600; }
+    .filter-menu h4 { margin: 4px 6px 8px; font-size: .78rem; color: var(--muted-fg); font-weight: 600; }
     .filter-menu label {
       display: flex; align-items: center; gap: 8px; padding: 6px 6px; border-radius: 8px;
       font-size: .85rem; cursor: pointer;
@@ -239,7 +243,7 @@
     .chat-bubble { padding: 8px 11px; border-radius: 10px; font-size: .85rem; }
     .chat-bubble.chat-user { background: #2563eb18; align-self: flex-end; max-width: 85%; }
     .chat-bubble.chat-assistant { background: #8881; max-width: 100%; }
-    .chat-meta { font-size: .68rem; color: #888; margin-bottom: 3px; text-transform: uppercase; letter-spacing: .02em; }
+    .chat-meta { font-size: .68rem; color: var(--muted-fg); margin-bottom: 3px; text-transform: uppercase; letter-spacing: .02em; }
     .chat-text { white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, Menlo, monospace; font-size: .8rem; }
     .chat-inputrow { display: flex; flex-direction: column; gap: 8px; }
     .chat-input {
@@ -247,7 +251,7 @@
       background: #8881; color: inherit; resize: vertical; min-height: 60px;
     }
     .chat-actions { display: flex; gap: 8px; align-items: center; }
-    .chat-empty { color: #888; font-size: .8rem; padding: 4px 0 10px; }
+    .chat-empty { color: var(--muted-fg); font-size: .8rem; padding: 4px 0 10px; }
 
     /* ---- Image attachments: paperclip button + drop target + preview chips */
     .attach-btn {
@@ -290,8 +294,8 @@
       text-decoration: none; font-weight: 700; font-size: .84rem; color: inherit;
       font-variant-numeric: tabular-nums;
     }
-    .timing { color: #888; font-size: .72rem; font-variant-numeric: tabular-nums; }
-    .prlist-empty { color: #888; font-size: .78rem; padding: 2px 4px; }
+    .timing { color: var(--muted-fg); font-size: .72rem; font-variant-numeric: tabular-nums; }
+    .prlist-empty { color: var(--muted-fg); font-size: .78rem; padding: 2px 4px; }
 
     /* icon/log buttons — sized for comfortable tapping, not just clicking */
     .iconbtn {
@@ -345,7 +349,7 @@
     .admin-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
     .admin-head h1 { font-size: 1.2rem; margin: 0; }
     .admin-root {
-      font-family: ui-monospace, Menlo, monospace; font-size: .74rem; color: #888;
+      font-family: ui-monospace, Menlo, monospace; font-size: .74rem; color: var(--muted-fg);
       background: #8881; padding: 3px 8px; border-radius: 8px; word-break: break-all;
     }
     .admin-head .spacer { flex: 1; }
@@ -458,7 +462,7 @@
     #testflightView { max-width: 900px; margin: 0 auto; padding: 8px 14px 60px; }
     .placeholder {
       border: 1px dashed #8884; border-radius: 14px; padding: 48px 24px; text-align: center;
-      color: #888; margin-top: 20px;
+      color: var(--muted-fg); margin-top: 20px;
     }
     .placeholder .big { font-size: 2.4rem; margin-bottom: 8px; }
     .placeholder h2 { margin: 0 0 6px; font-size: 1.1rem; color: inherit; }
@@ -501,7 +505,7 @@
     }
     .settings-drawer.show { transform: translateX(0); }
     .settings-drawer h3 { margin: 0 0 4px; font-size: 1rem; }
-    .settings-drawer .hint { color: #888; font-size: .78rem; margin: 0 0 14px; }
+    .settings-drawer .hint { color: var(--muted-fg); font-size: .78rem; margin: 0 0 14px; }
     .toggle-row {
       display: flex; align-items: flex-start; gap: 10px; padding: 10px 8px; border-radius: 10px;
       cursor: pointer; margin-bottom: 4px;
@@ -509,8 +513,8 @@
     .toggle-row:hover { background: #8881; }
     .toggle-row input { margin-top: 3px; flex: none; }
     .toggle-row .lbl { font-weight: 600; font-size: .88rem; }
-    .toggle-row .desc { color: #888; font-size: .76rem; margin-top: 2px; }
-    .notify-state { font-size: .76rem; color: #888; margin: 6px 8px 12px; line-height: 1.5; }
+    .toggle-row .desc { color: var(--muted-fg); font-size: .76rem; margin-top: 2px; }
+    .notify-state { font-size: .76rem; color: var(--muted-fg); margin: 6px 8px 12px; line-height: 1.5; }
     .notify-state.warn { color: #eab308; }
     .notify-install {
       display: none; margin: 4px 0 12px; padding: 10px 12px; border-radius: 10px;
@@ -536,7 +540,7 @@
       <div class="topctrls">
         <div class="mode-row">
           mode:
-          <select id="mode">
+          <select id="mode" aria-label="Permission mode">
             <option value="allow-all" selected>Allow All</option>
             <option value="granular">Granular</option>
             <option value="default">Default</option>
@@ -544,7 +548,7 @@
         </div>
         <div class="mode-row">
           model:
-          <select id="modelSel"><option value="">loading…</option></select>
+          <select id="modelSel" aria-label="Copilot model"><option value="">loading…</option></select>
         </div>
         <div class="filter">
           <button id="filterBtn" class="ghost sm">⚙ Filter</button>
@@ -2968,16 +2972,15 @@ function initAdminTerminal() {
       ? crypto.randomUUID()
       : `t${Date.now()}${Math.random().toString(16).slice(2, 10)}`;
 
-  // Stop tracking (and kill) the in-flight turn — used when the user navigates
-  // to another conversation or starts a new one. The server job is cancelled so
-  // it doesn't keep running headless.
-  async function cancelActiveTurn() {
+  // Stop *tracking* the in-flight turn without killing it. Navigating to another
+  // conversation (or starting a new one) must not destroy work the user asked
+  // for — the job outlives the HTTP connection server-side and the localStorage
+  // pointer stays put, so coming back (or reloading) re-attaches to it. Only the
+  // explicit Abort button cancels a turn for real.
+  function detachActiveTurn() {
     if (!activeTurn) return;
-    const t = activeTurn;
     activeTurn = null;
-    localStorage.removeItem(LS_ADMIN_TURN);
     setSending(false);
-    try { await fetch(`/api/admin/chat/${encodeURIComponent(t.turnId)}/cancel`, { method: 'POST' }); } catch { /* ignore */ }
   }
 
   // Populate the repo picker from the same repos-under-REPOS_ROOT listing the
@@ -3080,8 +3083,40 @@ function initAdminTerminal() {
     else closeHistory();
   }
 
+  // Paint a persisted transcript into the log. Split out of loadConversation so
+  // a reconnect can show the conversation a still-streaming turn belongs to.
+  function renderConversationMessages(messages) {
+    logEl.innerHTML = '';
+    (messages || []).forEach((m) => {
+      const body = addMessage(m.role === 'user' ? 'user' : 'assistant');
+      if (m.role === 'user') body.textContent = m.text || '';
+      else { const { html, footer } = renderAssistant(m.text || ''); body.innerHTML = html + footer; }
+      if (m.images && m.images.length) body.insertAdjacentHTML('beforeend', renderMsgImages(m.images));
+    });
+  }
+
+  // Re-create the live bubbles for a turn that is still streaming, after the log
+  // was rebuilt underneath it, and rebind the turn to the new DOM nodes.
+  function reattachTurnBubbles(turn) {
+    clearEmpty();
+    if (turn.text) {
+      const ub = addMessage('user');
+      ub.textContent = turn.text;
+      if (turn.images && turn.images.length) ub.insertAdjacentHTML('beforeend', renderMsgImages(turn.images));
+    }
+    const asstBody = addMessage('assistant');
+    asstBody.innerHTML = '<span class="tmsg-stream"></span><span class="tmsg-cursor"></span>';
+    turn.asstBody = asstBody;
+    turn.streamEl = asstBody.querySelector('.tmsg-stream');
+    turn.streamEl.textContent = turn.raw || '';
+    setSending(true);
+  }
+
   async function loadConversation(id) {
-    await cancelActiveTurn();
+    // Opening the very conversation a turn is streaming into must keep that turn
+    // alive and visible; opening any other one just detaches (never kills) it.
+    const keepTurn = activeTurn && activeTurn.chatId === id ? activeTurn : null;
+    if (!keepTurn) detachActiveTurn();
     try {
       const r = await fetch(`/api/admin/chats/${encodeURIComponent(id)}`);
       if (!r.ok) return;
@@ -3089,17 +3124,14 @@ function initAdminTerminal() {
       currentChatId = id;
       sessionId = chat.sessionId;
       setSelectedRepo(chat.repo || '');
-      logEl.innerHTML = '';
-      (chat.messages || []).forEach((m) => {
-        const body = addMessage(m.role === 'user' ? 'user' : 'assistant');
-        if (m.role === 'user') body.textContent = m.text || '';
-        else { const { html, footer } = renderAssistant(m.text || ''); body.innerHTML = html + footer; }
-        if (m.images && m.images.length) body.insertAdjacentHTML('beforeend', renderMsgImages(m.images));
-      });
-      if (!chat.messages || !chat.messages.length) {
+      renderConversationMessages(chat.messages);
+      if (keepTurn) {
+        activeTurn = keepTurn;
+        reattachTurnBubbles(keepTurn);
+      } else if (!chat.messages || !chat.messages.length) {
         logEl.innerHTML = '<div class="term-empty">This conversation has no messages yet.</div>';
       }
-      statusEl.textContent = '';
+      statusEl.textContent = keepTurn ? 'Copilot is thinking…' : '';
       closeHistory();
     } catch {
       /* ignore load failures — the drawer stays open so the user can retry */
@@ -3113,7 +3145,7 @@ function initAdminTerminal() {
   }
 
   function startNewConversation() {
-    cancelActiveTurn();
+    detachActiveTurn();
     sessionId = null;
     currentChatId = null;
     logEl.innerHTML = `<div class="term-empty">${emptyStateHtml()}</div>`;
@@ -3276,8 +3308,8 @@ function initAdminTerminal() {
     asstBody.innerHTML = '<span class="tmsg-stream"></span><span class="tmsg-cursor"></span>';
 
     const turnId = makeTurnId();
-    activeTurn = { turnId, asstBody, raw: '', streamEl: asstBody.querySelector('.tmsg-stream') };
-    localStorage.setItem(LS_ADMIN_TURN, JSON.stringify({ turnId, sessionId, text }));
+    activeTurn = { turnId, chatId: currentChatId, text, images, asstBody, raw: '', streamEl: asstBody.querySelector('.tmsg-stream') };
+    localStorage.setItem(LS_ADMIN_TURN, JSON.stringify({ turnId, sessionId, chatId: currentChatId, text }));
     setSending(true);
 
     let resp;
@@ -3301,17 +3333,33 @@ function initAdminTerminal() {
   }
 
   // On (re)entering the Admin tab, resume any turn that was still streaming when
-  // the page was last closed/reloaded.
+  // the page was last closed/reloaded — including the conversation it belongs to,
+  // so a reload mid-turn doesn't look like a brand-new one-message thread.
   async function maybeReconnect() {
     let saved;
     try { saved = JSON.parse(localStorage.getItem(LS_ADMIN_TURN) || 'null'); } catch { saved = null; }
     if (!saved || !saved.turnId) return;
     if (saved.sessionId) sessionId = saved.sessionId;
+
+    const chatId = saved.chatId || saved.sessionId || null;
+    if (chatId) {
+      try {
+        const r = await fetch(`/api/admin/chats/${encodeURIComponent(chatId)}`);
+        if (r.ok) {
+          const chat = await r.json();
+          currentChatId = chatId;
+          if (chat.sessionId) sessionId = chat.sessionId;
+          setSelectedRepo(chat.repo || '');
+          renderConversationMessages(chat.messages);
+        }
+      } catch { /* fall through — show just the pending turn */ }
+    }
+
     clearEmpty();
     if (saved.text) { const ub = addMessage('user'); ub.textContent = saved.text; }
     const asstBody = addMessage('assistant');
     asstBody.innerHTML = '<span class="tmsg-stream"></span><span class="tmsg-cursor"></span>';
-    activeTurn = { turnId: saved.turnId, asstBody, raw: '', streamEl: asstBody.querySelector('.tmsg-stream') };
+    activeTurn = { turnId: saved.turnId, chatId, text: saved.text, asstBody, raw: '', streamEl: asstBody.querySelector('.tmsg-stream') };
     setSending(true);
     let resp;
     try { resp = await fetch(`/api/admin/chat/${encodeURIComponent(saved.turnId)}/stream`); }

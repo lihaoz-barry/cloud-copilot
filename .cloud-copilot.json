@@ -2,5 +2,14 @@
   "deploy": {
     "type": "shell",
     "command": "npm run cc:restart"
+  },
+  "ui": {
+    "enabled": true,
+    "startCommand": "npm start",
+    "port": 8899,
+    "baseUrl": "http://127.0.0.1:8899",
+    "readyPath": "/",
+    "routes": ["/"],
+    "viewports": [[390, 844], [1440, 900]]
   }
 }

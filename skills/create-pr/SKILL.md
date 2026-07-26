@@ -23,12 +23,19 @@ an issue number, take it from "open issue" to "PR that closes it", autonomously.
 3. **Branch.** Create a descriptive branch: `git checkout -b fix-N-short-slug`.
 4. **Implement end-to-end.** Make the actual code changes required to satisfy the
    issue. Build/lint/test where a toolchain exists. Do not stop at a partial change.
-5. **Commit.** Stage and commit with a message referencing the issue
+5. **Validate the UI (web repos only).** If the repo declares a `ui` block in
+   `.cloud-copilot.json` (or plainly serves HTML) **and** either the issue carries
+   the `ui-validation` label or your diff touches `*.html`, `*.css`, `*.jsx`,
+   `*.tsx`, `*.vue`, `*.svelte`, run the **ui-test** skill before committing.
+   Fix every error-severity finding, re-run until clean, and paste the findings
+   table into the PR body under `## UI validation`.
+   Skip this entirely for non-web repos (iOS/native) — say so in one line.
+6. **Commit.** Stage and commit with a message referencing the issue
    (`... (closes #N)`).
-6. **Push.** `git push -u origin <branch>`.
-7. **Open the PR.** `gh pr create --base <default> --head <branch> --title ... --body ...`
+7. **Push.** `git push -u origin <branch>`.
+8. **Open the PR.** `gh pr create --base <default> --head <branch> --title ... --body ...`
    with a body that includes `Closes #N` so merging auto-closes the issue.
-8. **Print the PR URL on its own line** as the final output — the caller detects
+9. **Print the PR URL on its own line** as the final output — the caller detects
    success by matching the `https://github.com/OWNER/REPO/pull/<n>` URL in the
    transcript (fallback: `gh pr list` referencing the issue).
 

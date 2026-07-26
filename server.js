@@ -507,7 +507,7 @@ app.post('/api/repos/:name/preissues/:id/chat', async (req, res) => {
     repo: repo.name,
     exclusive: false,
     label: `PreIssue chat (${repo.name})`,
-    meta: { action: 'preissue-chat', id },
+    meta: { action: 'preissue-chat', id, preIssueId: id },
     onCancelled: (reason) =>
       store.appendPreIssueChatMessage(repo.name, id, { role: 'assistant', text: `[${reason}]` }),
     run: () =>
@@ -612,7 +612,7 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
     repo: repo.name,
     exclusive: true, // creates + checks out a branch in the shared clone
     label: actionLabel('work', repo.name, n),
-    meta: { action: 'work' },
+    meta: { action: 'work', issueNumber: n },
     onCancelled: (reason) => {
       store.updateRecord(repo.name, n, (r) => {
         r.work.status = 'aborted';
@@ -966,7 +966,7 @@ app.post('/api/repos/:name/issues/:n/deploy/:pr', async (req, res) => {
     exclusive: true, // checks out the PR's branch in the shared clone
     dependsOn,
     label: actionLabel('deploy', repo.name, n, prNumber),
-    meta: { action: 'deploy', prNumber },
+    meta: { action: 'deploy', issueNumber: n, prNumber },
     onCancelled: (reason) => {
       store.updateDeploy(repo.name, n, prNumber, (d) => {
         d.status = 'aborted';
@@ -1071,7 +1071,7 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
     exclusive: true,
     dependsOn,
     label: actionLabel('merge', repo.name, n, prNumber),
-    meta: { action: 'merge', prNumber },
+    meta: { action: 'merge', issueNumber: n, prNumber },
     onCancelled: (reason) => {
       store.updateMerge(repo.name, n, prNumber, (m) => {
         m.status = 'aborted';
@@ -1223,7 +1223,7 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
     repo: repo.name,
     exclusive: true,
     label: `${actionLabel('chat', repo.name, n, prNumber)} [${mode}]`,
-    meta: { action: 'chat', prNumber, mode },
+    meta: { action: 'chat', issueNumber: n, prNumber, mode },
     onCancelled: (reason) => {
       store.appendChatMessage(repo.name, n, prNumber, { role: 'assistant', text: `[${reason}]`, mode });
       notifyOutcome({

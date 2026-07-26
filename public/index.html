@@ -2,8 +2,17 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>cloud-copilot · issues console</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#2563eb" />
+  <!-- iOS only exposes the Notification API to sites added to the Home Screen. -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="cloud-copilot" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+  <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
   <style>
     :root { color-scheme: light dark; --gap: 12px; }
     * { box-sizing: border-box; }
@@ -479,6 +488,36 @@
     }
     .tf-mergebtn:hover { background: #ffffff1a; }
     .tf-mergebtn:disabled { opacity: .5; cursor: default; }
+
+    /* ---- Notification settings ---------------------------------------------- */
+    .notify-fab {
+      position: fixed; bottom: 16px; left: 16px; z-index: 40; border-radius: 999px;
+      padding: 9px 13px; box-shadow: 0 6px 20px #0004;
+    }
+    .settings-drawer {
+      position: fixed; top: 0; left: 0; height: 100%; width: min(320px, 90vw); z-index: 41;
+      background: Canvas; color: CanvasText; border-right: 1px solid #8884; box-shadow: 8px 0 30px #0006;
+      padding: 18px 16px; transform: translateX(-100%); transition: transform .2s ease; overflow-y: auto;
+    }
+    .settings-drawer.show { transform: translateX(0); }
+    .settings-drawer h3 { margin: 0 0 4px; font-size: 1rem; }
+    .settings-drawer .hint { color: #888; font-size: .78rem; margin: 0 0 14px; }
+    .toggle-row {
+      display: flex; align-items: flex-start; gap: 10px; padding: 10px 8px; border-radius: 10px;
+      cursor: pointer; margin-bottom: 4px;
+    }
+    .toggle-row:hover { background: #8881; }
+    .toggle-row input { margin-top: 3px; flex: none; }
+    .toggle-row .lbl { font-weight: 600; font-size: .88rem; }
+    .toggle-row .desc { color: #888; font-size: .76rem; margin-top: 2px; }
+    .notify-state { font-size: .76rem; color: #888; margin: 6px 8px 12px; line-height: 1.5; }
+    .notify-state.warn { color: #eab308; }
+    .notify-install {
+      display: none; margin: 4px 0 12px; padding: 10px 12px; border-radius: 10px;
+      background: #eab30818; border: 1px solid #eab30855; font-size: .78rem; line-height: 1.5;
+    }
+    .notify-install.show { display: block; }
+    .settings-drawer .actions { display: flex; gap: 8px; margin-top: 6px; }
   </style>
 </head>
 <body>
@@ -586,7 +625,31 @@
   </div>
 
   <button id="depthFab" class="ghost depth-fab" title="Set pipeline auto-run depth">⏩ Depth</button>
+  <button id="notifyFab" class="ghost notify-fab" title="Notification settings" aria-label="Notification settings">🔔 Alerts</button>
   <div id="depthScrim" class="depth-scrim"></div>
+  <div id="notifyScrim" class="depth-scrim"></div>
+  <div id="notifyDrawer" class="settings-drawer">
+    <h3>🔔 Task alerts</h3>
+    <p class="hint">Get told the moment a Create PR / Deploy / Merge / chat turn finishes — even if you switched apps or locked the phone.</p>
+    <label class="toggle-row">
+      <input type="checkbox" id="notifySound">
+      <span><span class="lbl">Sound &amp; vibration</span><div class="desc">Plays a short chime (different for success and failure) and vibrates where supported.</div></span>
+    </label>
+    <label class="toggle-row">
+      <input type="checkbox" id="notifySystem">
+      <span><span class="lbl">System notifications</span><div class="desc">Shows an OS notification when the app isn't the window you're looking at.</div></span>
+    </label>
+    <div class="notify-state" id="notifyState"></div>
+    <div class="notify-install" id="notifyInstall">
+      <b>Add cloud-copilot to your Home Screen</b><br>
+      iOS only delivers web notifications to installed apps. In Safari tap
+      <b>Share</b> → <b>Add to Home Screen</b>, then open cloud-copilot from the
+      new icon and turn this on again.
+    </div>
+    <div class="actions">
+      <button id="notifyTest" class="ghost sm">▶ Test notification</button>
+    </div>
+  </div>
   <div id="depthDrawer" class="depth-drawer">
     <h3>Auto-run depth</h3>
     <p class="hint">Clicking Create PR runs one stage after another, automatically, until it reaches the depth you pick here. A stage only advances on success.</p>
@@ -604,6 +667,7 @@
     </label>
   </div>
 
+<script src="/notify.js"></script>
 <script>
 const reposEl = document.getElementById('repos');
 const rootLine = document.getElementById('rootline');
@@ -651,6 +715,85 @@ document.querySelectorAll('input[name="depth"]').forEach((r) => {
   r.addEventListener('change', () => { if (r.checked) setPipelineDepth(r.value); });
 });
 syncDepthRadios();
+
+// ---- notification settings drawer -----------------------------------------
+// All the platform detection lives in /notify.js (CCNotify); this is just the
+// UI that drives it. Permission is only ever requested from a real tap, which
+// every browser requires and iOS enforces strictly.
+const notifyFab = document.getElementById('notifyFab');
+const notifyDrawer = document.getElementById('notifyDrawer');
+const notifyScrim = document.getElementById('notifyScrim');
+const notifySoundCb = document.getElementById('notifySound');
+const notifySystemCb = document.getElementById('notifySystem');
+const notifyStateEl = document.getElementById('notifyState');
+const notifyInstallEl = document.getElementById('notifyInstall');
+const notifyTestBtn = document.getElementById('notifyTest');
+
+function syncNotifyUi() {
+  if (!window.CCNotify) return;
+  notifySoundCb.checked = CCNotify.soundEnabled();
+  notifySystemCb.checked = CCNotify.systemEnabled();
+  const support = CCNotify.support();
+  const perm = CCNotify.permission();
+  notifyInstallEl.classList.toggle('show', support === 'needs-install' && notifySystemCb.checked);
+  let msg;
+  let warn = false;
+  if (support === 'needs-install') {
+    msg = 'This browser tab can’t show system notifications yet.';
+    warn = true;
+  } else if (support === 'unsupported') {
+    msg = 'This browser doesn’t support system notifications — you’ll still get the sound and an in-page banner.';
+    warn = true;
+  } else if (perm === 'granted') {
+    msg = 'Permission granted — notifications appear when the app is in the background.';
+  } else if (perm === 'denied') {
+    msg = 'Permission denied in browser settings — the sound and in-page banner still work.';
+    warn = true;
+  } else {
+    msg = 'Permission not requested yet — turn on “System notifications” or tap Test to grant it.';
+  }
+  notifyStateEl.textContent = msg;
+  notifyStateEl.classList.toggle('warn', warn);
+}
+
+function openNotifyDrawer() {
+  syncNotifyUi();
+  notifyDrawer.classList.add('show');
+  notifyScrim.classList.add('show');
+}
+function closeNotifyDrawer() {
+  notifyDrawer.classList.remove('show');
+  notifyScrim.classList.remove('show');
+}
+notifyFab.addEventListener('click', openNotifyDrawer);
+notifyScrim.addEventListener('click', closeNotifyDrawer);
+
+notifySoundCb.addEventListener('change', () => {
+  CCNotify.setSoundEnabled(notifySoundCb.checked);
+  if (notifySoundCb.checked) CCNotify.unlockAudio();
+  syncNotifyUi();
+});
+
+notifySystemCb.addEventListener('change', async () => {
+  CCNotify.setSystemEnabled(notifySystemCb.checked);
+  if (notifySystemCb.checked) await CCNotify.requestPermission();
+  syncNotifyUi();
+});
+
+notifyTestBtn.addEventListener('click', async () => {
+  notifyTestBtn.disabled = true;
+  try {
+    const r = await CCNotify.test();
+    syncNotifyUi();
+    if (!r.shown && notifySystemCb.checked && r.support === 'needs-install') {
+      notifyInstallEl.classList.add('show');
+    }
+  } finally {
+    notifyTestBtn.disabled = false;
+  }
+});
+
+syncNotifyUi();
 
 // ---- timing helpers -------------------------------------------------------
 function fmtDur(ms) {
@@ -1293,6 +1436,23 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     }
   }
 
+  // --- Completion alerts ----------------------------------------------------
+  // Descriptors handed to pumpSSE / CCNotify so a finished job can announce
+  // itself with a chime and a system notification (see public/notify.js).
+  function notifyWork(extra) {
+    return { action: 'work', repo: repo.name, issue: issue.number, ...extra };
+  }
+  function notifyPr(action, prNumber, extra) {
+    return {
+      action,
+      repo: repo.name,
+      issue: issue.number,
+      pr: prNumber,
+      url: `${location.origin}/#/pr/${enc(repo.name)}/${issue.number}/${prNumber}`,
+      ...extra,
+    };
+  }
+
   // --- Create PR flow -------------------------------------------------------
   async function onWork() {
     const s = st.work.status;
@@ -1330,6 +1490,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         onChunk: (t, s) => appendWork(t, s === 'stderr' ? 'stderr' : null),
         onError: (m) => appendWork(`\n[error] ${m}\n`, 'err'),
         onResult: (d) => { finalStatus = d.status; resultData = d; },
+        notify: notifyWork(),
       });
     } catch (e) {
       appendWork(`\n[connection dropped: ${e.message}] — job still running, checking status…\n`, 'stderr');
@@ -1368,6 +1529,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         st.work.status = s; st.work.hasConversation = true; paintWork(s); syncPrsFromRecord(rec);
         appendWork(`\n[work] finished: ${s}\n`, s === 'success' ? 'ok' : 'err');
         repoCtx.clearActive(issue.number);
+        if (window.CCNotify) CCNotify.jobFinished(notifyWork({ status: s, replayed: true }));
         if (s === 'success' && rec.work.prNumber && pipelineDepth() !== 'pr') onDeploy(rec.work.prNumber);
         return;
       }
@@ -1423,6 +1585,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         onChunk: (t, s) => appendDeploy(prNumber, t, s === 'stderr' ? 'stderr' : null),
         onError: (m) => appendDeploy(prNumber, `\n[error] ${m}\n`, 'err'),
         onResult: (d) => { finalStatus = d.status; resultData = d; },
+        notify: notifyPr('deploy', prNumber),
       });
     } catch (e) {
       appendDeploy(prNumber, `\n[connection dropped: ${e.message}] — deploy still running, checking status…\n`, 'stderr');
@@ -1460,6 +1623,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         paintDeploy(prNumber);
         appendDeploy(prNumber, `\n[deploy #${prNumber}] finished: ${s}\n`, s === 'success' ? 'ok' : 'err');
         repoCtx.clearActive(issue.number);
+        if (window.CCNotify) CCNotify.jobFinished(notifyPr('deploy', prNumber, { status: s, replayed: true }));
         if (s === 'success' && pipelineDepth() === 'merge') onMerge(prNumber);
         return;
       }
@@ -1526,6 +1690,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         onChunk: (t, s) => appendMerge(prNumber, t, s === 'stderr' ? 'stderr' : null),
         onError: (m) => appendMerge(prNumber, `\n[error] ${m}\n`, 'err'),
         onResult: (d) => { finalStatus = d.status; resultData = d; },
+        notify: notifyPr('merge', prNumber),
       });
     } catch (e) {
       appendMerge(prNumber, `\n[connection dropped: ${e.message}] — merge still running, checking status…\n`, 'stderr');
@@ -1560,6 +1725,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         if (pr) pr.merge = { ...prRec.merge };
         paintMerge(prNumber);
         appendMerge(prNumber, `\n[merge #${prNumber}] finished: ${s}\n`, s === 'success' ? 'ok' : 'err');
+        if (window.CCNotify) CCNotify.jobFinished(notifyPr('merge', prNumber, { status: s, replayed: true }));
         return;
       }
       if (rec.live && rec.live.merge && rec.live.merge[prNumber]) return streamMerge(prNumber, true);
@@ -1670,10 +1836,19 @@ async function friendlyHttpError(resp) {
 }
 
 // Read an SSE response body, dispatching parsed events to handlers.
-async function pumpSSE(resp, { onChunk, onError, onResult, onMeta }) {
+//
+// `notify` is an optional CCNotify job descriptor ({ action, repo, issue, pr,
+// key, url }). Every long-running action in this app streams through
+// lib/jobs.js, which always emits a `meta` event carrying the job's current
+// status before replaying anything — so this one place can announce completion
+// for *every* action type instead of each button rolling its own.
+async function pumpSSE(resp, { onChunk, onError, onResult, onMeta, notify }) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
+  // True when the job had already finished at the moment we subscribed, i.e.
+  // this stream is a pure replay rather than us watching the job run.
+  let replayed = false;
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -1685,9 +1860,17 @@ async function pumpSSE(resp, { onChunk, onError, onResult, onMeta }) {
       const evt = parseEvent(raw);
       if (!evt) continue;
       if (evt.event === 'chunk') onChunk && onChunk(evt.data.text, evt.data.stream);
-      else if (evt.event === 'meta') onMeta && onMeta(evt.data);
-      else if (evt.event === 'error') onError && onError(evt.data.message);
-      else if (evt.event === 'result') onResult && onResult(evt.data);
+      else if (evt.event === 'meta') {
+        if (evt.data && evt.data.status === 'done') replayed = true;
+        else if (notify && window.CCNotify) CCNotify.watch(notify);
+        onMeta && onMeta(evt.data);
+      } else if (evt.event === 'error') onError && onError(evt.data.message);
+      else if (evt.event === 'result') {
+        onResult && onResult(evt.data);
+        if (notify && evt.data && window.CCNotify) {
+          CCNotify.jobFinished({ ...notify, status: evt.data.status, replayed });
+        }
+      }
     }
   }
 }
@@ -2004,6 +2187,13 @@ async function onTfMerge(b, btn) {
     let finalStatus = null, resultData = null;
     await pumpSSE(resp, {
       onResult: (d) => { finalStatus = d.status; resultData = d; },
+      notify: {
+        action: 'merge',
+        repo: b.repo,
+        issue: b.issueNumber,
+        pr: b.prNumber,
+        url: `${location.origin}/#/pr/${enc(b.repo)}/${b.issueNumber}/${b.prNumber}`,
+      },
     });
     if (finalStatus === 'success') {
       btn.textContent = 'Merged';
@@ -2180,6 +2370,8 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
 
   const messages = ((prRec && prRec.chat && prRec.chat.messages) || []).slice();
   let awaitingApply = false;
+  // Gives each chat turn its own notification key so two quick turns both alert.
+  let chatTurnSeq = 0;
 
   function renderMessages() {
     if (!messages.length) {
@@ -2265,6 +2457,14 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
         onChunk: (t) => { raw += t; textEl.appendChild(document.createTextNode(t)); messagesEl.scrollTop = messagesEl.scrollHeight; },
         onError: (m) => { const s = `\n[error] ${m}`; raw += s; textEl.appendChild(document.createTextNode(s)); },
         onResult: (d) => { finalStatus = d.status; },
+        notify: {
+          action: 'chat',
+          repo: repoName,
+          issue: issueNumber,
+          pr: prNumber,
+          key: `chat:${repoName}#${issueNumber}:${prNumber}:${++chatTurnSeq}`,
+          url: `${location.origin}/#/pr/${enc(repoName)}/${issueNumber}/${prNumber}`,
+        },
       });
     } catch (e) {
       const s = `\n[connection dropped: ${e.message}]`;
@@ -2535,6 +2735,8 @@ async function renderPreIssueDetail(repoName, id) {
   const sendBtn = chatWrap.querySelector('.chat-send');
   const abortBtn = chatWrap.querySelector('.chat-abort');
   const messages = ((pre.chat && pre.chat.messages) || []).slice();
+  // Gives each chat turn its own notification key so two quick turns both alert.
+  let preTurnSeq = 0;
 
   function renderMessages() {
     if (!messages.length) {
@@ -2604,6 +2806,12 @@ async function renderPreIssueDetail(repoName, id) {
         onChunk: (t) => { raw += t; textEl.appendChild(document.createTextNode(t)); messagesEl.scrollTop = messagesEl.scrollHeight; },
         onError: (m) => { const s = `\n[error] ${m}`; raw += s; textEl.appendChild(document.createTextNode(s)); },
         onResult: (d) => { finalDraft = d.draft || null; },
+        notify: {
+          action: 'preissue-chat',
+          repo: repoName,
+          key: `preissue-chat:${repoName}:${id}:${++preTurnSeq}`,
+          url: `${location.origin}/#/preissue/${enc(repoName)}/${enc(id)}`,
+        },
       });
     } catch (e) {
       const s = `\n[connection dropped: ${e.message}]`;
@@ -3003,6 +3211,7 @@ function initAdminTerminal() {
   // preceded by meta{replay:true} — we reset `raw` there so it isn't doubled.
   async function consumeStream(resp) {
     let finalSession = null, status = null, gone = false;
+    const turnId = activeTurn && activeTurn.turnId;
     try {
       await pumpSSE(resp, {
         onMeta: (m) => { if (m && m.replay) resetActiveStream(); },
@@ -3014,6 +3223,11 @@ function initAdminTerminal() {
           if (d.status) status = d.status;
           if (d.status === 'gone') gone = true;
         },
+        // Keyed on the turn id so the reconnect loop's repeated subscribes to
+        // the same turn collapse into a single alert.
+        notify: turnId
+          ? { action: 'admin-chat', repo: repoSel.value || undefined, key: `admin-chat:${turnId}` }
+          : undefined,
       });
     } catch {
       return false; // dropped mid-stream — not terminal

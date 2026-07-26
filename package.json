@@ -14,5 +14,9 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "axe-core": "^4.12.1",
+    "playwright": "^1.62.0"
   }
 }

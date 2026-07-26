@@ -384,7 +384,15 @@ function extractDraft(text) {
   try {
     const parsed = JSON.parse(last);
     if (parsed && typeof parsed.title === 'string') {
-      return { title: parsed.title, body: typeof parsed.body === 'string' ? parsed.body : '' };
+      return {
+        title: parsed.title,
+        body: typeof parsed.body === 'string' ? parsed.body : '',
+        // Labels the model decided the issue needs (currently just
+        // "ui-validation" for web UI work) — applied at issue-creation time.
+        labels: Array.isArray(parsed.labels)
+          ? parsed.labels.filter((l) => typeof l === 'string' && /^[\w.-]{1,50}$/.test(l))
+          : [],
+      };
     }
   } catch {
     /* not valid JSON — no draft update this turn */
@@ -461,21 +469,33 @@ app.post('/api/repos/:name/preissues/:id/chat', async (req, res) => {
   const draftHint = pre.draft
     ? `The current draft is:\n\`\`\`json\n${JSON.stringify(pre.draft)}\n\`\`\`\n`
     : '';
+  // Web repos get a UI-validation contract baked into the issue so the later
+  // Create PR run knows to gate on the ui-test skill. Native/iOS repos have no
+  // browser to test, so the whole clause is omitted rather than asked-and-ignored.
+  const uiHint = repoConfig.loadUiConfig(repo.path).enabled
+    ? `\n\nThis is a web project with headless UI validation available. If the idea changes ` +
+      `anything a user sees (layout, styling, copy, components, responsiveness), the body MUST ` +
+      `include a "## UI 验收标准" section listing the affected routes, the viewports that matter, ` +
+      `and the observable expectations (alignment, tap-target size, contrast/readability, no ` +
+      `horizontal overflow), and the json block MUST include "labels": ["ui-validation"]. ` +
+      `If the change is purely backend/tooling with no visible effect, omit both.`
+    : '';
   const prompt =
     `You are helping turn a quick idea into a well-formed GitHub issue for this repo. ` +
     `Do NOT modify any files — this is a read-only conversation; you may look at the ` +
     `codebase for context if useful. The original idea was: "${pre.text}". ${draftHint}` +
     `The user just said: ${message}\n\n` +
     `Reply conversationally, then ALWAYS end your reply with the current best draft as a ` +
-    `fenced json block of the exact shape {"title": "...", "body": "..."} (a short, clear ` +
-    `title and a body with motivation + concrete acceptance criteria).\n\n` +
+    `fenced json block of the exact shape {"title": "...", "body": "...", "labels": []} (a ` +
+    `short, clear title and a body with motivation + concrete acceptance criteria).\n\n` +
     `Bilingual issue format (REQUIRED): "title" must be written in Chinese (keep proper ` +
     `nouns / code identifiers such as PreIssue, server.js, SSE in English). "body" must ` +
     `start with the full Chinese description, then a "---" separator, then the complete ` +
     `English translation wrapped in ` +
     `"<details>\\n<summary>English version</summary>\\n\\n...\\n\\n</details>". The English ` +
     `part must be a full translation of the Chinese part, not a summary, with the same ` +
-    `section structure. Keep code blocks, commands, paths and logs untranslated.`;
+    `section structure. Keep code blocks, commands, paths and logs untranslated.` +
+    uiHint;
   args.push('-p', prompt, ...approvalFlags('default'), ...modelFlags());
 
   const job = jobs.startJob(key, {
@@ -523,7 +543,12 @@ app.post('/api/repos/:name/preissues/:id/create-issue', async (req, res) => {
   }
 
   try {
-    const { url, number } = await gh.createIssue(repo.ownerRepo, draft.title, draft.body || '');
+    const { url, number } = await gh.createIssue(
+      repo.ownerRepo,
+      draft.title,
+      draft.body || '',
+      draft.labels || []
+    );
     store.markPreIssueConverted(repo.name, id, { issueNumber: number, issueUrl: url });
     res.json({ ok: true, issueNumber: number, issueUrl: url });
   } catch (err) {

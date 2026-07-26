@@ -32,3 +32,16 @@
 
 - 部署方式见 `.cloud-copilot.json`（`npm run cc:restart`）。
 - 项目说明见 `README.md`。
+
+## Web UI 改动必须跑 UI 验证
+
+本仓库是 web 项目，`.cloud-copilot.json` 里已声明 `ui` 块。改动 `public/*.html`、
+CSS 或任何用户可见的界面后，**必须**用 `ui-test` skill 验证：
+
+```bash
+PORT=8899 nohup npm start > /tmp/ui-test.log 2>&1 &   # 不要用 cc:restart，会杀掉当前 job
+node ~/.agents/skills/ui-test/scripts/audit.mjs --config .cloud-copilot.json --out /tmp/ui-audit
+```
+
+error 级别的问题必须修完再提交；结果表格贴进 PR 的 `## UI validation` 小节。
+非 web 项目（如 iOS）跳过此步骤。

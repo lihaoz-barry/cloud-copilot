@@ -115,7 +115,7 @@ else
 fi
 
 # --------------------------------------------------------------------------
-section "3. Skills (Create PR + Deploy)"
+section "3. Skills (Create PR + Deploy + UI test)"
 # --------------------------------------------------------------------------
 if [[ "$SKILLS_SCOPE" == "global" ]]; then
   mkdir -p "$GLOBAL_SKILLS"
@@ -140,7 +140,64 @@ else
 fi
 
 # --------------------------------------------------------------------------
-section "4. Deploy config (App Store Connect)"
+section "4. UI testing (Playwright, web repos only)"
+# --------------------------------------------------------------------------
+# The ui-test skill drives a headless browser to catch layout / contrast /
+# tap-target regressions on web UI changes. Two pieces are needed: the npm deps
+# + a Chromium build (for skills/ui-test/scripts/audit.mjs), and the playwright
+# MCP server (so Copilot can navigate and click interactively).
+if have node; then
+  if [[ -z "$NO_INSTALL" ]]; then
+    if [[ ! -d "$REPO_DIR/node_modules/playwright" || ! -d "$REPO_DIR/node_modules/axe-core" ]]; then
+      if (cd "$REPO_DIR" && npm install --silent >/dev/null 2>&1); then
+        ok "ui-test npm deps installed (playwright, axe-core)"
+      else
+        warn "npm install failed — run it manually in $REPO_DIR for the ui-test skill"
+      fi
+    else
+      ok "ui-test npm deps present (playwright, axe-core)"
+    fi
+  fi
+
+  # Chromium download is ~95MB but cached, so re-runs are a no-op.
+  if [[ -n "$NO_INSTALL" ]]; then
+    if ls "$HOME/Library/Caches/ms-playwright"/chromium* >/dev/null 2>&1; then
+      ok "headless Chromium present"
+    else
+      warn "headless Chromium missing — npx playwright install chromium"
+    fi
+  elif (cd "$REPO_DIR" && npx --yes playwright install chromium >/dev/null 2>&1); then
+    ok "headless Chromium ready"
+  else
+    warn "could not install headless Chromium — run: npx playwright install chromium"
+  fi
+else
+  warn "node missing — skipping UI test setup"
+fi
+
+if have copilot; then
+  # Capture first: `... | grep -q` would SIGPIPE copilot and, under `pipefail`,
+  # report a false negative even when the server is registered.
+  MCP_LIST="$(copilot mcp list 2>/dev/null || true)"
+  if grep -q '^  playwright ' <<<"$MCP_LIST"; then
+    ok "playwright MCP server registered"
+  elif [[ -n "$NO_INSTALL" ]]; then
+    warn "playwright MCP server not registered"
+  elif copilot mcp add playwright -- npx -y @playwright/mcp@latest --headless --isolated >/dev/null 2>&1; then
+    ok "playwright MCP server registered"
+  else
+    warn "could not register the playwright MCP server — run: copilot mcp add playwright -- npx -y @playwright/mcp@latest --headless --isolated"
+  fi
+  # The MCP server drives its own browser build, separate from the npm one above.
+  if [[ -z "$NO_INSTALL" ]] && ! ls "$HOME/Library/Caches/ms-playwright"/chrome* >/dev/null 2>&1; then
+    npx --yes @playwright/mcp@latest install-browser chrome-for-testing >/dev/null 2>&1 \
+      && ok "playwright MCP browser ready" \
+      || warn "playwright MCP browser missing — npx @playwright/mcp install-browser chrome-for-testing"
+  fi
+fi
+
+# --------------------------------------------------------------------------
+section "5. Deploy config (App Store Connect)"
 # --------------------------------------------------------------------------
 mkdir -p "$CONFIG_DIR"
 if [[ ! -f "$DEPLOY_ENV" ]]; then
@@ -176,7 +233,7 @@ else
 fi
 
 # --------------------------------------------------------------------------
-section "5. fastlane"
+section "6. fastlane"
 # --------------------------------------------------------------------------
 if [[ -n "$IS_MAC" ]]; then
   if have fastlane; then
@@ -204,7 +261,7 @@ else
 fi
 
 # --------------------------------------------------------------------------
-section "6. cloud-copilot dependencies"
+section "7. cloud-copilot dependencies"
 # --------------------------------------------------------------------------
 if [[ -z "$NO_INSTALL" ]] && have npm; then
   ( cd "$REPO_DIR" && npm install --no-audit --no-fund >/dev/null 2>&1 ) && ok "npm install complete" || warn "npm install had issues — run it manually in $REPO_DIR"

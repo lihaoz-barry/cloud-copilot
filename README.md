@@ -175,6 +175,58 @@ Deploy is dispatched per-repo. Drop a `.cloud-copilot.json` at a repo's root:
   pointing here. cloud-copilot never guesses a shell command for an unconfigured
   repo.
 
+### UI validation for web repos (`ui` config + `ui-test` skill)
+
+Web repos can opt into automated UI checking by adding a `ui` block to the same
+`.cloud-copilot.json`:
+
+```json
+{
+  "ui": {
+    "enabled": true,
+    "startCommand": "npm start",
+    "port": 8899,
+    "baseUrl": "http://127.0.0.1:8899",
+    "routes": ["/"],
+    "viewports": [[390, 844], [1440, 900]]
+  }
+}
+```
+
+With this in place:
+
+- **Issue creation** — the PreIssue → issue prompt asks for a `## UI 验收标准`
+  section and tags the issue `ui-validation` whenever the idea changes something
+  visible. (The label is created in the repo automatically if it doesn't exist.)
+- **Create PR** — the `create-pr` skill runs the `ui-test` skill before committing
+  whenever the issue is labelled `ui-validation` or the diff touches
+  `*.html/css/jsx/tsx/vue/svelte`, fixes every error-severity finding, and pastes
+  the results into the PR under `## UI validation`.
+
+The `ui-test` skill has two halves:
+
+1. **`skills/ui-test/scripts/audit.mjs`** — a deterministic auditor (Playwright +
+   axe-core) that reports only *measured* problems: horizontal overflow, text
+   outside the viewport, overlapping controls, tap targets under 44×44, text under
+   12px, clipped content, WCAG contrast failures, console errors and failed
+   requests — per route **and** per viewport, plus full-page screenshots.
+   Exit code `1` if anything error-severity was found.
+2. **the `playwright` MCP server** — registered globally by `setup/setup.sh`, so
+   Copilot can additionally navigate, click and type its way through flows that a
+   static audit can't reach.
+
+```bash
+node ~/.agents/skills/ui-test/scripts/audit.mjs --config .cloud-copilot.json --out /tmp/ui-audit
+```
+
+Repos with **no** `ui` block are skipped entirely — an `.xcodeproj` is never
+treated as a web UI, so iOS repos are unaffected. A repo with a plain
+`public/index.html` and no config is auto-detected.
+
+> ⚠️ When cloud-copilot tests **itself**, the skill starts a second instance on a
+> scratch `PORT` — running `npm run cc:restart` would kill the server hosting the
+> very job doing the testing.
+
 ### Chat with a PR (plan → apply)
 
 Click any PR to open its detail page (`#/pr/<repo>/<issue>/<pr>`). Below the same
@@ -268,6 +320,7 @@ The script is idempotent and prints a ✓/✗ summary. Flags:
 **Bundled skills** (`skills/`):
 - `create-pr` — implement an issue end-to-end and open a PR (the Create PR flow).
 - `testflight-deploy` — build + upload to TestFlight via fastlane (the Deploy flow).
+- `ui-test` — headless-browser UI validation for web repos (see below).
 - `cloud-copilot-setup` — a step-by-step guide an agent can read to do the setup
   interactively, if you'd rather not run the script.
 

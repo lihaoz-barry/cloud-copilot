@@ -102,6 +102,56 @@ click **Create PR**:
 A stage only advances on **success**; a failure or abort at any point simply stops
 the chain. The choice is saved per-device in `localStorage`.
 
+### Task completion alerts (sound + system notification)
+
+Long runs are meant to be started and forgotten about, so the console tells you
+the moment **any** action (Create PR / Deploy / Merge / a PR, pre-issue or admin
+chat turn) reaches a terminal state:
+
+1. a short chime — a rising one for success, a falling one for failure/abort,
+2. an OS notification, but only when the tab is **not** visible + focused, so it
+   never fires while you're already watching the log,
+3. `navigator.vibrate()` where the platform supports it,
+4. an in-page toast, which always shows and is the graceful-degradation path.
+
+The floating **🔔 Alerts** button (bottom-left) opens a drawer with independent
+**Sound & vibration** and **System notifications** toggles plus a **Test
+notification** button. Both settings are per-device (`localStorage`) and default
+to on.
+
+All of this hangs off a single hook in `pumpSSE()`: every long action streams
+through `lib/jobs.js`, which always emits a `meta` event carrying the job's
+status before replaying, so one code path covers every button. That `meta` also
+gives the "did this job finish before I was looking?" answer — a job whose
+completion is only ever *replayed* to this page, and which the page never saw
+running, stays silent.
+
+#### iOS / mobile Safari
+
+| Platform | Works? |
+| -------- | ------ |
+| Desktop Chrome / Firefox / Safari | Yes, no install needed — just grant permission. |
+| Android Chrome | Yes, including vibration. |
+| iOS Safari, **installed to the Home Screen** | Yes (iOS 16.4+). |
+| iOS Safari, plain tab | `window.Notification` doesn't exist; the drawer detects this and shows an **Add to Home Screen** hint instead of failing silently. Sound + toast still work. |
+
+Two iOS quirks are handled explicitly:
+
+- **Audio needs a gesture.** The chimes are primed (played muted, then paused)
+  on the first tap/keypress anywhere in the app, so a later completion can play
+  them without a fresh gesture.
+- **Notifications need a PWA + a service worker.** `public/manifest.webmanifest`
+  and `public/sw.js` are what make "Add to Home Screen" produce a standalone app
+  that iOS will deliver notifications to; iOS also only allows
+  `registration.showNotification()`, never `new Notification()`.
+
+Permission is only ever requested from a real tap (the toggle or the Test
+button), never on page load.
+
+**Not covered (follow-up):** Web Push (VAPID) so alerts arrive with the app
+fully closed. Phase 1 fires notifications from the page itself, which covers the
+"app backgrounded / screen briefly locked" case, not "app killed".
+
 ### Per-repo deploy config (`.cloud-copilot.json`)
 
 Deploy is dispatched per-repo. Drop a `.cloud-copilot.json` at a repo's root:
@@ -401,7 +451,14 @@ cloud-copilot/
 │   ├── runner.js       # spawn copilot, stream SSE, capture transcript + session id
 │   └── repoConfig.js   # loads a repo's .cloud-copilot.json (or auto-detects iOS)
 ├── public/
-│   └── index.html      # repos → issues → Create PR / Deploy / Merge pipeline console
+│   ├── index.html      # repos → issues → Create PR / Deploy / Merge pipeline console
+│   ├── notify.js       # CCNotify: completion chime + system notification + toast
+│   ├── sw.js           # service worker (required for notifications on iOS)
+│   ├── manifest.webmanifest  # PWA manifest — makes "Add to Home Screen" a real app
+│   ├── icons/          # PWA / apple-touch icons (generated)
+│   └── sounds/         # success + failure chimes (generated)
+├── scripts/
+│   └── gen-assets.js   # regenerates public/icons + public/sounds (no deps)
 ├── data/               # state.json (gitignored)
 ├── .gitignore
 └── README.md

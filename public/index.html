@@ -331,6 +331,56 @@
     .nav-tab:hover { opacity: .85; }
     .nav-tab.active { opacity: 1; background: #2563eb; color: #fff; }
 
+    /* ---- notification center (fixed, top-left) ---------------------------- */
+    .notif-center { position: fixed; top: 10px; left: 10px; z-index: 70; }
+    .notif-btn {
+      position: relative; width: 38px; height: 38px; border-radius: 999px; cursor: pointer;
+      font-size: 1rem; line-height: 1; border: 1px solid #8884; color: inherit;
+      background: color-mix(in srgb, Canvas 82%, transparent);
+      backdrop-filter: saturate(1.6) blur(12px); -webkit-backdrop-filter: saturate(1.6) blur(12px);
+      box-shadow: 0 6px 24px #0005; touch-action: manipulation;
+    }
+    .notif-badge {
+      position: absolute; top: -4px; right: -4px; min-width: 17px; height: 17px; padding: 0 4px;
+      border-radius: 999px; background: #ef4444; color: #fff; font-size: .66rem; font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .notif-badge.hidden { display: none; }
+    .notif-panel {
+      display: none; position: absolute; top: 46px; left: 0; width: min(340px, calc(100vw - 20px));
+      max-height: min(70vh, 520px); overflow: auto; padding: 8px; border-radius: 12px;
+      border: 1px solid #8884; box-shadow: 0 10px 34px #0007;
+      background: color-mix(in srgb, Canvas 94%, transparent);
+      backdrop-filter: saturate(1.6) blur(14px); -webkit-backdrop-filter: saturate(1.6) blur(14px);
+    }
+    .notif-panel.show { display: block; }
+    .notif-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      padding: 4px 6px 8px; font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; opacity: .7;
+    }
+    .notif-item {
+      display: flex; gap: 8px; align-items: flex-start; padding: 8px; border-radius: 9px;
+      border: 1px solid #8883; margin-bottom: 6px; font-size: .82rem;
+    }
+    .notif-item.unread { border-color: #2563eb88; background: #2563eb14; }
+    .notif-item .grow { flex: 1; min-width: 0; }
+    .notif-item .nt { font-weight: 600; }
+    .notif-item .nm { opacity: .72; font-size: .76rem; word-break: break-word; margin-top: 2px; }
+    .notif-item .nw { opacity: .5; font-size: .7rem; margin-top: 3px; }
+    .notif-item .nx {
+      background: none; border: none; color: inherit; opacity: .5; cursor: pointer;
+      font-size: .95rem; line-height: 1; padding: 0 2px;
+    }
+    .notif-item .nx:hover { opacity: 1; }
+    .notif-kind { flex: none; }
+    .notif-empty { padding: 10px 8px 14px; opacity: .55; font-size: .8rem; }
+    .q-item {
+      display: flex; gap: 8px; align-items: center; padding: 6px 8px; border-radius: 9px;
+      border: 1px dashed #8884; margin-bottom: 5px; font-size: .78rem;
+    }
+    .q-item .qs { flex: none; font-size: .7rem; padding: 1px 6px; border-radius: 999px; border: 1px solid #8886; opacity: .8; }
+    .q-item.running .qs { border-color: #16a34a99; color: #16a34a; }
+
     /* ---- Admin terminal page --------------------------------------------- */
     #adminView { max-width: 860px; margin: 0 auto; padding: 8px 14px 90px; }
     .admin-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
@@ -482,6 +532,24 @@
   </style>
 </head>
 <body>
+  <!-- Notification center: actions are queued and finish while the user is
+       elsewhere, so every outcome lands here (top-left) instead of only in the
+       log panel of whichever page happened to be open. -->
+  <div class="notif-center" id="notifCenter">
+    <button id="notifBtn" class="notif-btn" title="Notifications &amp; queue" aria-label="Notifications">
+      🔔<span id="notifBadge" class="notif-badge hidden">0</span>
+    </button>
+    <div id="notifPanel" class="notif-panel">
+      <div class="notif-head">
+        <span>Notifications</span>
+        <button id="notifClear" class="ghost sm">Clear all</button>
+      </div>
+      <div id="notifList"></div>
+      <div class="notif-head"><span>Queue</span><span id="queueCounts"></span></div>
+      <div id="queueList"></div>
+    </div>
+  </div>
+
   <nav class="navbar">
     <button class="nav-tab active" data-tab="home">🏠 Home</button>
     <button class="nav-tab" data-tab="admin">⌨️ Admin</button>
@@ -1008,10 +1076,13 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   }
 
   // --- blocking -------------------------------------------------------------
+  // "Blocked" is now only a *hint*: another issue in this repo holds the
+  // working-tree lock, so anything started here will be queued rather than run
+  // immediately. The buttons stay enabled — the server queues the action and
+  // streams `queued` updates until its turn comes.
   function setBlocked(blocked) {
     el.classList.toggle('blocked', blocked);
-    workBtn.disabled = blocked;
-    refreshPrsBtn.disabled = blocked;
+    workBtn.title = blocked ? 'This repo is busy — this will be queued' : '';
   }
 
   // --- Create PR visuals: success/fail shown ON THE ISSUE, not the button ---
@@ -1297,8 +1368,8 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   async function onWork() {
     const s = st.work.status;
     if (s === 'working') return void worklog.classList.toggle('show');
-    // Enforce the repo-level lock on the client too.
-    if (repoCtx.activeWorkIssue != null && repoCtx.activeWorkIssue !== issue.number) return;
+    // No client-side lock any more: if the repo is busy the server queues this
+    // run and tells us so over SSE (`queued`), instead of dropping the click.
     st.work.status = 'working';
     paintWork('working');
     await streamWork(false);
@@ -1327,6 +1398,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       if (!resp.ok || !resp.body) { appendWork(`\n[error] HTTP ${resp.status}\n`, 'err'); return reconcileWork(); }
       await pumpSSE(resp, {
         onMeta: () => repoCtx.setActive(issue.number),
+        onQueued: (q) => appendWork(`\n[queued #${q.position} — ${q.reason}]\n`, 'stderr'),
         onChunk: (t, s) => appendWork(t, s === 'stderr' ? 'stderr' : null),
         onError: (m) => appendWork(`\n[error] ${m}\n`, 'err'),
         onResult: (d) => { finalStatus = d.status; resultData = d; },
@@ -1335,7 +1407,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       appendWork(`\n[connection dropped: ${e.message}] — job still running, checking status…\n`, 'stderr');
       return reconcileWork();
     }
-    if (finalStatus === 'blocked') {
+    if (finalStatus === 'blocked' || finalStatus === 'cancelled') {
       st.work.status = 'idle';
       paintWork('idle');
       worklog.classList.add('show');
@@ -1384,9 +1456,6 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     if (!pr) return;
     const s = (pr.deploy && pr.deploy.status) || 'idle';
     if (s === 'deploying') { const p = deployPanel(prNumber); if (p) p.classList.toggle('show'); return; }
-    // Enforce the repo-level lock on the client too — Deploy checks out a
-    // branch on the same shared working tree as Create PR/Chat.
-    if (repoCtx.activeWorkIssue != null && repoCtx.activeWorkIssue !== issue.number) return;
     // Finished runs require confirmation before starting a fresh TestFlight build.
     if (s === 'success' || s === 'failed' || s === 'aborted') {
       const verb = (s === 'failed' || s === 'aborted') ? 'Re-deploy' : 'Deploy again';
@@ -1420,6 +1489,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       if (!resp.ok || !resp.body) { appendDeploy(prNumber, `\n[error] HTTP ${resp.status}\n`, 'err'); return reconcileDeploy(prNumber); }
       await pumpSSE(resp, {
         onMeta: () => repoCtx.setActive(issue.number),
+        onQueued: (q) => appendDeploy(prNumber, `\n[queued #${q.position} — ${q.reason}]\n`, 'stderr'),
         onChunk: (t, s) => appendDeploy(prNumber, t, s === 'stderr' ? 'stderr' : null),
         onError: (m) => appendDeploy(prNumber, `\n[error] ${m}\n`, 'err'),
         onResult: (d) => { finalStatus = d.status; resultData = d; },
@@ -1428,7 +1498,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       appendDeploy(prNumber, `\n[connection dropped: ${e.message}] — deploy still running, checking status…\n`, 'stderr');
       return reconcileDeploy(prNumber);
     }
-    if (finalStatus === 'blocked') {
+    if (finalStatus === 'blocked' || finalStatus === 'cancelled') {
       pr.deploy.status = 'idle';
       paintDeploy(prNumber);
       const p = deployPanel(prNumber); if (p) p.classList.add('show');
@@ -1523,6 +1593,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       });
       if (!resp.ok || !resp.body) { appendMerge(prNumber, `\n[error] HTTP ${resp.status}\n`, 'err'); return reconcileMerge(prNumber); }
       await pumpSSE(resp, {
+        onQueued: (q) => appendMerge(prNumber, `\n[queued #${q.position} — ${q.reason}]\n`, 'stderr'),
         onChunk: (t, s) => appendMerge(prNumber, t, s === 'stderr' ? 'stderr' : null),
         onError: (m) => appendMerge(prNumber, `\n[error] ${m}\n`, 'err'),
         onResult: (d) => { finalStatus = d.status; resultData = d; },
@@ -1531,7 +1602,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       appendMerge(prNumber, `\n[connection dropped: ${e.message}] — merge still running, checking status…\n`, 'stderr');
       return reconcileMerge(prNumber);
     }
-    if (finalStatus === 'blocked') {
+    if (finalStatus === 'blocked' || finalStatus === 'cancelled') {
       pr.merge.status = 'idle';
       paintMerge(prNumber);
       const p = mergePanel(prNumber); if (p) p.classList.add('show');
@@ -1670,7 +1741,7 @@ async function friendlyHttpError(resp) {
 }
 
 // Read an SSE response body, dispatching parsed events to handlers.
-async function pumpSSE(resp, { onChunk, onError, onResult, onMeta }) {
+async function pumpSSE(resp, { onChunk, onError, onResult, onMeta, onQueued }) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
@@ -1686,6 +1757,7 @@ async function pumpSSE(resp, { onChunk, onError, onResult, onMeta }) {
       if (!evt) continue;
       if (evt.event === 'chunk') onChunk && onChunk(evt.data.text, evt.data.stream);
       else if (evt.event === 'meta') onMeta && onMeta(evt.data);
+      else if (evt.event === 'queued') onQueued && onQueued(evt.data);
       else if (evt.event === 'error') onError && onError(evt.data.message);
       else if (evt.event === 'result') onResult && onResult(evt.data);
     }
@@ -1880,6 +1952,142 @@ document.querySelectorAll('.nav-tab').forEach((b) => {
   b.addEventListener('click', () => setTab(b.dataset.tab));
 });
 
+// ---------------------------------------------------------------------------
+// Notification center + live queue view (top-left bell).
+//
+// Actions no longer fail when a repo is busy — they queue — which means most of
+// them finish while the user is on another page or has the phone locked. This
+// panel is the one place that always tells them what happened: every terminal
+// outcome is stored server-side, marked read when the panel is opened, and
+// deleted individually once acknowledged.
+// ---------------------------------------------------------------------------
+const notifBtn = document.getElementById('notifBtn');
+const notifPanel = document.getElementById('notifPanel');
+const notifBadge = document.getElementById('notifBadge');
+const notifList = document.getElementById('notifList');
+const notifClear = document.getElementById('notifClear');
+const queueList = document.getElementById('queueList');
+const queueCounts = document.getElementById('queueCounts');
+
+const NOTIF_ICON = { success: '✅', failure: '❌', cancelled: '🚫', info: 'ℹ️' };
+
+function notifAgo(iso) {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return '';
+  const secs = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (secs < 60) return `${secs}s ago`;
+  if (secs < 3600) return `${Math.round(secs / 60)}m ago`;
+  if (secs < 86400) return `${Math.round(secs / 3600)}h ago`;
+  return `${Math.round(secs / 86400)}d ago`;
+}
+
+async function refreshNotifications() {
+  let data;
+  try {
+    data = await (await fetch('/api/notifications')).json();
+  } catch {
+    return;
+  }
+  const items = data.notifications || [];
+  notifBadge.textContent = String(data.unread || 0);
+  notifBadge.classList.toggle('hidden', !data.unread);
+  if (!items.length) {
+    notifList.innerHTML = '<div class="notif-empty">Nothing yet — finished tasks will show up here.</div>';
+    return;
+  }
+  notifList.innerHTML = items
+    .map(
+      (n) => `
+      <div class="notif-item ${n.read ? '' : 'unread'}" data-id="${escape(n.id)}">
+        <span class="notif-kind">${NOTIF_ICON[n.kind] || NOTIF_ICON.info}</span>
+        <div class="grow">
+          <div class="nt">${escape(n.title)}</div>
+          ${n.message ? `<div class="nm">${escape(n.message)}</div>` : ''}
+          <div class="nw">${escape(notifAgo(n.at))}</div>
+        </div>
+        <button class="nx" title="Dismiss">×</button>
+      </div>`,
+    )
+    .join('');
+}
+
+async function refreshQueue() {
+  let q;
+  try {
+    q = await (await fetch('/api/queue')).json();
+  } catch {
+    return;
+  }
+  const running = q.running || [];
+  const waiting = q.queued || [];
+  queueCounts.textContent = `${q.counts.task}/${q.limits.task} tasks · ${q.counts.chat}/${q.limits.chat} chats`;
+  if (!running.length && !waiting.length) {
+    queueList.innerHTML = '<div class="notif-empty">Idle.</div>';
+    return;
+  }
+  const row = (e, isRunning) => `
+    <div class="q-item ${isRunning ? 'running' : ''}">
+      <span class="qs">${isRunning ? 'running' : `#${e.position}`}</span>
+      <span class="grow">${escape(e.label)}${e.reason ? `<div class="nm">${escape(e.reason)}</div>` : ''}</span>
+    </div>`;
+  queueList.innerHTML = running.map((e) => row(e, true)).join('') + waiting.map((e) => row(e, false)).join('');
+}
+
+// Opening the panel counts as reading everything in it — the user then deletes
+// what they no longer care about (individually, or all at once).
+async function openNotifPanel() {
+  notifPanel.classList.add('show');
+  await refreshQueue();
+  await refreshNotifications();
+  try {
+    await fetch('/api/notifications/read', { method: 'POST' });
+  } catch {
+    /* ignore */
+  }
+  notifBadge.classList.add('hidden');
+}
+
+notifBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (notifPanel.classList.contains('show')) notifPanel.classList.remove('show');
+  else openNotifPanel();
+});
+
+document.addEventListener('click', (e) => {
+  if (!notifPanel.classList.contains('show')) return;
+  if (!document.getElementById('notifCenter').contains(e.target)) notifPanel.classList.remove('show');
+});
+
+notifList.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.nx');
+  if (!btn) return;
+  const item = btn.closest('.notif-item');
+  const id = item && item.dataset.id;
+  if (!id) return;
+  item.remove();
+  try {
+    await fetch(`/api/notifications/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  } catch {
+    /* ignore */
+  }
+  refreshNotifications();
+});
+
+notifClear.addEventListener('click', async () => {
+  try {
+    await fetch('/api/notifications', { method: 'DELETE' });
+  } catch {
+    /* ignore */
+  }
+  refreshNotifications();
+});
+
+refreshNotifications();
+setInterval(() => {
+  refreshNotifications();
+  if (notifPanel.classList.contains('show')) refreshQueue();
+}, 8000);
+
 // ---- TestFlight overview page: every build ever shipped, across all repos,
 // with its PR's title shown as the "What to Test" note and a one-click Merge
 // button that reuses the same merge SSE endpoint as the PR detail page. -----
@@ -2003,11 +2211,12 @@ async function onTfMerge(b, btn) {
     if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
     let finalStatus = null, resultData = null;
     await pumpSSE(resp, {
+      onQueued: (q) => { btn.textContent = `Queued #${q.position}…`; },
       onResult: (d) => { finalStatus = d.status; resultData = d; },
     });
     if (finalStatus === 'success') {
       btn.textContent = 'Merged';
-    } else if (finalStatus === 'blocked') {
+    } else if (finalStatus === 'blocked' || finalStatus === 'cancelled') {
       window.alert((resultData && resultData.message) || 'Merge blocked.');
       btn.disabled = false;
       btn.textContent = 'Merge';
@@ -2262,6 +2471,10 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
         setSending(false); return;
       }
       await pumpSSE(resp, {
+        onQueued: (q) => {
+          const s = `[queued #${q.position} — ${q.reason}]\n`;
+          textEl.appendChild(document.createTextNode(s));
+        },
         onChunk: (t) => { raw += t; textEl.appendChild(document.createTextNode(t)); messagesEl.scrollTop = messagesEl.scrollHeight; },
         onError: (m) => { const s = `\n[error] ${m}`; raw += s; textEl.appendChild(document.createTextNode(s)); },
         onResult: (d) => { finalStatus = d.status; },
@@ -2601,6 +2814,7 @@ async function renderPreIssueDetail(repoName, id) {
         setSending(false); return;
       }
       await pumpSSE(resp, {
+        onQueued: (q) => textEl.appendChild(document.createTextNode(`[queued #${q.position} — ${q.reason}]\n`)),
         onChunk: (t) => { raw += t; textEl.appendChild(document.createTextNode(t)); messagesEl.scrollTop = messagesEl.scrollHeight; },
         onError: (m) => { const s = `\n[error] ${m}`; raw += s; textEl.appendChild(document.createTextNode(s)); },
         onResult: (d) => { finalDraft = d.draft || null; },
@@ -3006,6 +3220,7 @@ function initAdminTerminal() {
     try {
       await pumpSSE(resp, {
         onMeta: (m) => { if (m && m.replay) resetActiveStream(); },
+        onQueued: (q) => appendActiveChunk(`[queued #${q.position} — ${q.reason}]\n`, 'stderr'),
         onChunk: (t, s) => appendActiveChunk(t, s),
         onError: (m) => appendActiveChunk(`\n[error] ${m}`, 'stderr'),
         onResult: (d) => {

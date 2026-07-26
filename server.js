@@ -27,6 +27,7 @@ const gh = require('./lib/gh');
 const repoConfig = require('./lib/repoConfig');
 const { runCopilotSSE, writeSseHead } = require('./lib/runner');
 const jobs = require('./lib/jobs');
+const queue = require('./lib/queue');
 const { UPLOADS_DIR, saveUploadedImages, cleanupOldUploads } = require('./lib/attachments');
 
 const HOST = process.env.HOST || '0.0.0.0';
@@ -123,44 +124,59 @@ function resolveRepo(name) {
 }
 
 // Actions that check out a branch on a repo's single shared working tree —
-// Create PR, Deploy, and Chat (even "plan" mode checks out the PR's branch) —
-// must be mutually exclusive per repo, or concurrent runs collide on the same
-// checkout. Merge is excluded: it only calls `gh pr merge` via the API, no
-// local checkout involved.
-const WORKING_TREE_ACTION_RE = /^(\d+):(work|deploy|chat)(?::(\d+))?$/;
+// Create PR, Deploy, Merge and PR Chat (even "plan" mode checks out the PR's
+// branch; Merge returns the clone to its base branch afterwards) — must be
+// mutually exclusive per repo, because a clone has exactly ONE checkout.
+// This is a physical constraint, not a policy: it can't be lifted by raising
+// concurrency limits. Colliding actions are now QUEUED (see lib/queue.js)
+// rather than rejected.
+const WORKING_TREE_ACTION_RE = /^(\d+):(work|deploy|merge|chat)(?::(\d+))?$/;
 
-// First OTHER running job (excluding `excludeKey`) that touches this repo's
-// shared working tree, or null. Used to block a second such action from
-// starting concurrently.
-function findOtherRepoBusyKey(repoName, excludeKey) {
+// The issue number behind a repo's current working-tree-touching job, if any
+// — used by the issues list so the client can show which issue holds the lock.
+function repoBusyIssueNumber(repoName) {
   const prefix = `${repoName}#`;
   for (const k of jobs.runningKeys()) {
-    if (!k.startsWith(prefix) || k === excludeKey) continue;
-    if (WORKING_TREE_ACTION_RE.test(k.slice(prefix.length))) return k;
+    if (!k.startsWith(prefix)) continue;
+    const m = k.slice(prefix.length).match(WORKING_TREE_ACTION_RE);
+    if (m) return Number(m[1]);
   }
   return null;
 }
 
-// The issue number behind a repo's current working-tree-touching job, if any
-// — used by the issues list so the client can grey out other issues/PRs.
-function repoBusyIssueNumber(repoName) {
-  const k = findOtherRepoBusyKey(repoName, null);
-  if (!k) return null;
-  const m = k.slice(repoName.length + 1).match(WORKING_TREE_ACTION_RE);
-  return m ? Number(m[1]) : null;
+// True while an action is either running OR waiting in the queue — the client
+// must treat both as "live" so it re-attaches instead of starting a duplicate.
+function isLive(key) {
+  return Boolean(jobs.getJob(key)?.status === 'running') || queue.has(key);
 }
 
-const BUSY_ACTION_LABEL = { work: 'a Create PR run', deploy: 'a Deploy', chat: 'a chat turn' };
+const ACTION_LABEL = { work: 'Create PR', deploy: 'Deploy', merge: 'Merge', chat: 'Chat' };
 
-// Human-readable description of what's holding a repo's working-tree lock,
-// for the "blocked" message shown when a second action tries to start.
-function describeBusyKey(repoName, busyKey) {
-  const m = busyKey.slice(repoName.length + 1).match(WORKING_TREE_ACTION_RE);
-  if (!m) return `something else is already running in ${repoName}`;
-  const [, issueNum, action, prNum] = m;
-  const label = BUSY_ACTION_LABEL[action] || action;
-  const prSuffix = prNum ? ` (PR #${prNum})` : '';
-  return `${label}${prSuffix} is already running for issue #${issueNum} in ${repoName}`;
+// Human-readable name for a queued/running action, used in queue positions and
+// notification text (e.g. "Deploy PR #12 (myapp#7)").
+function actionLabel(action, repoName, issueNumber, prNumber) {
+  const base = ACTION_LABEL[action] || action;
+  const pr = prNumber ? ` PR #${prNumber}` : '';
+  return `${base}${pr} (${repoName}#${issueNumber})`;
+}
+
+// Record a terminal outcome in the notification center. Actions are queued and
+// therefore usually finish while the user is elsewhere, so every terminal state
+// leaves a durable, dismissible trace instead of only a transient log line.
+function notifyOutcome({ status, action, repoName, issueNumber, prNumber, message }) {
+  const kind =
+    status === 'success' ? 'success' : status === 'cancelled' ? 'cancelled' : status === 'aborted' ? 'cancelled' : 'failure';
+  const verb =
+    status === 'success' ? 'succeeded' : status === 'cancelled' ? 'was cancelled' : status === 'aborted' ? 'was aborted' : 'failed';
+  store.addNotification({
+    kind,
+    title: `${actionLabel(action, repoName, issueNumber, prNumber)} ${verb}`,
+    message: message || '',
+    repo: repoName,
+    issueNumber,
+    prNumber: prNumber || null,
+    action,
+  });
 }
 
 // Map a UI mode to copilot approval flags.
@@ -298,23 +314,19 @@ app.get('/api/repos/:name/issues/:n/record', (req, res) => {
   if (!repo) return res.status(404).json({ error: 'repo not found' });
   const n = Number(req.params.n);
   const record = store.getRecord(repo.name, n);
-  // Annotate with whether a live job is still running (survives browser drop).
+  // Annotate with whether the action is still live — running OR queued —
+  // so a reconnecting client re-attaches (and keeps its spinner) instead of
+  // firing a duplicate run for something that simply hasn't started yet.
   record.live = {
-    work: Boolean(jobs.getJob(`${repo.name}#${n}:work`)?.status === 'running'),
+    work: isLive(`${repo.name}#${n}:work`),
     deploy: {},
     merge: {},
     chat: {},
   };
   for (const pr of Object.values(record.prs || {})) {
-    record.live.deploy[pr.prNumber] = Boolean(
-      jobs.getJob(`${repo.name}#${n}:deploy:${pr.prNumber}`)?.status === 'running',
-    );
-    record.live.merge[pr.prNumber] = Boolean(
-      jobs.getJob(`${repo.name}#${n}:merge:${pr.prNumber}`)?.status === 'running',
-    );
-    record.live.chat[pr.prNumber] = Boolean(
-      jobs.getJob(`${repo.name}#${n}:chat:${pr.prNumber}`)?.status === 'running',
-    );
+    record.live.deploy[pr.prNumber] = isLive(`${repo.name}#${n}:deploy:${pr.prNumber}`);
+    record.live.merge[pr.prNumber] = isLive(`${repo.name}#${n}:merge:${pr.prNumber}`);
+    record.live.chat[pr.prNumber] = isLive(`${repo.name}#${n}:chat:${pr.prNumber}`);
   }
   res.json(record);
 });
@@ -357,9 +369,16 @@ app.post('/api/repos/:name/issues/:n/hide', (req, res) => {
 
   const record = store.getRecord(repo.name, n);
   const cancelledJobs = [];
-  if (jobs.cancelJob(`${repo.name}#${n}:work`)) cancelledJobs.push('work');
+  // Kill running children AND drop anything still waiting in the queue —
+  // a hidden issue must not have a Deploy pop out of the queue minutes later.
+  const drop = (key, label) => {
+    const reason = `cancelled because issue #${n} was hidden`;
+    if (jobs.cancelJob(key) || queue.cancel(key, reason)) cancelledJobs.push(label);
+  };
+  drop(`${repo.name}#${n}:work`, 'work');
   for (const pr of Object.values(record.prs || {})) {
-    if (jobs.cancelJob(`${repo.name}#${n}:deploy:${pr.prNumber}`)) cancelledJobs.push(`deploy:${pr.prNumber}`);
+    drop(`${repo.name}#${n}:deploy:${pr.prNumber}`, `deploy:${pr.prNumber}`);
+    drop(`${repo.name}#${n}:merge:${pr.prNumber}`, `merge:${pr.prNumber}`);
   }
 
   store.dismissIssue(repo.name, n);
@@ -419,7 +438,9 @@ app.delete('/api/repos/:name/preissues/:id', (req, res) => {
   if (!repo) return res.status(404).json({ error: 'repo not found' });
   const { id } = req.params;
   if (!PREISSUE_ID_RE.test(id)) return res.status(400).json({ error: 'invalid id' });
-  jobs.cancelJob(`${repo.name}:preissue:${id}`);
+  const preKey = `${repo.name}:preissue:${id}`;
+  jobs.cancelJob(preKey);
+  queue.cancel(preKey, 'cancelled because the PreIssue was deleted');
   const deleted = store.deletePreIssue(repo.name, id);
   if (!deleted) return res.status(404).json({ error: 'preissue not found' });
   res.json({ ok: true });
@@ -448,6 +469,11 @@ app.post('/api/repos/:name/preissues/:id/chat', async (req, res) => {
     jobs.subscribe(existing, res);
     return;
   }
+  if (queue.has(key)) {
+    writeSseHead(res);
+    queue.attach(key, res);
+    return;
+  }
 
   const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
   if (!message) return res.status(400).json({ error: 'message is required' });
@@ -471,29 +497,43 @@ app.post('/api/repos/:name/preissues/:id/chat', async (req, res) => {
     `title and a body with motivation + concrete acceptance criteria).`;
   args.push('-p', prompt, ...approvalFlags('default'), ...modelFlags());
 
-  const job = jobs.startJob(key, {
-    bin: COPILOT_BIN,
-    args,
-    cwd: repo.path,
+  // Chat lane, and deliberately NOT repo-exclusive: this conversation is
+  // read-only (no checkout), so it can run alongside a Create PR/Deploy in the
+  // same repo and never has to wait for the working-tree lock.
+  queue.submit({
+    key,
+    res,
+    lane: 'chat',
+    repo: repo.name,
+    exclusive: false,
+    label: `PreIssue chat (${repo.name})`,
     meta: { action: 'preissue-chat', id },
-    onSession: (sid) => store.setPreIssueSession(repo.name, id, sid),
-    onDone: async (j) => {
-      const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
-      store.appendPreIssueChatMessage(repo.name, id, { role: 'assistant', text: j.conversation });
-      const draft = extractDraft(j.conversation);
-      if (draft) store.setPreIssueDraft(repo.name, id, draft);
-      return { action: 'preissue-chat', id, status, sessionId: j.sessionId, draft };
-    },
+    onCancelled: (reason) =>
+      store.appendPreIssueChatMessage(repo.name, id, { role: 'assistant', text: `[${reason}]` }),
+    run: () =>
+      jobs.startJob(key, {
+        bin: COPILOT_BIN,
+        args,
+        cwd: repo.path,
+        meta: { action: 'preissue-chat', id },
+        onSession: (sid) => store.setPreIssueSession(repo.name, id, sid),
+        onDone: async (j) => {
+          const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
+          store.appendPreIssueChatMessage(repo.name, id, { role: 'assistant', text: j.conversation });
+          const draft = extractDraft(j.conversation);
+          if (draft) store.setPreIssueDraft(repo.name, id, draft);
+          return { action: 'preissue-chat', id, status, sessionId: j.sessionId, draft };
+        },
+      }),
   });
-
-  jobs.subscribe(job, res);
 });
 
 app.post('/api/repos/:name/preissues/:id/chat/cancel', (req, res) => {
   const repo = resolveRepo(req.params.name);
   if (!repo) return res.status(404).json({ error: 'repo not found' });
   const { id } = req.params;
-  const cancelled = jobs.cancelJob(`${repo.name}:preissue:${id}`);
+  const key = `${repo.name}:preissue:${id}`;
+  const cancelled = jobs.cancelJob(key) || queue.cancel(key, 'cancelled by user');
   res.json({ cancelled });
 });
 
@@ -542,15 +582,9 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
     jobs.subscribe(existing, res);
     return;
   }
-
-  // Repo-level lock: only one working-tree action (Create PR, Deploy, Chat)
-  // may run per repo at a time, otherwise concurrent runs collide on the same
-  // checkout.
-  const busyKey = findOtherRepoBusyKey(repo.name, key);
-  if (busyKey) {
-    const msg = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`;
-    return sendSseBlocked(res, { action: 'work', status: 'blocked', message: msg });
-  }
+  // Already waiting in the queue (duplicate tap / reconnect while queued):
+  // attach this response to that entry so it streams once the run starts.
+  if (queue.attach(key, res)) return;
 
   const mode = ['default', 'granular', 'allow-all'].includes(req.body?.mode)
     ? req.body.mode
@@ -571,84 +605,101 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
     r.work.prNumber = null;
   });
 
-  const job = jobs.startJob(key, {
-    bin: COPILOT_BIN,
-    args,
-    cwd: repo.path,
+  queue.submit({
+    key,
+    res,
+    lane: 'task',
+    repo: repo.name,
+    exclusive: true, // creates + checks out a branch in the shared clone
+    label: actionLabel('work', repo.name, n),
     meta: { action: 'work' },
-    onSession: (id) =>
+    onCancelled: (reason) => {
       store.updateRecord(repo.name, n, (r) => {
-        r.work.sessionId = id;
-      }),
-    onDone: async (j) => {
-      // Detect the PR: first from THIS run's transcript, then via gh fallback.
-      let prUrl = null;
-      let prNumber = null;
-      let fromTranscript = false;
-      if (repo.ownerRepo) {
-        const re = new RegExp(
-          `https://github\\.com/${repo.ownerRepo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/pull/(\\d+)`,
-        );
-        const m = j.conversation.match(re);
-        if (m) {
-          prUrl = m[0];
-          prNumber = Number(m[1]);
-          fromTranscript = true;
-        }
-      }
-      if (!prUrl) {
-        const found = await gh.findPrForIssue(repo.ownerRepo, n);
-        if (found) {
-          prUrl = found.url;
-          prNumber = found.number;
-        }
-      }
-
-      // A PR URL printed by THIS run is proof of success even if the process was
-      // later killed (exitCode null) after finishing. Only require exitCode===0
-      // for the weaker gh-fallback signal (avoids matching a stale PR).
-      const success = fromTranscript ? Boolean(prUrl) : j.exitCode === 0 && Boolean(prUrl);
-      const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
-
-      store.updateRecord(repo.name, n, (r) => {
-        r.work.status = status;
-        r.work.exitCode = j.exitCode;
-        r.work.conversation = j.conversation;
-        r.work.prUrl = prUrl;
-        r.work.prNumber = prNumber;
-        r.work.sessionId = j.sessionId || r.work.sessionId;
+        r.work.status = 'aborted';
         r.work.finishedAt = new Date().toISOString();
       });
-
-      // Register the freshly created PR so it gets its own deploy button.
-      if (prNumber) {
-        store.upsertPr(repo.name, n, {
-          prNumber,
-          prUrl,
-          createdAt: new Date().toISOString(),
-          source: 'work',
-        });
-      }
-
-      return {
-        action: 'work',
-        status,
-        prUrl,
-        prNumber,
-        sessionId: j.sessionId,
-      };
+      notifyOutcome({ status: 'cancelled', action: 'work', repoName: repo.name, issueNumber: n, message: reason });
     },
-  });
+    onSettled: (status) => notifyOutcome({ status, action: 'work', repoName: repo.name, issueNumber: n }),
+    run: () =>
+      jobs.startJob(key, {
+        bin: COPILOT_BIN,
+        args,
+        cwd: repo.path,
+        meta: { action: 'work' },
+        onSession: (id) =>
+          store.updateRecord(repo.name, n, (r) => {
+            r.work.sessionId = id;
+          }),
+        onDone: async (j) => {
+          // Detect the PR: first from THIS run's transcript, then via gh fallback.
+          let prUrl = null;
+          let prNumber = null;
+          let fromTranscript = false;
+          if (repo.ownerRepo) {
+            const re = new RegExp(
+              `https://github\\.com/${repo.ownerRepo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/pull/(\\d+)`,
+            );
+            const m = j.conversation.match(re);
+            if (m) {
+              prUrl = m[0];
+              prNumber = Number(m[1]);
+              fromTranscript = true;
+            }
+          }
+          if (!prUrl) {
+            const found = await gh.findPrForIssue(repo.ownerRepo, n);
+            if (found) {
+              prUrl = found.url;
+              prNumber = found.number;
+            }
+          }
 
-  jobs.subscribe(job, res);
+          // A PR URL printed by THIS run is proof of success even if the process was
+          // later killed (exitCode null) after finishing. Only require exitCode===0
+          // for the weaker gh-fallback signal (avoids matching a stale PR).
+          const success = fromTranscript ? Boolean(prUrl) : j.exitCode === 0 && Boolean(prUrl);
+          const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
+
+          store.updateRecord(repo.name, n, (r) => {
+            r.work.status = status;
+            r.work.exitCode = j.exitCode;
+            r.work.conversation = j.conversation;
+            r.work.prUrl = prUrl;
+            r.work.prNumber = prNumber;
+            r.work.sessionId = j.sessionId || r.work.sessionId;
+            r.work.finishedAt = new Date().toISOString();
+          });
+
+          // Register the freshly created PR so it gets its own deploy button.
+          if (prNumber) {
+            store.upsertPr(repo.name, n, {
+              prNumber,
+              prUrl,
+              createdAt: new Date().toISOString(),
+              source: 'work',
+            });
+          }
+
+          return {
+            action: 'work',
+            status,
+            prUrl,
+            prNumber,
+            sessionId: j.sessionId,
+          };
+        },
+      }),
+  });
 });
 
-// Abort a running PR creation for an issue.
+// Abort a running PR creation for an issue (or drop it from the queue).
 app.post('/api/repos/:name/issues/:n/work/cancel', (req, res) => {
   const repo = resolveRepo(req.params.name);
   if (!repo) return res.status(404).json({ error: 'repo not found' });
   const n = Number(req.params.n);
-  const cancelled = jobs.cancelJob(`${repo.name}#${n}:work`);
+  const key = `${repo.name}#${n}:work`;
+  const cancelled = jobs.cancelJob(key) || queue.cancel(key, 'cancelled by user');
   res.json({ cancelled });
 });
 
@@ -679,8 +730,13 @@ function buildChangelog(pr, issueNumber, version, buildNumber) {
   return text.slice(0, 500); // TestFlight "What to Test" is short; keep it well under Apple's limit
 }
 
-function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
-  gh.getPr(repo.ownerRepo, prNumber).then((pr) => {
+// Both deploy runners are invoked by the queue once a slot AND the repo's
+// working-tree lock are free — never directly from the request handler — so
+// their `git checkout` can't race another action in the same clone. They return
+// the started job, or null after reporting a pre-spawn failure via ctx.fail().
+async function runIosTestflightDeploy({ ctx, repo, n, prNumber, key }) {
+  const pr = await gh.getPr(repo.ownerRepo, prNumber);
+  {
     if (!pr || !pr.headRefName) {
       const message = `Could not resolve the branch for PR #${prNumber} via gh.`;
       store.updateDeploy(repo.name, n, prNumber, (d) => {
@@ -688,7 +744,8 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
         d.finishedAt = new Date().toISOString();
         d.conversation = message;
       });
-      return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
+      ctx.fail({ action: 'deploy', prNumber, message });
+      return null;
     }
 
     // Build number / version are computed HERE, deterministically, from the
@@ -712,7 +769,8 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
         d.finishedAt = new Date().toISOString();
         d.conversation = message;
       });
-      return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
+      ctx.fail({ action: 'deploy', prNumber, message });
+      return null;
     }
 
     const versionArg = version ? ` version:${version}` : '';
@@ -794,12 +852,13 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
       },
     });
 
-    jobs.subscribe(job, res);
-  });
+    return job;
+  }
 }
 
-function runShellDeploy({ res, repo, n, prNumber, key, command }) {
-  gh.getPr(repo.ownerRepo, prNumber).then((pr) => {
+async function runShellDeploy({ ctx, repo, n, prNumber, key, command }) {
+  const pr = await gh.getPr(repo.ownerRepo, prNumber);
+  {
     if (!pr || !pr.headRefName) {
       const message = `Could not resolve the branch for PR #${prNumber} via gh.`;
       store.updateDeploy(repo.name, n, prNumber, (d) => {
@@ -807,7 +866,8 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
         d.finishedAt = new Date().toISOString();
         d.conversation = message;
       });
-      return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
+      ctx.fail({ action: 'deploy', prNumber, message });
+      return null;
     }
 
     // Argument-array form (never a shell string) so the branch name — which
@@ -827,7 +887,8 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
         d.finishedAt = new Date().toISOString();
         d.conversation = message;
       });
-      return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
+      ctx.fail({ action: 'deploy', prNumber, message });
+      return null;
     }
 
     // The deploy command itself is trusted repo-local config (from
@@ -852,8 +913,8 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
       },
     });
 
-    jobs.subscribe(job, res);
-  });
+    return job;
+  }
 }
 
 app.post('/api/repos/:name/issues/:n/deploy/:pr', async (req, res) => {
@@ -884,26 +945,53 @@ app.post('/api/repos/:name/issues/:n/deploy/:pr', async (req, res) => {
 
   writeSseHead(res);
 
-  // Repo-level lock: Deploy checks out a branch on the same shared working
-  // tree as Create PR/Chat, so it must be mutually exclusive with them too.
-  const busyKey = findOtherRepoBusyKey(repo.name, key);
-  if (busyKey) {
-    const msg = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`;
-    return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'blocked', message: msg });
-  }
+  if (queue.attach(key, res)) return;
+
+  // Deploying a PR whose Create PR run hasn't finished yet is only meaningful
+  // if that run succeeds — so chain them. If the Create PR ends in anything
+  // but success the queue drops this deploy and files a notification, instead
+  // of shipping a branch that was never finished.
+  const workKey = `${repo.name}#${n}:work`;
+  const dependsOn = queue.has(workKey) ? [workKey] : [];
 
   // Archives the previous terminal deploy (if any) into deployHistory before
   // resetting `deploy` to a fresh in-progress state.
   store.startNewDeploy(repo.name, n, prNumber);
 
-  if (deployConfig.type === 'shell') {
-    runShellDeploy({ res, repo, n, prNumber, key, command: deployConfig.command });
-  } else {
-    runIosTestflightDeploy({ res, repo, n, prNumber, key });
-  }
+  queue.submit({
+    key,
+    res,
+    lane: 'task',
+    repo: repo.name,
+    exclusive: true, // checks out the PR's branch in the shared clone
+    dependsOn,
+    label: actionLabel('deploy', repo.name, n, prNumber),
+    meta: { action: 'deploy', prNumber },
+    onCancelled: (reason) => {
+      store.updateDeploy(repo.name, n, prNumber, (d) => {
+        d.status = 'aborted';
+        d.finishedAt = new Date().toISOString();
+        d.conversation = reason;
+      });
+      notifyOutcome({
+        status: 'cancelled',
+        action: 'deploy',
+        repoName: repo.name,
+        issueNumber: n,
+        prNumber,
+        message: reason,
+      });
+    },
+    onSettled: (status) =>
+      notifyOutcome({ status, action: 'deploy', repoName: repo.name, issueNumber: n, prNumber }),
+    run: (ctx) =>
+      deployConfig.type === 'shell'
+        ? runShellDeploy({ ctx, repo, n, prNumber, key, command: deployConfig.command })
+        : runIosTestflightDeploy({ ctx, repo, n, prNumber, key }),
+  });
 });
 
-// Abort a running deploy for a specific PR.
+// Abort a running deploy for a specific PR (or drop it from the queue).
 app.post('/api/repos/:name/issues/:n/deploy/:pr/cancel', (req, res) => {
   const repo = resolveRepo(req.params.name);
   if (!repo) return res.status(404).json({ error: 'repo not found' });
@@ -912,7 +1000,8 @@ app.post('/api/repos/:name/issues/:n/deploy/:pr/cancel', (req, res) => {
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
     return res.status(400).json({ error: 'invalid PR number' });
   }
-  const cancelled = jobs.cancelJob(`${repo.name}#${n}:deploy:${prNumber}`);
+  const key = `${repo.name}#${n}:deploy:${prNumber}`;
+  const cancelled = jobs.cancelJob(key) || queue.cancel(key, 'cancelled by user');
   res.json({ cancelled });
 });
 
@@ -938,8 +1027,18 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
     jobs.subscribe(existing, res);
     return;
   }
+  if (queue.attach(key, res)) return;
 
-  if (!force) {
+  // Merging a PR whose Deploy is still queued or running is a legitimate
+  // "do this next" request, so it chains onto that deploy instead of being
+  // rejected: the merge waits, and the queue cancels it if the deploy ends in
+  // anything but success. Only a deploy that has genuinely finished
+  // unsuccessfully (or never started) still blocks.
+  const deployKey = `${repo.name}#${n}:deploy:${prNumber}`;
+  const deployPending = queue.has(deployKey) || jobs.getJob(deployKey)?.status === 'running';
+  const dependsOn = !force && deployPending ? [deployKey] : [];
+
+  if (!force && !deployPending) {
     const record = store.getRecord(repo.name, n);
     const pr = record.prs[prNumber];
     const deployStatus = pr && pr.deploy && pr.deploy.status;
@@ -961,42 +1060,71 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
 
   const baseRefName = await gh.getPr(repo.ownerRepo, prNumber).then((pr) => pr?.baseRefName || null);
 
-  const job = jobs.startJob(key, {
-    bin: gh.GH_BIN,
-    args: ['pr', 'merge', String(prNumber), '--repo', repo.ownerRepo, '--merge', '--delete-branch'],
-    cwd: repo.path,
+  queue.submit({
+    key,
+    res,
+    lane: 'task',
+    repo: repo.name,
+    // `gh pr merge` itself is remote-only, but the success path below checks
+    // out and pulls the base branch in the shared clone — so it takes the
+    // repo's working-tree lock like every other task.
+    exclusive: true,
+    dependsOn,
+    label: actionLabel('merge', repo.name, n, prNumber),
     meta: { action: 'merge', prNumber },
-    onDone: async (j) => {
-      const success = j.exitCode === 0;
-      const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
+    onCancelled: (reason) => {
       store.updateMerge(repo.name, n, prNumber, (m) => {
-        m.status = status;
-        m.exitCode = j.exitCode;
-        m.conversation = j.conversation;
+        m.status = 'aborted';
         m.finishedAt = new Date().toISOString();
+        m.conversation = reason;
       });
-      if (success && baseRefName) {
-        // Best-effort: bring the local clone back to the base branch, like the
-        // manual `git checkout main && git pull` done after a manual merge.
-        try {
-          execFileSync('git', ['checkout', baseRefName], { cwd: repo.path, stdio: 'ignore', timeout: 15000 });
-          execFileSync('git', ['pull', 'origin', baseRefName], {
-            cwd: repo.path,
-            stdio: 'ignore',
-            timeout: 30000,
-          });
-        } catch {
-          /* best-effort only — merge itself already succeeded */
-        }
-      }
-      return { action: 'merge', prNumber, status };
+      notifyOutcome({
+        status: 'cancelled',
+        action: 'merge',
+        repoName: repo.name,
+        issueNumber: n,
+        prNumber,
+        message: reason,
+      });
     },
+    onSettled: (status) =>
+      notifyOutcome({ status, action: 'merge', repoName: repo.name, issueNumber: n, prNumber }),
+    run: () =>
+      jobs.startJob(key, {
+        bin: gh.GH_BIN,
+        args: ['pr', 'merge', String(prNumber), '--repo', repo.ownerRepo, '--merge', '--delete-branch'],
+        cwd: repo.path,
+        meta: { action: 'merge', prNumber },
+        onDone: async (j) => {
+          const success = j.exitCode === 0;
+          const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
+          store.updateMerge(repo.name, n, prNumber, (m) => {
+            m.status = status;
+            m.exitCode = j.exitCode;
+            m.conversation = j.conversation;
+            m.finishedAt = new Date().toISOString();
+          });
+          if (success && baseRefName) {
+            // Best-effort: bring the local clone back to the base branch, like the
+            // manual `git checkout main && git pull` done after a manual merge.
+            try {
+              execFileSync('git', ['checkout', baseRefName], { cwd: repo.path, stdio: 'ignore', timeout: 15000 });
+              execFileSync('git', ['pull', 'origin', baseRefName], {
+                cwd: repo.path,
+                stdio: 'ignore',
+                timeout: 30000,
+              });
+            } catch {
+              /* best-effort only — merge itself already succeeded */
+            }
+          }
+          return { action: 'merge', prNumber, status };
+        },
+      }),
   });
-
-  jobs.subscribe(job, res);
 });
 
-// Abort a running merge for a specific PR.
+// Abort a running merge for a specific PR (or drop it from the queue).
 app.post('/api/repos/:name/issues/:n/merge/:pr/cancel', (req, res) => {
   const repo = resolveRepo(req.params.name);
   if (!repo) return res.status(404).json({ error: 'repo not found' });
@@ -1005,7 +1133,8 @@ app.post('/api/repos/:name/issues/:n/merge/:pr/cancel', (req, res) => {
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
     return res.status(400).json({ error: 'invalid PR number' });
   }
-  const cancelled = jobs.cancelJob(`${repo.name}#${n}:merge:${prNumber}`);
+  const key = `${repo.name}#${n}:merge:${prNumber}`;
+  const cancelled = jobs.cancelJob(key) || queue.cancel(key, 'cancelled by user');
   res.json({ cancelled });
 });
 
@@ -1032,20 +1161,20 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
     jobs.subscribe(existing, res);
     return;
   }
+  // Same for a turn that's still WAITING for this repo's working-tree lock:
+  // the client reconnects by POSTing `{ mode }` with no message, so this has
+  // to come BEFORE the `message` check or a queued turn is rejected with 400
+  // and its output becomes invisible until a full reload.
+  if (queue.has(key)) {
+    writeSseHead(res);
+    queue.attach(key, res);
+    return;
+  }
 
   const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
   if (!message) return res.status(400).json({ error: 'message is required' });
 
   writeSseHead(res);
-
-  // Repo-level lock: even a "plan" turn checks out the PR's branch on the
-  // same shared working tree as Create PR/Deploy, so it must be mutually
-  // exclusive with them too.
-  const busyKey = findOtherRepoBusyKey(repo.name, key);
-  if (busyKey) {
-    const msg = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`;
-    return sendSseBlocked(res, { action: 'chat', prNumber, mode, status: 'blocked', message: msg });
-  }
 
   const record = store.getRecord(repo.name, n);
   const pr = record.prs[prNumber];
@@ -1054,21 +1183,10 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
   // conversation starts with full context of what was already built.
   const resumeId = (pr && pr.chat && pr.chat.sessionId) || record.work.sessionId || null;
 
-  const prInfo = await gh.getPr(repo.ownerRepo, prNumber);
-  if (!prInfo || !prInfo.headRefName) {
-    const message2 = `Could not resolve the branch for PR #${prNumber} via gh.`;
-    return sendSseBlocked(res, { action: 'chat', prNumber, mode, status: 'failed', message: message2 });
-  }
-  try {
-    execFileSync('git', ['fetch', 'origin', prInfo.headRefName], { cwd: repo.path, stdio: 'ignore', timeout: 30000 });
-    execFileSync('git', ['checkout', prInfo.headRefName], { cwd: repo.path, stdio: 'ignore', timeout: 15000 });
-  } catch (err) {
-    const message2 = `Failed to check out branch "${prInfo.headRefName}": ${err.message}`;
-    return sendSseBlocked(res, { action: 'chat', prNumber, mode, status: 'failed', message: message2 });
-  }
-
   // Attached screenshots/mockups (if any) — saved to disk so they can be
   // passed to the CLI via --attachment and redisplayed from history later.
+  // Persisted up-front so the user's message shows in history immediately,
+  // even while the turn is still waiting for the repo's working-tree lock.
   const savedImages = saveUploadedImages(req.body?.images);
   const imageRefs = savedImages.map((img) => ({ url: img.url, name: img.name }));
 
@@ -1094,34 +1212,83 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
     args.push('-p', prompt, '--allow-all', ...modelFlags());
   }
 
-  const job = jobs.startJob(key, {
-    bin: COPILOT_BIN,
-    args,
-    cwd: repo.path,
+  queue.submit({
+    key,
+    res,
+    // Chat lives in its own lane with its own 3 slots, so a human iterating on
+    // a PR never queues behind a batch of background pipelines. It still takes
+    // the repo's working-tree lock, because even a "plan" turn checks out the
+    // PR's branch — that one is physics, not policy.
+    lane: 'chat',
+    repo: repo.name,
+    exclusive: true,
+    label: `${actionLabel('chat', repo.name, n, prNumber)} [${mode}]`,
     meta: { action: 'chat', prNumber, mode },
-    onSession: (id) =>
-      store.updateRecord(repo.name, n, (r) => {
-        const pr2 = r.prs[prNumber];
-        if (pr2) {
-          if (!pr2.chat) pr2.chat = { sessionId: null, messages: [] };
-          pr2.chat.sessionId = id;
-        }
-      }),
-    onDone: async (j) => {
-      const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
-      store.appendChatMessage(repo.name, n, prNumber, { role: 'assistant', text: j.conversation, mode });
-      // New commits landed — the old Deploy/Merge no longer reflect this code.
-      if (mode === 'apply' && status === 'success') {
-        store.resetForNewCommits(repo.name, n, prNumber);
+    onCancelled: (reason) => {
+      store.appendChatMessage(repo.name, n, prNumber, { role: 'assistant', text: `[${reason}]`, mode });
+      notifyOutcome({
+        status: 'cancelled',
+        action: 'chat',
+        repoName: repo.name,
+        issueNumber: n,
+        prNumber,
+        message: reason,
+      });
+    },
+    onSettled: (status) => {
+      if (status !== 'success') {
+        notifyOutcome({ status, action: 'chat', repoName: repo.name, issueNumber: n, prNumber });
       }
-      return { action: 'chat', prNumber, mode, status, sessionId: j.sessionId };
+    },
+    // Runs only once the repo lock is held, so the checkout below can't race
+    // another action in the same clone.
+    run: async (ctx) => {
+      const prInfo = await gh.getPr(repo.ownerRepo, prNumber);
+      if (!prInfo || !prInfo.headRefName) {
+        ctx.fail({ action: 'chat', prNumber, mode, message: `Could not resolve the branch for PR #${prNumber} via gh.` });
+        return null;
+      }
+      try {
+        execFileSync('git', ['fetch', 'origin', prInfo.headRefName], { cwd: repo.path, stdio: 'ignore', timeout: 30000 });
+        execFileSync('git', ['checkout', prInfo.headRefName], { cwd: repo.path, stdio: 'ignore', timeout: 15000 });
+      } catch (err) {
+        ctx.fail({
+          action: 'chat',
+          prNumber,
+          mode,
+          message: `Failed to check out branch "${prInfo.headRefName}": ${err.message}`,
+        });
+        return null;
+      }
+
+      return jobs.startJob(key, {
+        bin: COPILOT_BIN,
+        args,
+        cwd: repo.path,
+        meta: { action: 'chat', prNumber, mode },
+        onSession: (id) =>
+          store.updateRecord(repo.name, n, (r) => {
+            const pr2 = r.prs[prNumber];
+            if (pr2) {
+              if (!pr2.chat) pr2.chat = { sessionId: null, messages: [] };
+              pr2.chat.sessionId = id;
+            }
+          }),
+        onDone: async (j) => {
+          const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
+          store.appendChatMessage(repo.name, n, prNumber, { role: 'assistant', text: j.conversation, mode });
+          // New commits landed — the old Deploy/Merge no longer reflect this code.
+          if (mode === 'apply' && status === 'success') {
+            store.resetForNewCommits(repo.name, n, prNumber);
+          }
+          return { action: 'chat', prNumber, mode, status, sessionId: j.sessionId };
+        },
+      });
     },
   });
-
-  jobs.subscribe(job, res);
 });
 
-// Abort a running chat turn for a specific PR.
+// Abort a running chat turn for a specific PR (or drop it from the queue).
 app.post('/api/repos/:name/issues/:n/prs/:pr/chat/cancel', (req, res) => {
   const repo = resolveRepo(req.params.name);
   if (!repo) return res.status(404).json({ error: 'repo not found' });
@@ -1130,7 +1297,8 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat/cancel', (req, res) => {
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
     return res.status(400).json({ error: 'invalid PR number' });
   }
-  const cancelled = jobs.cancelJob(`${repo.name}#${n}:chat:${prNumber}`);
+  const key = `${repo.name}#${n}:chat:${prNumber}`;
+  const cancelled = jobs.cancelJob(key) || queue.cancel(key, 'cancelled by user');
   res.json({ cancelled });
 });
 
@@ -1201,6 +1369,7 @@ app.post('/api/admin/chat', (req, res) => {
     jobs.subscribe(existing, res);
     return;
   }
+  if (queue.attach(key, res)) return;
 
   const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
   if (!message) return sendSseBlocked(res, { action: 'admin', status: 'failed', message: 'message is required' });
@@ -1248,37 +1417,51 @@ app.post('/api/admin/chat', (req, res) => {
     sessionId,
   });
 
-  const job = jobs.startJob(key, {
-    bin: COPILOT_BIN,
-    args,
-    cwd,
-    meta: { action: 'admin', turnId, repo: repoName || null },
-    onSession: (sid) => store.updateAdminTurnProgress(turnId, { sessionId: sid }),
-    onProgress: (j) => store.updateAdminTurnProgress(turnId, { assistantText: j.conversation, sessionId: j.sessionId }),
-    onDone: async (j) => {
-      // The job manager captures the --resume=<id> session id from the stream.
-      const sid = j.sessionId;
-      if (sid) {
-        store.appendAdminTurn(sid, {
-          userText: message,
-          assistantText: j.conversation,
-          mode,
-          repo: repoName || null,
-          images: imageRefs,
-        });
-      }
-      // Turn completed normally — the buffered copy is no longer needed.
-      store.finishAdminTurn(turnId);
-      return {
-        action: 'admin',
-        turnId,
-        status: j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed',
-        sessionId: sid,
-      };
-    },
+  // The admin terminal is the most interactive surface in the app, so it runs
+  // in the chat lane: its 3 slots sit ON TOP of the 3 task slots, and it never
+  // takes a repo working-tree lock (it doesn't check out branches), so a turn
+  // starts immediately even while that repo is mid-Deploy.
+  queue.submit({
+    key,
+    res,
+    lane: 'chat',
+    repo: repoName || null,
+    exclusive: false,
+    label: repoName ? `Admin chat (${repoName})` : 'Admin chat',
+    meta: { action: 'admin', turnId },
+    onCancelled: () => store.finishAdminTurn(turnId),
+    run: () =>
+      jobs.startJob(key, {
+        bin: COPILOT_BIN,
+        args,
+        cwd,
+        meta: { action: 'admin', turnId, repo: repoName || null },
+        onSession: (sid) => store.updateAdminTurnProgress(turnId, { sessionId: sid }),
+        onProgress: (j) =>
+          store.updateAdminTurnProgress(turnId, { assistantText: j.conversation, sessionId: j.sessionId }),
+        onDone: async (j) => {
+          // The job manager captures the --resume=<id> session id from the stream.
+          const sid = j.sessionId;
+          if (sid) {
+            store.appendAdminTurn(sid, {
+              userText: message,
+              assistantText: j.conversation,
+              mode,
+              repo: repoName || null,
+              images: imageRefs,
+            });
+          }
+          // Turn completed normally — the buffered copy is no longer needed.
+          store.finishAdminTurn(turnId);
+          return {
+            action: 'admin',
+            turnId,
+            status: j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed',
+            sessionId: sid,
+          };
+        },
+      }),
   });
-
-  jobs.subscribe(job, res);
 });
 
 // Re-subscribe to an in-flight (or recently finished, within the job manager's
@@ -1290,7 +1473,13 @@ app.get('/api/admin/chat/:turnId/stream', (req, res) => {
   if (!ADMIN_TURN_RE.test(turnId)) {
     return sendSseBlocked(res, { action: 'admin', turnId, status: 'failed', message: 'invalid turnId' });
   }
-  const job = jobs.getJob(`admin:${turnId}`);
+  const key = `admin:${turnId}`;
+  if (queue.isQueued(key)) {
+    // Still waiting for a chat slot — attach now and stream once it starts.
+    queue.attach(key, res);
+    return;
+  }
+  const job = jobs.getJob(key);
   if (!job) {
     // Job already reaped (or never existed) — tell the client it's gone so it
     // can fall back to loading the persisted transcript from history.
@@ -1305,7 +1494,8 @@ app.get('/api/admin/chat/:turnId/stream', (req, res) => {
 
 // Abort a running admin turn (SIGTERM the whole process group).
 app.post('/api/admin/chat/:turnId/cancel', (req, res) => {
-  const cancelled = jobs.cancelJob(`admin:${req.params.turnId}`);
+  const key = `admin:${req.params.turnId}`;
+  const cancelled = jobs.cancelJob(key) || queue.cancel(key, 'cancelled by user');
   res.json({ cancelled });
 });
 
@@ -1327,6 +1517,49 @@ app.delete('/api/admin/chats/:sessionId', (req, res) => {
   const existed = store.deleteAdminChat(req.params.sessionId);
   if (!existed) return res.status(404).json({ error: 'conversation not found' });
   res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Queue + notification center
+// ---------------------------------------------------------------------------
+
+// Everything currently running or waiting, with the lane limits, so the UI can
+// render "2/3 tasks · 1/3 chats" and list what's ahead of what.
+app.get('/api/queue', (req, res) => {
+  res.json(queue.snapshot());
+});
+
+// Drop a still-waiting entry. Running entries must be aborted through their own
+// action-specific /cancel endpoint (which SIGTERMs the process group).
+app.post('/api/queue/:key/cancel', (req, res) => {
+  const key = decodeURIComponent(req.params.key);
+  const cancelled = queue.cancel(key, 'cancelled by user');
+  res.json({ cancelled });
+});
+
+app.get('/api/notifications', (req, res) => {
+  res.json(store.listNotifications());
+});
+
+app.post('/api/notifications/read', (req, res) => {
+  res.json({ marked: store.markAllNotificationsRead() });
+});
+
+app.post('/api/notifications/:id/read', (req, res) => {
+  const ok = store.markNotificationRead(req.params.id);
+  if (!ok) return res.status(404).json({ error: 'notification not found' });
+  res.json({ ok: true });
+});
+
+// Dismiss a single notification once the user has read it.
+app.delete('/api/notifications/:id', (req, res) => {
+  const ok = store.deleteNotification(req.params.id);
+  if (!ok) return res.status(404).json({ error: 'notification not found' });
+  res.json({ ok: true });
+});
+
+app.delete('/api/notifications', (req, res) => {
+  res.json({ cleared: store.clearNotifications() });
 });
 
 app.listen(PORT, HOST, () => {

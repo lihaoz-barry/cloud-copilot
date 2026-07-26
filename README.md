@@ -175,13 +175,63 @@ pipeline you get:
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat` | **Chat with a PR** — SSE stream. Body: `{ "message": "...", "mode": "plan"\|"apply" }`. `plan` is read-only (default approval flags); `apply` implements + pushes to the existing branch and resets Deploy/Merge on success. |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat/cancel` | Abort the running chat turn for that PR. |
 | POST | `/api/run` | Simple one-shot demo (prompt + optional `sessionId` resume). |
+| GET  | `/api/queue` | Current scheduler state: `{limits, running[], queued[], counts, repoLocks}`. |
+| POST | `/api/queue/:key/cancel` | Drop a still-**waiting** entry (running ones use their own `/cancel`). |
+| GET  | `/api/notifications` | `{notifications[], unread}` — newest first. |
+| POST | `/api/notifications/read` | Mark all as read (the UI does this when the panel opens). |
+| POST | `/api/notifications/:id/read` | Mark one as read. |
+| DELETE | `/api/notifications/:id` | Dismiss one notification. |
+| DELETE | `/api/notifications` | Clear all notifications. |
 
 ### SSE events
 
+`queued` (`{position,reason,lane}`, repeated while the action waits its turn) →
 `meta` (command) → `chunk` (`{stream,text}` streamed output) → `session`
 (`{sessionId}`) → `result` (`{action,status,prUrl?,prNumber?}`, where `status` is
-`success`/`failed`/`aborted`, or `blocked` when the repo lock rejects a second
-Create PR, or Merge is attempted before Deploy has succeeded) → `done` (`{exitCode}`).
+`success`/`failed`/`aborted`, `cancelled` when the queue dropped the action
+before it ran, or `blocked` when Merge is attempted before Deploy has succeeded)
+→ `done` (`{exitCode}`).
+
+---
+
+## Action queue: 3 tasks + 3 chats, one working tree per repo
+
+Every action is submitted to a scheduler (`lib/queue.js`) instead of being
+started — or rejected — on the spot. There are two independent lanes:
+
+| Lane | Actions | Concurrency |
+| ---- | ------- | ----------- |
+| `task` | Create PR, Deploy, Merge | **3** at a time |
+| `chat` | Admin chat, PR chat, PreIssue chat | **3** at a time, scheduled **first** |
+
+So at most **6** Copilot children run at once, and 3 slots are always reserved
+for interactive chat — typing a message never waits behind a batch of
+background pipelines.
+
+On top of the lane limits, one hard rule: **a repo can only have one
+working-tree action running at a time.** A clone has exactly one checkout, so
+Create PR / Deploy / Merge / PR chat take an exclusive per-repo lock. Actions
+for *other* repos skip ahead freely; only same-repo actions queue behind each
+other (FIFO). Admin chat and PreIssue chat never take the lock (they don't
+check out branches), which is why they start immediately even mid-deploy.
+
+Anything that has to wait streams `queued` events with its position and the
+reason, and starts streaming normally the moment its turn comes — a queued
+action looks to the client exactly like a slow-starting one.
+
+**Dependencies.** Queueing a Deploy while its Create PR is still pending chains
+them: the deploy waits for the PR run, and if that run ends in anything but
+success the deploy is **cancelled** rather than shipping a branch that was never
+finished. Merge chains onto Deploy the same way.
+
+## Notification center
+
+Because actions are queued, they usually finish while you're on another page or
+have the phone locked. Every terminal outcome (success / failure / cancellation,
+including "your Deploy was dropped because the Create PR failed") is recorded
+server-side and shown in the **🔔 bell at the top-left**, which also lists what's
+currently running and waiting. Opening the panel marks everything read; each
+notification is dismissed individually with `×`, or all at once with "Clear all".
 
 ---
 

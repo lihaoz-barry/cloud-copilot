@@ -468,7 +468,14 @@ app.post('/api/repos/:name/preissues/:id/chat', async (req, res) => {
     `The user just said: ${message}\n\n` +
     `Reply conversationally, then ALWAYS end your reply with the current best draft as a ` +
     `fenced json block of the exact shape {"title": "...", "body": "..."} (a short, clear ` +
-    `title and a body with motivation + concrete acceptance criteria).`;
+    `title and a body with motivation + concrete acceptance criteria).\n\n` +
+    `Bilingual issue format (REQUIRED): "title" must be written in Chinese (keep proper ` +
+    `nouns / code identifiers such as PreIssue, server.js, SSE in English). "body" must ` +
+    `start with the full Chinese description, then a "---" separator, then the complete ` +
+    `English translation wrapped in ` +
+    `"<details>\\n<summary>English version</summary>\\n\\n...\\n\\n</details>". The English ` +
+    `part must be a full translation of the Chinese part, not a summary, with the same ` +
+    `section structure. Keep code blocks, commands, paths and logs untranslated.`;
   args.push('-p', prompt, ...approvalFlags('default'), ...modelFlags());
 
   const job = jobs.startJob(key, {

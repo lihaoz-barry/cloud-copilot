@@ -77,14 +77,14 @@
     .st-failed .dot { background: #dc2626; }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
 
-    /* Create PR → Deploy → Merge as a connected chevron/arrow step bar */
+    /* Create PR → Merge main → Deploy → Merge as a connected chevron/arrow step bar */
     .pritem { margin-top: 4px; }
     .prheadrow { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
     .chevbar { display: flex; width: 100%; }
     .chev {
       flex: 1; display: flex; align-items: center; justify-content: center;
-      height: 34px; min-width: 0; color: #fff; font-weight: 700; font-size: .74rem;
-      border: none; cursor: pointer; font: inherit; padding: 0 14px; white-space: nowrap;
+      height: 34px; min-width: 0; color: #fff; font-weight: 700; font-size: .72rem;
+      border: none; cursor: pointer; font: inherit; padding: 0 10px; white-space: nowrap;
       overflow: hidden; text-overflow: ellipsis;
       clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 50%, calc(100% - 14px) 100%, 0 100%, 14px 50%);
       margin-right: -13px;
@@ -94,13 +94,15 @@
       padding-left: 12px;
     }
     .chev:last-child { margin-right: 0; }
-    .chev:nth-child(1) { z-index: 3; }
-    .chev:nth-child(2) { z-index: 2; }
-    .chev:nth-child(3) { z-index: 1; }
+    .chev:nth-child(1) { z-index: 4; }
+    .chev:nth-child(2) { z-index: 3; }
+    .chev:nth-child(3) { z-index: 2; }
+    .chev:nth-child(4) { z-index: 1; }
     .chev-idle     { background: #2563eb; }
     .chev-working, .chev-deploying, .chev-merging { background: #eab308; color: #4a3600; }
     .chev-success  { background: #16a34a; }
     .chev-failed, .chev-aborted { background: #dc2626; }
+    .chev-conflict { background: #d97706; }
     .chev-locked   { background: #93a3b8; color: #eef2f7; opacity: .85; }
     .chevtools {
       display: flex; margin-top: 6px; font-size: .74rem; color: #888;
@@ -683,15 +685,22 @@ const STATE_LABEL = {
   work:   { idle: 'Create PR', working: 'Creating PR…', success: 'PR created', failed: 'PR failed', aborted: 'PR aborted' },
   deploy: { idle: 'Deploy', deploying: 'Deploying…', success: 'Deployed', failed: 'Deploy failed', aborted: 'Aborted' },
   merge:  { idle: 'Merge', merging: 'Merging…', success: 'Merged', failed: 'Merge failed', aborted: 'Merge aborted' },
+  'merge-main': {
+    idle: '⤵ Merge main', merging: 'Merging main…', success: 'Main merged',
+    conflict: 'Conflict', failed: 'Failed', aborted: 'Aborted',
+  },
 };
 const STATE_CLASS = {
   idle: 'st-idle', working: 'st-working', deploying: 'st-deploying', merging: 'st-merging',
-  success: 'st-success', failed: 'st-failed', aborted: 'st-failed',
+  success: 'st-success', failed: 'st-failed', aborted: 'st-failed', conflict: 'st-failed',
 };
 const CHEV_CLASS = {
   idle: 'chev-idle', working: 'chev-working', deploying: 'chev-deploying', merging: 'chev-merging',
-  success: 'chev-success', failed: 'chev-failed', aborted: 'chev-aborted',
+  success: 'chev-success', failed: 'chev-failed', aborted: 'chev-aborted', conflict: 'chev-conflict',
 };
+// Terminal states of a "Merge main" run (it has one more than the others:
+// `conflict`, which means the merge was aborted and nothing was pushed).
+const MERGE_MAIN_DONE = ['success', 'conflict', 'failed', 'aborted'];
 
 // ---- pipeline auto-run depth (persisted in localStorage) -------------------
 const LS_DEPTH = 'cc.pipelineDepth';
@@ -1148,6 +1157,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   for (const pr of st.prs) {
     if (pr.deploy && pr.deploy.status === 'deploying') reconcileDeploy(pr.prNumber);
     if (pr.merge && pr.merge.status === 'merging') reconcileMerge(pr.prNumber);
+    if (pr.mergeMain && pr.mergeMain.status === 'merging') reconcileMergeMain(pr.prNumber);
   }
 
   // --- blocking -------------------------------------------------------------
@@ -1169,11 +1179,12 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     updateAllPrWorkTimings();
   }
 
-  // --- PR rows: 3-column pipeline (Create PR | Deploy | Merge), each with its
-  // own collapsible log ------------------------------------------------------
+  // --- PR rows: 4-column pipeline (Create PR | Merge main | Deploy | Merge),
+  // each with its own collapsible log ----------------------------------------
   function findPr(n) { return st.prs.find((p) => p.prNumber === n); }
   function deployPanel(n) { return prlist.querySelector(`.pritem[data-pr="${n}"] .prlog`); }
   function mergePanel(n) { return prlist.querySelector(`.pritem[data-pr="${n}"] .mergelog`); }
+  function mergeMainPanel(n) { return prlist.querySelector(`.pritem[data-pr="${n}"] .mergemainlog`); }
   function chevEl(n, col) { return prlist.querySelector(`.pritem[data-pr="${n}"] .chev-col-${col}`); }
   function toolEl(n, col) { return prlist.querySelector(`.pritem[data-pr="${n}"] .chevtool-${col}`); }
 
@@ -1186,9 +1197,9 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     for (const pr of st.prs) prlist.appendChild(renderPrRow(pr));
   }
 
-  // One connected Create PR → Deploy → Merge chevron/arrow step bar per PR,
-  // with a slim tools row underneath for each stage's log toggle / abort /
-  // timing (kept off the chevron itself so the step-bar stays clean).
+  // One connected Create PR → Merge main → Deploy → Merge chevron/arrow step
+  // bar per PR, with a slim tools row underneath for each stage's log toggle /
+  // abort / timing (kept off the chevron itself so the step-bar stays clean).
   function renderPrRow(pr) {
     const item = document.createElement('div');
     item.className = 'pritem';
@@ -1213,6 +1224,8 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     prlog.className = 'prlog panel';
     const mergelog = document.createElement('div');
     mergelog.className = 'mergelog panel';
+    const mergemainlog = document.createElement('div');
+    mergemainlog.className = 'mergemainlog panel';
 
     const chevbar = document.createElement('div');
     chevbar.className = 'chevbar';
@@ -1223,15 +1236,19 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     prSeg.title = 'Toggle Create PR logs';
     prSeg.addEventListener('click', () => worklog.classList.toggle('show'));
 
-    // --- Segment 2: Deploy ---------------------------------------------------
+    // --- Segment 2: Merge main (base branch → this PR's branch) -------------
+    const mergeMainSeg = document.createElement('button');
+    mergeMainSeg.addEventListener('click', () => onMergeMain(pr.prNumber));
+
+    // --- Segment 3: Deploy ---------------------------------------------------
     const deploySeg = document.createElement('button');
     deploySeg.addEventListener('click', () => onDeploy(pr.prNumber));
 
-    // --- Segment 3: Merge (locked/dimmed until Deploy succeeds) -------------
+    // --- Segment 4: Merge (locked/dimmed until Deploy succeeds) -------------
     const mergeSeg = document.createElement('button');
     mergeSeg.addEventListener('click', () => onMerge(pr.prNumber));
 
-    chevbar.append(prSeg, deploySeg, mergeSeg);
+    chevbar.append(prSeg, mergeMainSeg, deploySeg, mergeSeg);
 
     // --- tools row: per-stage log toggle / abort / timing -------------------
     const tools = document.createElement('div');
@@ -1248,6 +1265,32 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     prTiming.className = 'timing';
     if (st.work.durationMs != null) prTiming.textContent = `ran ${fmtDur(st.work.durationMs)}`;
     prTool.append(prLogBtn, prTiming);
+
+    const mergeMainTool = document.createElement('span');
+    mergeMainTool.className = 'chevtool chevtool-mergemain';
+    const mergeMainLogBtn = document.createElement('button');
+    mergeMainLogBtn.className = 'iconbtn mergemainlog-toggle';
+    mergeMainLogBtn.textContent = '▤';
+    mergeMainLogBtn.title = 'Show merge-main logs';
+    const mergeMainAbortBtn = document.createElement('button');
+    mergeMainAbortBtn.className = 'iconbtn abortbtn';
+    mergeMainAbortBtn.textContent = '⨯';
+    mergeMainAbortBtn.title = 'Abort this merge of main';
+    mergeMainAbortBtn.addEventListener('click', () => onMergeMainAbort(pr.prNumber));
+    const mergeMainTiming = document.createElement('span');
+    mergeMainTiming.className = 'timing';
+    if (pr.mergeMain && pr.mergeMain.durationMs != null) mergeMainTiming.textContent = `ran ${fmtDur(pr.mergeMain.durationMs)}`;
+    const toggleMergeMainLog = async () => {
+      const show = !mergemainlog.classList.contains('show');
+      mergemainlog.classList.toggle('show', show);
+      const cur = findPr(pr.prNumber);
+      const s = cur && cur.mergeMain && cur.mergeMain.status;
+      if (show && !mergemainlog.textContent.trim() && MERGE_MAIN_DONE.includes(s)) {
+        await loadMergeMainTranscript(pr.prNumber);
+      }
+    };
+    mergeMainLogBtn.addEventListener('click', toggleMergeMainLog);
+    mergeMainTool.append(mergeMainLogBtn, mergeMainAbortBtn, mergeMainTiming);
 
     const deployTool = document.createElement('span');
     deployTool.className = 'chevtool chevtool-deploy';
@@ -1301,8 +1344,8 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     mergeLogBtn.addEventListener('click', toggleMergeLog);
     mergeTool.append(mergeLogBtn, mergeAbortBtn, mergeTiming);
 
-    tools.append(prTool, deployTool, mergeTool);
-    item.append(headRow, chevbar, tools, prlog, mergelog);
+    tools.append(prTool, mergeMainTool, deployTool, mergeTool);
+    item.append(headRow, chevbar, tools, prlog, mergemainlog, mergelog);
 
     // Initial paint. The "Create PR" cell always reads success: this row only
     // exists because a PR was found, so its own creation is a done deal —
@@ -1310,6 +1353,8 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     // "working" for an unrelated, still-running Create PR run (or reflect an
     // older/different PR entirely, e.g. one merely referencing this issue).
     paintChev(prSeg, 'chev-col-pr', 'work', 'success', st.work);
+    paintChev(mergeMainSeg, 'chev-col-mergemain', 'merge-main', (pr.mergeMain && pr.mergeMain.status) || 'idle', pr.mergeMain);
+    mergeMainSeg.title = mergeMainTitle(pr.mergeMain);
     paintChev(deploySeg, 'chev-col-deploy', 'deploy', (pr.deploy && pr.deploy.status) || 'idle', pr.deploy);
     paintChevMerge(mergeSeg, pr);
 
@@ -1323,6 +1368,10 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     const showMergeLog0 = m0 === 'merging' || (pr.merge && pr.merge.hasConversation) || m0 === 'success' || m0 === 'failed' || m0 === 'aborted';
     mergeLogBtn.hidden = !showMergeLog0;
     mergeAbortBtn.hidden = m0 !== 'merging';
+    const mm0 = (pr.mergeMain && pr.mergeMain.status) || 'idle';
+    const showMergeMainLog0 = mm0 === 'merging' || (pr.mergeMain && pr.mergeMain.hasConversation) || MERGE_MAIN_DONE.includes(mm0);
+    mergeMainLogBtn.hidden = !showMergeMainLog0;
+    mergeMainAbortBtn.hidden = mm0 !== 'merging';
 
     return item;
   }
@@ -1387,6 +1436,40 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     if (pr.merge && pr.merge.durationMs != null) setMergeTiming(prNumber, pr.merge.durationMs);
   }
 
+  function paintMergeMain(prNumber) {
+    const pr = findPr(prNumber);
+    if (!pr) return;
+    const mm = (pr.mergeMain && pr.mergeMain.status) || 'idle';
+    const el = chevEl(prNumber, 'mergemain');
+    if (el) {
+      paintChev(el, 'chev-col-mergemain', 'merge-main', mm, pr.mergeMain);
+      el.title = mergeMainTitle(pr.mergeMain);
+    }
+    const showLog = mm === 'merging' || (pr.mergeMain && pr.mergeMain.hasConversation) || MERGE_MAIN_DONE.includes(mm);
+    const tool = toolEl(prNumber, 'mergemain');
+    if (tool) {
+      const logBtn = tool.querySelector('.mergemainlog-toggle'); if (logBtn) logBtn.hidden = !showLog;
+      const abort = tool.querySelector('.abortbtn'); if (abort) abort.hidden = mm !== 'merging';
+    }
+    if (pr.mergeMain && pr.mergeMain.durationMs != null) setMergeMainTiming(prNumber, pr.mergeMain.durationMs);
+  }
+
+  function mergeMainTitle(mm) {
+    if (!mm) return 'Merge the base branch into this PR\u2019s branch';
+    const dir = mm.baseRef && mm.headRef ? `${mm.baseRef} → ${mm.headRef}` : 'base branch → PR branch';
+    if (mm.status === 'conflict') {
+      const files = (mm.conflictFiles || []).join(', ');
+      return `Conflicts merging ${dir}${files ? `: ${files}` : ''} — merge was aborted, resolve manually`;
+    }
+    const dur = mm.durationMs != null ? ` · ran ${fmtDur(mm.durationMs)}` : '';
+    return `Merge ${dir}${dur}`;
+  }
+
+  function setMergeMainTiming(prNumber, durationMs) {
+    const t = prlist.querySelector(`.pritem[data-pr="${prNumber}"] .chevtool-mergemain .timing`);
+    if (t && durationMs != null) t.textContent = `ran ${fmtDur(durationMs)}`;
+  }
+
   function setPrTiming(prNumber, durationMs) {
     const t = prlist.querySelector(`.pritem[data-pr="${prNumber}"] .chevtool-deploy .timing`);
     if (t && durationMs != null) t.textContent = `ran ${fmtDur(durationMs)}`;
@@ -1424,6 +1507,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         prNumber: p.prNumber, prUrl: p.prUrl, title: p.title, createdAt: p.createdAt,
         deploy: ex ? ex.deploy : (p.deploy || { status: 'idle' }),
         merge: ex ? ex.merge : (p.merge || { status: 'idle' }),
+        mergeMain: ex ? ex.mergeMain : (p.mergeMain || { status: 'idle' }),
       };
     });
     renderPrs();
@@ -1431,7 +1515,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
 
   function upsertLocalPr(p) {
     if (!st.prs.find((x) => x.prNumber === p.prNumber)) {
-      st.prs.unshift({ prNumber: p.prNumber, prUrl: p.prUrl, deploy: { status: 'idle' }, merge: { status: 'idle' } });
+      st.prs.unshift({ prNumber: p.prNumber, prUrl: p.prUrl, deploy: { status: 'idle' }, merge: { status: 'idle' }, mergeMain: { status: 'idle' } });
       renderPrs();
     }
   }
@@ -1743,6 +1827,113 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     } catch { /* ignore */ }
   }
 
+  // --- Merge main flow (per PR) — base branch → this PR's branch ------------
+  // The mirror image of onMerge(): instead of landing the PR on main, this
+  // brings main INTO the PR's branch so a stale PR can catch up in one tap.
+  async function onMergeMain(prNumber) {
+    const pr = findPr(prNumber);
+    if (!pr) return;
+    if (!pr.mergeMain) pr.mergeMain = { status: 'idle' };
+    const mm = pr.mergeMain.status || 'idle';
+    if (mm === 'merging') { const p = mergeMainPanel(prNumber); if (p) p.classList.toggle('show'); return; }
+    if (!window.confirm(`Merge the base branch (usually main) into PR #${prNumber}'s branch and push?`)) return;
+    pr.mergeMain.status = 'merging';
+    paintMergeMain(prNumber);
+    const p = mergeMainPanel(prNumber); if (p) p.classList.add('show');
+    await streamMergeMain(prNumber, false);
+  }
+
+  async function onMergeMainAbort(prNumber) {
+    const pr = findPr(prNumber);
+    if (!pr || !pr.mergeMain || pr.mergeMain.status !== 'merging') return;
+    if (!window.confirm(`Abort the running merge of main into PR #${prNumber}'s branch?`)) return;
+    appendMergeMain(prNumber, `\n[abort requested…]\n`, 'stderr');
+    try {
+      await fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/merge-main/${prNumber}/cancel`, { method: 'POST' });
+    } catch (e) {
+      appendMergeMain(prNumber, `\n[abort failed: ${e.message}]\n`, 'err');
+    }
+  }
+
+  async function streamMergeMain(prNumber, reconnect) {
+    const pr = findPr(prNumber);
+    if (!pr) return;
+    if (!pr.mergeMain) pr.mergeMain = { status: 'idle' };
+    if (reconnect) {
+      pr.mergeMain.status = 'merging';
+      paintMergeMain(prNumber);
+      appendMergeMain(prNumber, `\n[reconnecting merge main → PR #${prNumber}…]\n`, 'stderr');
+    }
+    const url = `/api/repos/${enc(repo.name)}/issues/${issue.number}/merge-main/${prNumber}`;
+    let finalStatus = null, resultData = null;
+    try {
+      const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+      if (!resp.ok || !resp.body) { appendMergeMain(prNumber, `\n[error] HTTP ${resp.status}\n`, 'err'); return reconcileMergeMain(prNumber); }
+      await pumpSSE(resp, {
+        onChunk: (t, s) => appendMergeMain(prNumber, t, s === 'stderr' ? 'stderr' : null),
+        onError: (m) => appendMergeMain(prNumber, `\n[error] ${m}\n`, 'err'),
+        onResult: (d) => { finalStatus = d.status; resultData = d; },
+        notify: notifyPr('merge-main', prNumber),
+      });
+    } catch (e) {
+      appendMergeMain(prNumber, `\n[connection dropped: ${e.message}] — merge still running, checking status…\n`, 'stderr');
+      return reconcileMergeMain(prNumber);
+    }
+    if (finalStatus === 'blocked') {
+      pr.mergeMain.status = 'idle';
+      paintMergeMain(prNumber);
+      const p = mergeMainPanel(prNumber); if (p) p.classList.add('show');
+      appendMergeMain(prNumber, `\n${(resultData && resultData.message) || 'blocked'}\n`, 'err');
+      return;
+    }
+    if (finalStatus) {
+      pr.mergeMain.status = finalStatus;
+      pr.mergeMain.hasConversation = true;
+      if (resultData) {
+        pr.mergeMain.headRef = resultData.headRef;
+        pr.mergeMain.baseRef = resultData.baseRef;
+        pr.mergeMain.conflictFiles = resultData.conflictFiles || [];
+      }
+      paintMergeMain(prNumber);
+      appendMergeMain(prNumber, `\n[merge main → PR #${prNumber}] finished: ${finalStatus}\n`, finalStatus === 'success' ? 'ok' : 'err');
+      if (finalStatus === 'conflict') {
+        const p = mergeMainPanel(prNumber); if (p) p.classList.add('show');
+      }
+      refreshMergeMainTiming(prNumber);
+    } else {
+      return reconcileMergeMain(prNumber);
+    }
+  }
+
+  async function reconcileMergeMain(prNumber) {
+    for (let i = 0; i < 200; i++) {
+      let rec;
+      try { rec = await fetchRecord(); } catch { await sleep(3000); continue; }
+      const prRec = (rec.prs || {})[prNumber];
+      const s = prRec && prRec.mergeMain && prRec.mergeMain.status;
+      if (MERGE_MAIN_DONE.includes(s)) {
+        const pr = findPr(prNumber);
+        if (pr) pr.mergeMain = { ...prRec.mergeMain };
+        paintMergeMain(prNumber);
+        appendMergeMain(prNumber, `\n[merge main → PR #${prNumber}] finished: ${s}\n`, s === 'success' ? 'ok' : 'err');
+        if (window.CCNotify) CCNotify.jobFinished(notifyPr('merge-main', prNumber, { status: s, replayed: true }));
+        return;
+      }
+      if (rec.live && rec.live.mergeMain && rec.live.mergeMain[prNumber]) return streamMergeMain(prNumber, true);
+      await sleep(3000);
+    }
+    appendMergeMain(prNumber, `\n[merge main → PR #${prNumber}] status check timed out — tap Merge main again.\n`, 'stderr');
+  }
+
+  async function refreshMergeMainTiming(prNumber) {
+    try {
+      const rec = await fetchRecord();
+      const prRec = (rec.prs || {})[prNumber];
+      const pr = findPr(prNumber);
+      if (prRec && pr) { pr.mergeMain = { ...prRec.mergeMain }; paintMergeMain(prNumber); }
+    } catch { /* ignore */ }
+  }
+
   // --- shared helpers -------------------------------------------------------
   function fetchRecord() {
     return fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/record`).then((x) => x.json());
@@ -1753,7 +1944,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       .sort((a, b) => b.prNumber - a.prNumber)
       .map((p) => ({
         prNumber: p.prNumber, prUrl: p.prUrl, title: p.title, createdAt: p.createdAt,
-        deploy: { ...p.deploy }, merge: { ...p.merge },
+        deploy: { ...p.deploy }, merge: { ...p.merge }, mergeMain: { ...(p.mergeMain || { status: 'idle' }) },
       }));
     st.prs = arr;
     renderPrs();
@@ -1791,6 +1982,18 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     appendTo(panelEl, conv || '(no transcript stored yet)', conv ? null : 'stderr');
   }
 
+  async function loadMergeMainTranscript(prNumber) {
+    const panelEl = mergeMainPanel(prNumber);
+    if (!panelEl) return;
+    panelEl.classList.add('show');
+    panelEl.innerHTML = '<span class="stderr">loading transcript…</span>';
+    const rec = await fetchRecord();
+    panelEl.innerHTML = '';
+    const prRec = (rec.prs || {})[prNumber];
+    const conv = prRec && prRec.mergeMain && prRec.mergeMain.conversation;
+    appendTo(panelEl, conv || '(no transcript stored yet)', conv ? null : 'stderr');
+  }
+
   function appendTo(panelEl, text, cls) {
     const span = document.createElement('span');
     if (cls) span.className = cls;
@@ -1801,6 +2004,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   function appendWork(text, cls) { appendTo(worklog, text, cls); }
   function appendDeploy(prNumber, text, cls) { const p = deployPanel(prNumber); if (p) appendTo(p, text, cls); }
   function appendMerge(prNumber, text, cls) { const p = mergePanel(prNumber); if (p) appendTo(p, text, cls); }
+  function appendMergeMain(prNumber, text, cls) { const p = mergeMainPanel(prNumber); if (p) appendTo(p, text, cls); }
 
   // --- Dismiss/hide (local only — never touches GitHub) --------------------
   async function onHide(confirmMsg) {

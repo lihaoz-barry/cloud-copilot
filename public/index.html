@@ -503,6 +503,10 @@
             <option value="default">Default</option>
           </select>
         </div>
+        <div class="mode-row">
+          model:
+          <select id="modelSel"><option value="">loading…</option></select>
+        </div>
         <div class="filter">
           <button id="filterBtn" class="ghost sm">⚙ Filter</button>
           <div id="filterMenu" class="filter-menu">
@@ -604,6 +608,7 @@
 const reposEl = document.getElementById('repos');
 const rootLine = document.getElementById('rootline');
 const modeSel = document.getElementById('mode');
+const modelSel = document.getElementById('modelSel');
 const filterBtn = document.getElementById('filterBtn');
 const filterMenu = document.getElementById('filterMenu');
 const filterList = document.getElementById('filterList');
@@ -753,6 +758,32 @@ async function renderPinnedSection() {
   }
   for (const c of cards) list.appendChild(c);
 }
+
+// ---- model selection --------------------------------------------------------
+async function loadModelSetting() {
+  try {
+    const { model, models } = await fetch('/api/settings/model').then((x) => x.json());
+    modelSel.innerHTML = models.map((m) => `<option value="${escape(m)}">${escape(m)}</option>`).join('');
+    modelSel.value = model;
+  } catch {
+    modelSel.innerHTML = '<option value="">(unavailable)</option>';
+  }
+}
+
+modelSel.addEventListener('change', async () => {
+  const prev = modelSel.value;
+  try {
+    const r = await fetch('/api/settings/model', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: modelSel.value }),
+    });
+    if (!r.ok) throw new Error((await r.json()).error || 'failed to save model');
+  } catch (err) {
+    alert(err.message || 'Failed to save model');
+    modelSel.value = prev;
+  }
+});
 
 // ---- repos ----------------------------------------------------------------
 async function loadRepos() {
@@ -3070,6 +3101,7 @@ function initAdminTerminal() {
 }
 
 loadRepos().then(route);
+loadModelSetting();
 </script>
 </body>
 </html>

@@ -2078,9 +2078,10 @@ async function renderPrDetail(repoName, issueNumber, prNumber) {
 
   const rec = await fetch(`/api/repos/${enc(repoName)}/issues/${issueNumber}/record`).then((x) => x.json());
   const prRec = (rec.prs || {})[prNumber];
+  const chatLive = Boolean(rec.live && rec.live.chat && rec.live.chat[prNumber]);
   extra.innerHTML = '';
   extra.appendChild(renderDeployHistory(prRec));
-  extra.appendChild(renderChatPanel(repoName, issueNumber, prNumber, prRec));
+  extra.appendChild(renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive));
 }
 
 function renderDeployHistory(prRec) {
@@ -2115,7 +2116,7 @@ function renderDeployHistory(prRec) {
   return wrap;
 }
 
-function renderChatPanel(repoName, issueNumber, prNumber, prRec) {
+function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
   const wrap = document.createElement('div');
   wrap.className = 'chat-panel';
   wrap.innerHTML = `
@@ -2202,15 +2203,17 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec) {
 
   async function sendTurn(mode, text, images) {
     setSending(true);
-    const userMsg = {
-      role: 'user',
-      text: mode === 'apply' ? `[execute plan] ${text}` : text,
-      mode,
-      images: images || [],
-      at: new Date().toISOString(),
-    };
-    messages.push(userMsg);
-    renderMessages();
+    if (text) {
+      const userMsg = {
+        role: 'user',
+        text: mode === 'apply' ? `[execute plan] ${text}` : text,
+        mode,
+        images: images || [],
+        at: new Date().toISOString(),
+      };
+      messages.push(userMsg);
+      renderMessages();
+    }
     // Live streaming bubble — append chunks incrementally so the reply shows in
     // real time (mobile-safe), instead of only appearing once the turn ends.
     const textEl = appendLiveAssistant(mode);
@@ -2219,7 +2222,7 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec) {
     try {
       const resp = await fetch(`/api/repos/${enc(repoName)}/issues/${issueNumber}/prs/${prNumber}/chat`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, mode, images: images || [] }),
+        body: JSON.stringify(text ? { message: text, mode, images: images || [] } : { mode }),
       });
       if (!resp.ok || !resp.body) {
         raw = `[error] ${await friendlyHttpError(resp)}`;
@@ -2272,6 +2275,14 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec) {
       await fetch(`/api/repos/${enc(repoName)}/issues/${issueNumber}/prs/${prNumber}/chat/cancel`, { method: 'POST' });
     } catch { /* ignore */ }
   });
+
+  // Re-attach to a chat job still running server-side (e.g. after navigating
+  // away mid-turn and coming back) — mirrors the Create-PR/Deploy reconnect
+  // pattern instead of leaving the turn stuck with no way to resume.
+  if (chatLive) {
+    const lastUser = [...messages].reverse().find((m) => m.role === 'user');
+    sendTurn((lastUser && lastUser.mode) || 'plan', null);
+  }
 
   return wrap;
 }
@@ -2354,7 +2365,9 @@ async function renderPreIssuesList(repoName) {
       const when = pre.createdAt ? new Date(pre.createdAt).toLocaleString() : '';
       const statusBadge = pre.status === 'converted'
         ? `<span class="label" style="background:#2a6">converted → #${pre.issueNumber}</span>`
-        : '';
+        : pre.live
+          ? `<span class="label" style="background:#a70">⏳ working…</span>`
+          : '';
       card.innerHTML = `
         <div class="issue-top">
           <div class="issue-toprow">
@@ -2538,15 +2551,17 @@ async function renderPreIssueDetail(repoName, id) {
 
   async function sendTurn(text) {
     setSending(true);
-    messages.push({ role: 'user', text, at: new Date().toISOString() });
-    renderMessages();
+    if (text) {
+      messages.push({ role: 'user', text, at: new Date().toISOString() });
+      renderMessages();
+    }
     const textEl = appendLiveAssistant();
     let raw = '';
     let finalDraft = null;
     try {
       const resp = await fetch(`/api/repos/${enc(repoName)}/preissues/${enc(id)}/chat`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify(text ? { message: text } : {}),
       });
       if (!resp.ok || !resp.body) {
         raw = `[error] HTTP ${resp.status}`;
@@ -2583,6 +2598,13 @@ async function renderPreIssueDetail(repoName, id) {
       await fetch(`/api/repos/${enc(repoName)}/preissues/${enc(id)}/chat/cancel`, { method: 'POST' });
     } catch { /* ignore */ }
   });
+
+  // Re-attach to a chat job still running server-side (e.g. after navigating
+  // away mid-turn and coming back) — mirrors the Create-PR/Deploy reconnect
+  // pattern instead of leaving the turn stuck with no way to resume.
+  if (pre.live) {
+    sendTurn(null);
+  }
 }
 
 // ---- Admin terminal: free-form Copilot CLI chat rooted at REPOS_ROOT -------

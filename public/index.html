@@ -66,6 +66,8 @@
     .st-success .dot { background: #16a34a; }
     .st-failed  { background: #dc262622; color: #b91c1c; }
     .st-failed .dot { background: #dc2626; }
+    .st-queued  { background: #f59e0b22; color: #b45309; }
+    .st-queued .dot { background: #f59e0b; }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
 
     /* Create PR → Deploy → Merge as a connected chevron/arrow step bar */
@@ -93,6 +95,7 @@
     .chev-success  { background: #16a34a; }
     .chev-failed, .chev-aborted { background: #dc2626; }
     .chev-locked   { background: #93a3b8; color: #eef2f7; opacity: .85; }
+    .chev-queued   { background: #f59e0b; color: #4a3600; }
     .chevtools {
       display: flex; margin-top: 6px; font-size: .74rem; color: #888;
     }
@@ -305,14 +308,68 @@
     .issue.fail { border-left-color: #dc2626; }
     .issue.fail .issue-num { color: #b91c1c; font-weight: 700; }
 
-    /* blocked while another PR-creation runs in the same repo */
-    .issue.blocked { opacity: .45; }
-    .issue.blocked .actions, .issue.blocked .prlist { pointer-events: none; }
+    /* another action in this repo is running — new clicks queue up instead of
+       being rejected, so nothing is disabled; the card just dims a little */
+    .issue.blocked { opacity: .72; }
     .blocked-note { color: #a16207; font-size: .72rem; padding: 2px 4px; display: none; }
     .issue.blocked .blocked-note { display: block; }
 
     .pritem { display: flex; flex-direction: column; gap: 6px; }
     .prlog { margin-top: 0; }
+
+    /* ---- action queue: header button + dropdown + per-button badges ------- */
+    .queue-fab {
+      position: fixed; top: 12px; right: 12px; z-index: 70;
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 7px 12px; border-radius: 999px; cursor: pointer;
+      font: inherit; font-weight: 600; font-size: .82rem; color: inherit;
+      background: color-mix(in srgb, Canvas 82%, transparent);
+      backdrop-filter: saturate(1.6) blur(12px); -webkit-backdrop-filter: saturate(1.6) blur(12px);
+      border: 1px solid #8884; box-shadow: 0 6px 24px #0005;
+    }
+    .queue-fab.active { border-color: #f59e0b; color: #b45309; }
+    .queue-fab .qcount {
+      min-width: 18px; padding: 0 5px; border-radius: 999px; background: #f59e0b; color: #fff;
+      font-size: .72rem; line-height: 18px; text-align: center; display: none;
+    }
+    .queue-fab.active .qcount { display: inline-block; }
+    .queue-menu {
+      position: fixed; top: 52px; right: 12px; z-index: 70; width: min(340px, calc(100vw - 24px));
+      background: Canvas; color: CanvasText; border: 1px solid #8884; border-radius: 12px;
+      box-shadow: 0 8px 30px #0006; padding: 8px; display: none; max-height: 65vh; overflow-y: auto;
+    }
+    .queue-menu.show { display: block; }
+    .queue-menu h4 { margin: 4px 6px 8px; font-size: .78rem; color: #888; font-weight: 600; }
+    .qitem {
+      display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 8px;
+      font-size: .8rem; border: 1px solid transparent;
+    }
+    .qitem + .qitem { margin-top: 2px; }
+    .qitem.running { border-color: #f59e0b55; background: #f59e0b1a; }
+    .qitem .qpos {
+      min-width: 20px; height: 20px; line-height: 20px; text-align: center; border-radius: 999px;
+      background: #8882; font-size: .7rem; font-weight: 700; flex: 0 0 auto;
+    }
+    .qitem.running .qpos { background: #f59e0b; color: #fff; }
+    .qitem .qlabel { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .qitem .qstate { font-size: .68rem; color: #888; white-space: nowrap; }
+    .qitem .qcancel {
+      background: transparent; border: none; color: #dc2626; cursor: pointer; font: inherit;
+      font-size: .85rem; padding: 0 4px;
+    }
+    .queue-empty { color: #888; font-size: .78rem; padding: 8px 8px 10px; }
+    /* the persistent "queued" clock marker stamped onto any queued control */
+    .qbadge {
+      display: inline-flex; align-items: center; gap: 2px; margin-left: 6px; padding: 0 6px;
+      border-radius: 999px; background: #f59e0b; color: #fff; font-size: .68rem; font-weight: 700;
+      line-height: 16px; vertical-align: middle;
+    }
+    .qbadge.running { background: #2563eb; }
+    /* on phones the centered nav pill gets close — shrink to just the clock */
+    @media (max-width: 620px) {
+      .queue-fab { padding: 7px 10px; gap: 4px; }
+      .queue-fab .qtext { display: none; }
+    }
 
     /* ---- floating top nav switcher (Home / Admin / TestFlight) ------------ */
     body { padding-top: 60px; }
@@ -482,6 +539,14 @@
   </style>
 </head>
 <body>
+  <button id="queueFab" class="queue-fab" title="Action queue" aria-haspopup="true" aria-expanded="false">
+    ⏱<span class="qtext">&nbsp;Queue</span><span class="qcount" id="queueCount">0</span>
+  </button>
+  <div id="queueMenu" class="queue-menu">
+    <h4>Action queue</h4>
+    <div id="queueList"></div>
+  </div>
+
   <nav class="navbar">
     <button class="nav-tab active" data-tab="home">🏠 Home</button>
     <button class="nav-tab" data-tab="admin">⌨️ Admin</button>
@@ -616,18 +681,149 @@ const filterList = document.getElementById('filterList');
 const enc = encodeURIComponent;
 
 const STATE_LABEL = {
-  work:   { idle: 'Create PR', working: 'Creating PR…', success: 'PR created', failed: 'PR failed', aborted: 'PR aborted' },
-  deploy: { idle: 'Deploy', deploying: 'Deploying…', success: 'Deployed', failed: 'Deploy failed', aborted: 'Aborted' },
-  merge:  { idle: 'Merge', merging: 'Merging…', success: 'Merged', failed: 'Merge failed', aborted: 'Merge aborted' },
+  work:   { idle: 'Create PR', queued: 'Queued…', working: 'Creating PR…', success: 'PR created', failed: 'PR failed', aborted: 'PR aborted' },
+  deploy: { idle: 'Deploy', queued: 'Queued…', deploying: 'Deploying…', success: 'Deployed', failed: 'Deploy failed', aborted: 'Aborted' },
+  merge:  { idle: 'Merge', queued: 'Queued…', merging: 'Merging…', success: 'Merged', failed: 'Merge failed', aborted: 'Merge aborted' },
 };
 const STATE_CLASS = {
-  idle: 'st-idle', working: 'st-working', deploying: 'st-deploying', merging: 'st-merging',
+  idle: 'st-idle', queued: 'st-queued', working: 'st-working', deploying: 'st-deploying', merging: 'st-merging',
   success: 'st-success', failed: 'st-failed', aborted: 'st-failed',
 };
 const CHEV_CLASS = {
-  idle: 'chev-idle', working: 'chev-working', deploying: 'chev-deploying', merging: 'chev-merging',
+  idle: 'chev-idle', queued: 'chev-queued', working: 'chev-working', deploying: 'chev-deploying', merging: 'chev-merging',
   success: 'chev-success', failed: 'chev-failed', aborted: 'chev-aborted',
 };
+
+// ---- action queue ----------------------------------------------------------
+// The server runs exactly one Create PR / Deploy / Merge session at a time and
+// queues the rest (see lib/queue.js). This module mirrors that queue in the UI:
+//   * a ⏱ Queue button top-right whose dropdown lists the running task first,
+//     then everything waiting, in the order it will execute;
+//   * a small persistent ⏱ badge with the queue position stamped onto every
+//     control that has a queued task (any element carrying `data-qkey`).
+// Badges are re-applied on a short interval because the action buttons repaint
+// themselves (innerHTML) whenever their status changes.
+const ActionQueue = (() => {
+  const fab = document.getElementById('queueFab');
+  const countEl = document.getElementById('queueCount');
+  const menu = document.getElementById('queueMenu');
+  const listEl = document.getElementById('queueList');
+  let entries = [];
+
+  const entryFor = (key) => entries.find((e) => e.key === key) || null;
+
+  async function refresh() {
+    try {
+      const d = await fetch('/api/queue').then((r) => r.json());
+      entries = Array.isArray(d.entries) ? d.entries : [];
+    } catch {
+      return entries; // keep the last known queue rather than flashing empty
+    }
+    paint();
+    return entries;
+  }
+
+  function paint() {
+    fab.classList.toggle('active', entries.length > 0);
+    countEl.textContent = String(entries.length);
+    renderMenu();
+    applyBadges();
+  }
+
+  function renderMenu() {
+    listEl.innerHTML = '';
+    if (!entries.length) {
+      listEl.innerHTML = '<div class="queue-empty">Nothing queued. Create PR / Deploy / Merge run one at a time — extra clicks line up here.</div>';
+      return;
+    }
+    for (const e of entries) {
+      const row = document.createElement('div');
+      row.className = `qitem ${e.status === 'running' ? 'running' : ''}`;
+      const pos = document.createElement('span');
+      pos.className = 'qpos';
+      pos.textContent = String(e.position);
+      const label = document.createElement('span');
+      label.className = 'qlabel';
+      label.textContent = e.label;
+      label.title = e.label;
+      const state = document.createElement('span');
+      state.className = 'qstate';
+      state.textContent = e.status === 'running' ? 'running' : 'waiting';
+      row.append(pos, label, state);
+      if (e.status !== 'running') {
+        const cancel = document.createElement('button');
+        cancel.className = 'qcancel';
+        cancel.textContent = '✕';
+        cancel.title = 'Remove from the queue';
+        cancel.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          cancel.disabled = true;
+          try {
+            await fetch(`/api/queue/${enc(e.id)}/cancel`, { method: 'POST' });
+          } catch { /* refresh below shows the real state either way */ }
+          await refresh();
+        });
+        row.append(cancel);
+      }
+      listEl.append(row);
+    }
+  }
+
+  // Stamp / update / remove the ⏱ position badge on every `data-qkey` control.
+  function applyBadges() {
+    document.querySelectorAll('[data-qkey]').forEach((el) => {
+      const e = entryFor(el.dataset.qkey);
+      let badge = el.querySelector(':scope > .qbadge');
+      if (!e) {
+        if (badge) badge.remove();
+        return;
+      }
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.className = 'qbadge';
+        el.appendChild(badge);
+      }
+      badge.classList.toggle('running', e.status === 'running');
+      badge.textContent = `⏱ ${e.position}`;
+      badge.title = e.status === 'running'
+        ? `Running now (position ${e.position} in the queue)`
+        : `Queued — position ${e.position} in the queue`;
+    });
+  }
+
+  fab.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    const show = !menu.classList.contains('show');
+    menu.classList.toggle('show', show);
+    fab.setAttribute('aria-expanded', String(show));
+    if (show) refresh();
+  });
+  document.addEventListener('click', (ev) => {
+    if (!menu.classList.contains('show')) return;
+    if (menu.contains(ev.target) || fab.contains(ev.target)) return;
+    menu.classList.remove('show');
+    fab.setAttribute('aria-expanded', 'false');
+  });
+
+  setInterval(refresh, 2500);
+  setInterval(applyBadges, 500); // survive action buttons repainting themselves
+  refresh();
+
+  return { refresh, entryFor, entries: () => entries, applyBadges };
+})();
+
+// Block until a queued task starts (or leaves the queue). Resolves 'running'
+// when it is its turn, or 'gone' if it was cancelled / already finished.
+async function waitForQueueSlot(key) {
+  const nap = (ms) => new Promise((r) => setTimeout(r, ms));
+  for (;;) {
+    await nap(1500);
+    await ActionQueue.refresh();
+    const e = ActionQueue.entryFor(key);
+    if (!e) return 'gone';
+    if (e.status === 'running') return 'running';
+  }
+}
 
 // ---- pipeline auto-run depth (persisted in localStorage) -------------------
 const LS_DEPTH = 'cc.pipelineDepth';
@@ -911,7 +1107,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     </div>
     <div class="actions"></div>
     <div class="worklog panel"></div>
-    <div class="blocked-note">⏸ Waiting — another PR creation is running in this repo…</div>
+    <div class="blocked-note">⏳ Another action is running in this repo — anything you start now is queued.</div>
     <div class="prlist"></div>`;
 
   const actions = el.querySelector('.actions');
@@ -938,6 +1134,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
 
   // --- Create PR button + its log toggle -----------------------------------
   const workBtn = document.createElement('button');
+  workBtn.dataset.qkey = `${repo.name}#${issue.number}:work`;
   workBtn.addEventListener('click', onWork);
 
   const workLogBtn = document.createElement('button');
@@ -1008,15 +1205,16 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   }
 
   // --- blocking -------------------------------------------------------------
+  // Another action is running in this repo. Nothing gets disabled any more —
+  // clicking now enqueues the request (see lib/queue.js); the card just dims to
+  // hint that it won't start instantly.
   function setBlocked(blocked) {
     el.classList.toggle('blocked', blocked);
-    workBtn.disabled = blocked;
-    refreshPrsBtn.disabled = blocked;
   }
 
   // --- Create PR visuals: success/fail shown ON THE ISSUE, not the button ---
   function paintWork(status) {
-    const visual = status === 'working' ? 'working' : 'idle'; // button stays "Create PR"
+    const visual = status === 'working' || status === 'queued' ? status : 'idle'; // otherwise stays "Create PR"
     paintBtn(workBtn, 'work', visual, st.work);
     el.classList.toggle('ok', status === 'success');
     el.classList.toggle('fail', status === 'failed' || status === 'aborted');
@@ -1082,10 +1280,12 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
 
     // --- Segment 2: Deploy ---------------------------------------------------
     const deploySeg = document.createElement('button');
+    deploySeg.dataset.qkey = `${repo.name}#${issue.number}:deploy:${pr.prNumber}`;
     deploySeg.addEventListener('click', () => onDeploy(pr.prNumber));
 
     // --- Segment 3: Merge (locked/dimmed until Deploy succeeds) -------------
     const mergeSeg = document.createElement('button');
+    mergeSeg.dataset.qkey = `${repo.name}#${issue.number}:merge:${pr.prNumber}`;
     mergeSeg.addEventListener('click', () => onMerge(pr.prNumber));
 
     chevbar.append(prSeg, deploySeg, mergeSeg);
@@ -1194,6 +1394,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     el.textContent = label;
     const dur = timingObj && timingObj.durationMs;
     el.title = dur != null ? `ran ${fmtDur(dur)}` : '';
+    ActionQueue.applyBadges();
   }
 
   // Merge's segment reads BOTH its own status and Deploy's status: it stays a
@@ -1272,6 +1473,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     btn.innerHTML = `<span class="dot"></span>${STATE_LABEL[action][s] || s}${extra}`;
     const dur = timingObj && timingObj.durationMs;
     btn.title = dur != null ? `ran ${fmtDur(dur)}` : '';
+    ActionQueue.applyBadges();
   }
 
   function mergePrs(list) {
@@ -1296,9 +1498,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   // --- Create PR flow -------------------------------------------------------
   async function onWork() {
     const s = st.work.status;
-    if (s === 'working') return void worklog.classList.toggle('show');
-    // Enforce the repo-level lock on the client too.
-    if (repoCtx.activeWorkIssue != null && repoCtx.activeWorkIssue !== issue.number) return;
+    if (s === 'working' || s === 'queued') return void worklog.classList.toggle('show');
     st.work.status = 'working';
     paintWork('working');
     await streamWork(false);
@@ -1318,7 +1518,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   async function streamWork(reconnect) {
     if (reconnect) { st.work.status = 'working'; paintWork('working'); appendWork('\n[reconnecting work…]\n', 'stderr'); }
     const url = `/api/repos/${enc(repo.name)}/issues/${issue.number}/work`;
-    let finalStatus = null, resultData = null;
+    let finalStatus = null, resultData = null, queuedData = null;
     try {
       const resp = await fetch(url, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1330,9 +1530,22 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         onChunk: (t, s) => appendWork(t, s === 'stderr' ? 'stderr' : null),
         onError: (m) => appendWork(`\n[error] ${m}\n`, 'err'),
         onResult: (d) => { finalStatus = d.status; resultData = d; },
+        onQueued: (d) => { queuedData = d; },
       });
     } catch (e) {
       appendWork(`\n[connection dropped: ${e.message}] — job still running, checking status…\n`, 'stderr');
+      return reconcileWork();
+    }
+    if (queuedData) {
+      // Something else is running: we're in line. Sit on the queue until it's
+      // our turn, then attach to the real log stream.
+      st.work.status = 'queued';
+      paintWork('queued');
+      appendWork(`\n[queued] ${queuedData.message}\n`, 'stderr');
+      ActionQueue.refresh();
+      const outcome = await waitForQueueSlot(queuedData.key);
+      if (outcome === 'gone') return afterQueueDropped('work');
+      appendWork(`\n[queued] starting now…\n`, 'stderr');
       return reconcileWork();
     }
     if (finalStatus === 'blocked') {
@@ -1383,10 +1596,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     const pr = findPr(prNumber);
     if (!pr) return;
     const s = (pr.deploy && pr.deploy.status) || 'idle';
-    if (s === 'deploying') { const p = deployPanel(prNumber); if (p) p.classList.toggle('show'); return; }
-    // Enforce the repo-level lock on the client too — Deploy checks out a
-    // branch on the same shared working tree as Create PR/Chat.
-    if (repoCtx.activeWorkIssue != null && repoCtx.activeWorkIssue !== issue.number) return;
+    if (s === 'deploying' || s === 'queued') { const p = deployPanel(prNumber); if (p) p.classList.toggle('show'); return; }
     // Finished runs require confirmation before starting a fresh TestFlight build.
     if (s === 'success' || s === 'failed' || s === 'aborted') {
       const verb = (s === 'failed' || s === 'aborted') ? 'Re-deploy' : 'Deploy again';
@@ -1414,7 +1624,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     if (!pr) return;
     if (reconnect) { pr.deploy.status = 'deploying'; paintDeploy(prNumber); appendDeploy(prNumber, `\n[reconnecting deploy PR #${prNumber}…]\n`, 'stderr'); }
     const url = `/api/repos/${enc(repo.name)}/issues/${issue.number}/deploy/${prNumber}`;
-    let finalStatus = null, resultData = null;
+    let finalStatus = null, resultData = null, queuedData = null;
     try {
       const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       if (!resp.ok || !resp.body) { appendDeploy(prNumber, `\n[error] HTTP ${resp.status}\n`, 'err'); return reconcileDeploy(prNumber); }
@@ -1423,9 +1633,20 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         onChunk: (t, s) => appendDeploy(prNumber, t, s === 'stderr' ? 'stderr' : null),
         onError: (m) => appendDeploy(prNumber, `\n[error] ${m}\n`, 'err'),
         onResult: (d) => { finalStatus = d.status; resultData = d; },
+        onQueued: (d) => { queuedData = d; },
       });
     } catch (e) {
       appendDeploy(prNumber, `\n[connection dropped: ${e.message}] — deploy still running, checking status…\n`, 'stderr');
+      return reconcileDeploy(prNumber);
+    }
+    if (queuedData) {
+      pr.deploy.status = 'queued';
+      paintDeploy(prNumber);
+      appendDeploy(prNumber, `\n[queued] ${queuedData.message}\n`, 'stderr');
+      ActionQueue.refresh();
+      const outcome = await waitForQueueSlot(queuedData.key);
+      if (outcome === 'gone') return afterQueueDropped('deploy', prNumber);
+      appendDeploy(prNumber, `\n[queued] starting now…\n`, 'stderr');
       return reconcileDeploy(prNumber);
     }
     if (finalStatus === 'blocked') {
@@ -1483,7 +1704,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     const pr = findPr(prNumber);
     if (!pr) return;
     const ms = (pr.merge && pr.merge.status) || 'idle';
-    if (ms === 'merging') { const p = mergePanel(prNumber); if (p) p.classList.toggle('show'); return; }
+    if (ms === 'merging' || ms === 'queued') { const p = mergePanel(prNumber); if (p) p.classList.toggle('show'); return; }
     const deployOk = pr.deploy && pr.deploy.status === 'success';
     let force = false;
     if (!deployOk) {
@@ -1515,7 +1736,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     if (!pr) return;
     if (reconnect) { pr.merge.status = 'merging'; paintMerge(prNumber); appendMerge(prNumber, `\n[reconnecting merge PR #${prNumber}…]\n`, 'stderr'); }
     const url = `/api/repos/${enc(repo.name)}/issues/${issue.number}/merge/${prNumber}`;
-    let finalStatus = null, resultData = null;
+    let finalStatus = null, resultData = null, queuedData = null;
     try {
       const resp = await fetch(url, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1526,9 +1747,20 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         onChunk: (t, s) => appendMerge(prNumber, t, s === 'stderr' ? 'stderr' : null),
         onError: (m) => appendMerge(prNumber, `\n[error] ${m}\n`, 'err'),
         onResult: (d) => { finalStatus = d.status; resultData = d; },
+        onQueued: (d) => { queuedData = d; },
       });
     } catch (e) {
       appendMerge(prNumber, `\n[connection dropped: ${e.message}] — merge still running, checking status…\n`, 'stderr');
+      return reconcileMerge(prNumber);
+    }
+    if (queuedData) {
+      pr.merge.status = 'queued';
+      paintMerge(prNumber);
+      appendMerge(prNumber, `\n[queued] ${queuedData.message}\n`, 'stderr');
+      ActionQueue.refresh();
+      const outcome = await waitForQueueSlot(queuedData.key);
+      if (outcome === 'gone') return afterQueueDropped('merge', prNumber);
+      appendMerge(prNumber, `\n[queued] starting now…\n`, 'stderr');
       return reconcileMerge(prNumber);
     }
     if (finalStatus === 'blocked') {
@@ -1578,6 +1810,36 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   }
 
   // --- shared helpers -------------------------------------------------------
+
+  // A queued task left the queue without us seeing it start: either it was
+  // cancelled from the queue dropdown, or it ran and finished between two
+  // polls. Ask the server which it was instead of guessing.
+  async function afterQueueDropped(action, prNumber) {
+    let rec;
+    try { rec = await fetchRecord(); } catch { rec = null; }
+    const prRec = rec && (rec.prs || {})[prNumber];
+    if (action === 'work') {
+      const s = rec && rec.work.status;
+      if (s === 'working' || (rec && rec.live && rec.live.work)) return reconcileWork();
+      if (s === 'success' || s === 'failed' || s === 'aborted') { st.work.status = s; syncPrsFromRecord(rec); }
+      else { st.work.status = 'idle'; appendWork('\n[queued] removed from the queue.\n', 'stderr'); }
+      paintWork(st.work.status);
+      repoCtx.clearActive(issue.number);
+      return;
+    }
+    const pr = findPr(prNumber);
+    if (!pr) return;
+    const s = prRec && prRec[action] && prRec[action].status;
+    if (s === 'deploying' || s === 'merging') return action === 'deploy' ? reconcileDeploy(prNumber) : reconcileMerge(prNumber);
+    if (s === 'success' || s === 'failed' || s === 'aborted') pr[action] = { ...prRec[action] };
+    else {
+      pr[action] = { ...(pr[action] || {}), status: 'idle' };
+      const append = action === 'deploy' ? appendDeploy : appendMerge;
+      append(prNumber, '\n[queued] removed from the queue.\n', 'stderr');
+    }
+    if (action === 'deploy') paintDeploy(prNumber); else paintMerge(prNumber);
+  }
+
   function fetchRecord() {
     return fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/record`).then((x) => x.json());
   }
@@ -1670,7 +1932,7 @@ async function friendlyHttpError(resp) {
 }
 
 // Read an SSE response body, dispatching parsed events to handlers.
-async function pumpSSE(resp, { onChunk, onError, onResult, onMeta }) {
+async function pumpSSE(resp, { onChunk, onError, onResult, onMeta, onQueued }) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
@@ -1688,6 +1950,7 @@ async function pumpSSE(resp, { onChunk, onError, onResult, onMeta }) {
       else if (evt.event === 'meta') onMeta && onMeta(evt.data);
       else if (evt.event === 'error') onError && onError(evt.data.message);
       else if (evt.event === 'result') onResult && onResult(evt.data);
+      else if (evt.event === 'queued') onQueued && onQueued(evt.data);
     }
   }
 }
@@ -1973,6 +2236,7 @@ function renderTfCard(b) {
     } else {
       const btn = document.createElement('button');
       btn.className = 'tf-mergebtn';
+      btn.dataset.qkey = `${b.repo}#${b.issueNumber}:merge:${b.prNumber}`;
       btn.textContent = ms === 'failed' || ms === 'aborted' ? 'Retry merge' : 'Merge';
       btn.addEventListener('click', () => onTfMerge(b, btn));
       row.appendChild(btn);
@@ -2001,10 +2265,19 @@ async function onTfMerge(b, btn) {
       body: JSON.stringify({ force }),
     });
     if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
-    let finalStatus = null, resultData = null;
+    let finalStatus = null, resultData = null, queuedData = null;
     await pumpSSE(resp, {
       onResult: (d) => { finalStatus = d.status; resultData = d; },
+      onQueued: (d) => { queuedData = d; },
     });
+    if (queuedData) {
+      // In line behind another action — the ⏱ badge on this button (and the
+      // queue dropdown) track it from here; the merge starts on its own.
+      btn.textContent = `Queued (#${queuedData.position})`;
+      ActionQueue.refresh();
+      waitForQueueSlot(queuedData.key).then(() => loadTestflightBuilds());
+      return;
+    }
     if (finalStatus === 'success') {
       btn.textContent = 'Merged';
     } else if (finalStatus === 'blocked') {

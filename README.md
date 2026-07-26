@@ -34,8 +34,11 @@ your LAN/VPN. From your phone you can:
   aborted runs get their own state and can be re-run after a confirm
 - watch every run **stream live** in **collapsible per-action logs** (hidden by
   default), with success/failure shown **on the issue** and lifecycle timing cached
-- **one PR creation per repo at a time** — other issues in that repo are greyed out
-  while one is in progress, to avoid working-tree collisions
+- **one action at a time, everything else queues** — clicking Create PR / Deploy /
+  Merge while something is running lines the request up in a persistent
+  (`data/queue.json`) FIFO queue instead of rejecting it. Each queued control keeps
+  a ⏱ position badge and the top-right **⏱ Queue** dropdown shows the running task
+  followed by everything waiting
 
 This is a proof-of-concept for remotely driving a local coding-agent CLI from a web UI.
 
@@ -101,6 +104,32 @@ click **Create PR**:
 
 A stage only advances on **success**; a failure or abort at any point simply stops
 the chain. The choice is saved per-device in `localStorage`.
+
+### Action queue
+
+**Create PR**, **Deploy** and **Merge** each spawn a long-running session that owns
+the machine (and the repo's single shared working tree), so **exactly one of them
+runs at a time**. Clicking another one while something is running no longer fails
+with a `Blocked: …` message — the request is **queued** and starts by itself the
+moment the current one finishes.
+
+- A **⏱ Queue** button sits in the top-right corner. Its badge shows how many
+  tasks are in flight; the dropdown lists the **currently-running task pinned at
+  the top**, then every waiting task in the exact order it will execute.
+- Any Create PR / Deploy / Merge control with a queued task keeps a small
+  persistent **⏱ badge with its position** in the line (position `1` = running
+  now). Positions renumber themselves as the queue advances.
+- A waiting task can be removed with the ✕ next to it in the dropdown. The
+  running one is stopped with its own **⨯ Abort** button instead, which actually
+  kills the child process.
+- The queue is persisted to **`data/queue.json`** (same atomic JSON-file pattern
+  as `state.json`), so it survives a server restart. On boot the queue processor
+  checks whether anything is really running: jobs live in memory, so a task that
+  was mid-flight when the process died is **dropped** (blindly re-running it could
+  open a duplicate PR) and the queue resumes from the front of the waiting list.
+- **Chat** turns (Admin, PR chat, PreIssue) are *not* queued — they're short and
+  interactive. They still take the per-repo working-tree lock, so a queued task
+  simply waits for a running chat turn in that repo before it starts.
 
 ### Per-repo deploy config (`.cloud-copilot.json`)
 
@@ -174,14 +203,21 @@ pipeline you get:
 | POST | `/api/repos/:name/issues/:n/merge/:pr/cancel` | Abort the running merge for that PR. |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat` | **Chat with a PR** — SSE stream. Body: `{ "message": "...", "mode": "plan"\|"apply" }`. `plan` is read-only (default approval flags); `apply` implements + pushes to the existing branch and resets Deploy/Merge on success. |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat/cancel` | Abort the running chat turn for that PR. |
+| GET  | `/api/queue` | The action queue: running task first, then waiting tasks in execution order. |
+| POST | `/api/queue/:id/cancel` | Remove a **waiting** task from the queue (409 if it already started). |
 | POST | `/api/run` | Simple one-shot demo (prompt + optional `sessionId` resume). |
 
 ### SSE events
 
 `meta` (command) → `chunk` (`{stream,text}` streamed output) → `session`
 (`{sessionId}`) → `result` (`{action,status,prUrl?,prNumber?}`, where `status` is
-`success`/`failed`/`aborted`, or `blocked` when the repo lock rejects a second
-Create PR, or Merge is attempted before Deploy has succeeded) → `done` (`{exitCode}`).
+`success`/`failed`/`aborted`, or `blocked` when Merge is attempted before Deploy
+has succeeded) → `done` (`{exitCode}`).
+
+If the action had to wait its turn, the stream is instead a single `queued`
+(`{action,id,key,label,position,message}`) followed by `done` — the client keeps
+the ⏱ badge painted from `GET /api/queue` and re-attaches to the real log stream
+once the task starts.
 
 ---
 
@@ -283,6 +319,7 @@ the HTTP connection that started them:
 | `session` | `{ sessionId }`                                      | As soon as the session id is parsed from Copilot's stderr. |
 | `chunk`   | `{ stream: "stdout"\|"stderr", text }`               | Repeatedly — streamed output as it arrives. |
 | `result`  | `{ action, status, prUrl?, prNumber?, exitCode }`    | Once when an issue action finishes — the persisted outcome. |
+| `queued`  | `{ action, id, key, label, position, message }`       | Instead of a log stream, when the action was put in the queue behind another one. |
 | `error`   | `{ message }`                                        | If the CLI can't be spawned. |
 | `done`    | `{ exitCode, sessionId }`                            | Once at the end. |
 
@@ -398,11 +435,12 @@ cloud-copilot/
 │   ├── gh.js           # enumerate repos, list issues/PRs/single-PR via `gh` (cached)
 │   ├── store.js        # per-issue status persisted to data/state.json
 │   ├── jobs.js         # durable job manager: child outlives the browser connection
+│   ├── queue.js        # one action at a time, FIFO, persisted to data/queue.json
 │   ├── runner.js       # spawn copilot, stream SSE, capture transcript + session id
 │   └── repoConfig.js   # loads a repo's .cloud-copilot.json (or auto-detects iOS)
 ├── public/
 │   └── index.html      # repos → issues → Create PR / Deploy / Merge pipeline console
-├── data/               # state.json (gitignored)
+├── data/               # state.json + queue.json (gitignored)
 ├── .gitignore
 └── README.md
 ```

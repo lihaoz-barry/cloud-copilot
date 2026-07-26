@@ -27,6 +27,7 @@ const gh = require('./lib/gh');
 const repoConfig = require('./lib/repoConfig');
 const { runCopilotSSE, writeSseHead } = require('./lib/runner');
 const jobs = require('./lib/jobs');
+const queue = require('./lib/queue');
 const { UPLOADS_DIR, saveUploadedImages, cleanupOldUploads } = require('./lib/attachments');
 
 const HOST = process.env.HOST || '0.0.0.0';
@@ -361,9 +362,12 @@ app.post('/api/repos/:name/issues/:n/hide', (req, res) => {
   for (const pr of Object.values(record.prs || {})) {
     if (jobs.cancelJob(`${repo.name}#${n}:deploy:${pr.prNumber}`)) cancelledJobs.push(`deploy:${pr.prNumber}`);
   }
+  // Anything of this issue's still waiting in line would otherwise start up
+  // again minutes after the user deleted it.
+  const cancelledQueued = queue.removeIssue(repo.name, n);
 
   store.dismissIssue(repo.name, n);
-  res.json({ ok: true, cancelledJobs });
+  res.json({ ok: true, cancelledJobs, cancelledQueued });
 });
 
 // ---------------------------------------------------------------------------
@@ -528,34 +532,11 @@ app.post('/api/repos/:name/preissues/:id/create-issue', async (req, res) => {
 // Action: Create PR (implement the issue end-to-end and open a PR)
 // ---------------------------------------------------------------------------
 
-app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
-  const repo = resolveRepo(req.params.name);
-  if (!repo) return res.status(404).json({ error: 'repo not found' });
-  const n = Number(req.params.n);
+// Actually start a Create PR run. Called either directly (queue was idle) or
+// later by the queue's runner when this task reaches the front of the line —
+// so it must not touch the HTTP response.
+function launchWork({ repo, n, mode }) {
   const key = `${repo.name}#${n}:work`;
-
-  writeSseHead(res);
-
-  // Reconnect: if a job for this issue is already running, just attach to it.
-  const existing = jobs.getJob(key);
-  if (existing && existing.status === 'running') {
-    jobs.subscribe(existing, res);
-    return;
-  }
-
-  // Repo-level lock: only one working-tree action (Create PR, Deploy, Chat)
-  // may run per repo at a time, otherwise concurrent runs collide on the same
-  // checkout.
-  const busyKey = findOtherRepoBusyKey(repo.name, key);
-  if (busyKey) {
-    const msg = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`;
-    return sendSseBlocked(res, { action: 'work', status: 'blocked', message: msg });
-  }
-
-  const mode = ['default', 'granular', 'allow-all'].includes(req.body?.mode)
-    ? req.body.mode
-    : 'allow-all'; // implementing an issue needs to edit files, run git & gh
-
   const prompt =
     `Work on GitHub issue #${n} in this repository (${repo.ownerRepo}). ` +
     `Create a new branch, implement the change end-to-end until it is complete, ` +
@@ -640,7 +621,37 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
     },
   });
 
-  jobs.subscribe(job, res);
+  return job;
+}
+
+app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const n = Number(req.params.n);
+  const key = `${repo.name}#${n}:work`;
+
+  writeSseHead(res);
+
+  // Reconnect: if a job for this issue is already running, just attach to it.
+  const existing = jobs.getJob(key);
+  if (existing && existing.status === 'running') {
+    jobs.subscribe(existing, res);
+    return;
+  }
+
+  const mode = ['default', 'granular', 'allow-all'].includes(req.body?.mode)
+    ? req.body.mode
+    : 'allow-all'; // implementing an issue needs to edit files, run git & gh
+
+  // Instead of rejecting when something else is already running, get in line.
+  // The queue starts us right away when it is idle.
+  return submitToQueue(res, {
+    key,
+    repo: repo.name,
+    issueNumber: n,
+    action: 'work',
+    params: { mode },
+  });
 });
 
 // Abort a running PR creation for an issue.
@@ -666,6 +677,62 @@ function sendSseBlocked(res, payload) {
   res.end();
 }
 
+// The request got in line behind other work. Tell the client where it sits and
+// close the stream — it keeps the "queued" badge painted from `GET /api/queue`
+// and re-attaches to the real log stream once the task actually starts.
+function sendSseQueued(res, payload) {
+  res.write(`event: queued\n`);
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  res.write(`event: done\n`);
+  res.write(`data: ${JSON.stringify({ exitCode: null, queued: true })}\n\n`);
+  res.end();
+}
+
+// Shared tail of the Create PR / Deploy / Merge endpoints: hand the request to
+// the queue, then either stream the job it started or report the queue slot.
+async function submitToQueue(res, spec) {
+  let sub;
+  try {
+    sub = await queue.submit(spec);
+  } catch (err) {
+    return sendSseBlocked(res, {
+      action: spec.action,
+      prNumber: spec.prNumber ?? undefined,
+      status: 'failed',
+      message: `Could not queue this action: ${err.message}`,
+    });
+  }
+
+  if (sub.started) {
+    if (sub.job) return jobs.subscribe(sub.job, res);
+    // Reached the front of the line but the launcher failed before spawning
+    // anything (it has already recorded that failure in the store).
+    return sendSseBlocked(res, {
+      action: spec.action,
+      prNumber: spec.prNumber ?? undefined,
+      status: 'failed',
+      message: sub.entry.error
+        ? `This action could not be started: ${sub.entry.error}`
+        : 'This action could not be started — see its log for details.',
+    });
+  }
+
+  return sendSseQueued(res, {
+    action: spec.action,
+    prNumber: spec.prNumber ?? undefined,
+    status: 'queued',
+    id: sub.entry.id,
+    key: sub.entry.key,
+    label: sub.entry.label,
+    position: sub.position,
+    message:
+      sub.position <= 1
+        ? 'Queued — it will start as soon as this repo is free.'
+        : `Queued at position ${sub.position} — another action is running. ` +
+          `It will start automatically when its turn comes.`,
+  });
+}
+
 // Builds the "What to Test" text TestFlight testers see, from the PR title
 // (falling back to a generic version/build string). Strips characters that
 // could break out of the single-quoted shell argument the agent is told to
@@ -679,8 +746,11 @@ function buildChangelog(pr, issueNumber, version, buildNumber) {
   return text.slice(0, 500); // TestFlight "What to Test" is short; keep it well under Apple's limit
 }
 
-function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
-  gh.getPr(repo.ownerRepo, prNumber).then((pr) => {
+// Start an iOS TestFlight deploy. Resolves to the job once it is spawned;
+// rejects (after recording the failure in the store) if the branch can't be
+// checked out — the caller decides how to surface that.
+function launchIosTestflightDeploy({ repo, n, prNumber, key }) {
+  return gh.getPr(repo.ownerRepo, prNumber).then((pr) => {
     if (!pr || !pr.headRefName) {
       const message = `Could not resolve the branch for PR #${prNumber} via gh.`;
       store.updateDeploy(repo.name, n, prNumber, (d) => {
@@ -688,7 +758,7 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
         d.finishedAt = new Date().toISOString();
         d.conversation = message;
       });
-      return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
+      throw new Error(message);
     }
 
     // Build number / version are computed HERE, deterministically, from the
@@ -712,7 +782,7 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
         d.finishedAt = new Date().toISOString();
         d.conversation = message;
       });
-      return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
+      throw new Error(message);
     }
 
     const versionArg = version ? ` version:${version}` : '';
@@ -794,12 +864,12 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
       },
     });
 
-    jobs.subscribe(job, res);
+    return job;
   });
 }
 
-function runShellDeploy({ res, repo, n, prNumber, key, command }) {
-  gh.getPr(repo.ownerRepo, prNumber).then((pr) => {
+function launchShellDeploy({ repo, n, prNumber, key, command }) {
+  return gh.getPr(repo.ownerRepo, prNumber).then((pr) => {
     if (!pr || !pr.headRefName) {
       const message = `Could not resolve the branch for PR #${prNumber} via gh.`;
       store.updateDeploy(repo.name, n, prNumber, (d) => {
@@ -807,7 +877,7 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
         d.finishedAt = new Date().toISOString();
         d.conversation = message;
       });
-      return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
+      throw new Error(message);
     }
 
     // Argument-array form (never a shell string) so the branch name — which
@@ -827,7 +897,7 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
         d.finishedAt = new Date().toISOString();
         d.conversation = message;
       });
-      return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
+      throw new Error(message);
     }
 
     // The deploy command itself is trusted repo-local config (from
@@ -852,8 +922,36 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
       },
     });
 
-    jobs.subscribe(job, res);
+    return job;
   });
+}
+
+// Start a deploy for one PR, dispatching on the repo's configured deploy type.
+// Called directly when the queue is idle, or by the queue's runner later on.
+function launchDeploy({ repo, n, prNumber }) {
+  const key = `${repo.name}#${n}:deploy:${prNumber}`;
+  const deployConfig = repoConfig.loadDeployConfig(repo.path);
+  if (!deployConfig.type) {
+    const message =
+      deployConfig.error ||
+      `Deploy not configured for ${repo.name}. Add a .cloud-copilot.json at the repo root (see README).`;
+    store.updateDeploy(repo.name, n, prNumber, (d) => {
+      d.status = 'failed';
+      d.finishedAt = new Date().toISOString();
+      d.conversation = message;
+    });
+    return Promise.reject(new Error(message));
+  }
+
+  // Archives the previous terminal deploy (if any) into deployHistory before
+  // resetting `deploy` to a fresh in-progress state. Deliberately done when the
+  // deploy actually STARTS, not when it is queued, so a waiting entry doesn't
+  // wipe the last successful build's details while it sits in line.
+  store.startNewDeploy(repo.name, n, prNumber);
+
+  return deployConfig.type === 'shell'
+    ? launchShellDeploy({ repo, n, prNumber, key, command: deployConfig.command })
+    : launchIosTestflightDeploy({ repo, n, prNumber, key });
 }
 
 app.post('/api/repos/:name/issues/:n/deploy/:pr', async (req, res) => {
@@ -873,6 +971,8 @@ app.post('/api/repos/:name/issues/:n/deploy/:pr', async (req, res) => {
     return;
   }
 
+  // Misconfigured repos still fail fast (with a plain JSON error) rather than
+  // occupying a queue slot just to fail when their turn comes.
   const deployConfig = repoConfig.loadDeployConfig(repo.path);
   if (!deployConfig.type) {
     return res.status(400).json({
@@ -884,23 +984,14 @@ app.post('/api/repos/:name/issues/:n/deploy/:pr', async (req, res) => {
 
   writeSseHead(res);
 
-  // Repo-level lock: Deploy checks out a branch on the same shared working
-  // tree as Create PR/Chat, so it must be mutually exclusive with them too.
-  const busyKey = findOtherRepoBusyKey(repo.name, key);
-  if (busyKey) {
-    const msg = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`;
-    return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'blocked', message: msg });
-  }
-
-  // Archives the previous terminal deploy (if any) into deployHistory before
-  // resetting `deploy` to a fresh in-progress state.
-  store.startNewDeploy(repo.name, n, prNumber);
-
-  if (deployConfig.type === 'shell') {
-    runShellDeploy({ res, repo, n, prNumber, key, command: deployConfig.command });
-  } else {
-    runIosTestflightDeploy({ res, repo, n, prNumber, key });
-  }
+  return submitToQueue(res, {
+    key,
+    repo: repo.name,
+    issueNumber: n,
+    action: 'deploy',
+    prNumber,
+    params: {},
+  });
 });
 
 // Abort a running deploy for a specific PR.
@@ -951,6 +1042,21 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
     }
   }
 
+  return submitToQueue(res, {
+    key,
+    repo: repo.name,
+    issueNumber: n,
+    action: 'merge',
+    prNumber,
+    params: { force },
+  });
+});
+
+// Start a merge for one PR. Called directly when the queue is idle, or by the
+// queue's runner once this task reaches the front of the line.
+async function launchMerge({ repo, n, prNumber, force }) {
+  const key = `${repo.name}#${n}:merge:${prNumber}`;
+
   store.updateMerge(repo.name, n, prNumber, (m) => {
     m.status = 'merging';
     m.forced = force;
@@ -993,8 +1099,8 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
     },
   });
 
-  jobs.subscribe(job, res);
-});
+  return job;
+}
 
 // Abort a running merge for a specific PR.
 app.post('/api/repos/:name/issues/:n/merge/:pr/cancel', (req, res) => {
@@ -1329,10 +1435,65 @@ app.delete('/api/admin/chats/:sessionId', (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------------------------------------------------------------------------
+// Action queue — one Create PR / Deploy / Merge session at a time
+// ---------------------------------------------------------------------------
+
+// Turns a persisted queue entry back into a real running job. This is the only
+// place the queue knows anything about copilot/gh; everything it needs was
+// persisted with the entry, so it works just as well after a restart.
+async function runQueueEntry(entry) {
+  const repo = resolveRepo(entry.repo);
+  if (!repo) throw new Error(`repo "${entry.repo}" is no longer available under ${REPOS_ROOT}`);
+  const params = entry.params || {};
+  switch (entry.action) {
+    case 'work':
+      return launchWork({ repo, n: entry.issueNumber, mode: params.mode || 'allow-all' });
+    case 'deploy':
+      return launchDeploy({ repo, n: entry.issueNumber, prNumber: entry.prNumber });
+    case 'merge':
+      return launchMerge({ repo, n: entry.issueNumber, prNumber: entry.prNumber, force: Boolean(params.force) });
+    default:
+      throw new Error(`unknown queued action "${entry.action}"`);
+  }
+}
+
+const queueBoot = queue.init({
+  runner: runQueueEntry,
+  isRunning: (key) => {
+    const j = jobs.getJob(key);
+    return Boolean(j && j.status === 'running');
+  },
+  // Chat turns are deliberately NOT queued (they're short and interactive) but
+  // they do check out a branch on the repo's single shared working tree, so a
+  // queued Create PR/Deploy waits for one to finish before starting.
+  canStart: (entry) => !findOtherRepoBusyKey(entry.repo, entry.key),
+  onEvent: (type, entry) => console.log(`[queue] ${type}: ${entry.label} (${entry.key})`),
+});
+
+// The whole queue, running task first — backs the header's queue dropdown.
+app.get('/api/queue', (req, res) => {
+  res.json({ entries: queue.list() });
+});
+
+// Cancel a task that hasn't started yet. Running tasks keep using their own
+// action-specific /cancel endpoint, which actually kills the child process.
+app.post('/api/queue/:id/cancel', (req, res) => {
+  const out = queue.cancel(req.params.id);
+  if (!out.cancelled) return res.status(409).json({ error: out.reason, cancelled: false });
+  res.json({ ok: true, cancelled: true, entries: queue.list() });
+});
+
 app.listen(PORT, HOST, () => {
   console.log(`cloud-copilot running at http://${HOST}:${PORT}`);
   console.log(`Authorized repos root: ${REPOS_ROOT}`);
   console.log(`Copilot binary: ${COPILOT_BIN}`);
+  if (queueBoot.resumed || queueBoot.dropped) {
+    console.log(
+      `Action queue: resumed ${queueBoot.resumed} waiting task(s)` +
+        (queueBoot.dropped ? `, dropped ${queueBoot.dropped} interrupted task(s)` : ''),
+    );
+  }
   // Recover any admin turn that was still in-flight when the previous
   // process died (e.g. a chat turn triggered its own restart mid-reply) so
   // it shows up as an "interrupted" turn instead of silently vanishing.

@@ -178,6 +178,13 @@ function approvalFlags(mode) {
   }
 }
 
+// The AI model to use for every Copilot CLI invocation, configurable from the
+// homepage dropdown (persisted via store.setModel) and defaulting to
+// store.DEFAULT_MODEL otherwise.
+function modelFlags() {
+  return ['--model', store.getModel()];
+}
+
 // ---------------------------------------------------------------------------
 // Repo + issue listing
 // ---------------------------------------------------------------------------
@@ -190,6 +197,24 @@ app.get('/api/repos', (req, res) => {
     github: r.github,
   }));
   res.json({ root: REPOS_ROOT, repos });
+});
+
+// ---------------------------------------------------------------------------
+// Model selection — which AI model the Copilot CLI uses for every action
+// (Create PR, Deploy, chats, admin terminal). Configurable from the homepage
+// dropdown; persisted in data/state.json and applied via modelFlags() above.
+// ---------------------------------------------------------------------------
+app.get('/api/settings/model', (req, res) => {
+  res.json({ model: store.getModel(), models: store.AVAILABLE_MODELS, default: store.DEFAULT_MODEL });
+});
+
+app.post('/api/settings/model', (req, res) => {
+  const model = typeof req.body?.model === 'string' ? req.body.model.trim() : '';
+  if (!model) return res.status(400).json({ error: 'model is required' });
+  if (!store.AVAILABLE_MODELS.includes(model)) {
+    return res.status(400).json({ error: `unknown model "${model}"` });
+  }
+  res.json({ model: store.setModel(model) });
 });
 
 // ---------------------------------------------------------------------------
@@ -425,7 +450,7 @@ app.post('/api/repos/:name/preissues/:id/chat', async (req, res) => {
     `Reply conversationally, then ALWAYS end your reply with the current best draft as a ` +
     `fenced json block of the exact shape {"title": "...", "body": "..."} (a short, clear ` +
     `title and a body with motivation + concrete acceptance criteria).`;
-  args.push('-p', prompt, ...approvalFlags('default'));
+  args.push('-p', prompt, ...approvalFlags('default'), ...modelFlags());
 
   const job = jobs.startJob(key, {
     bin: COPILOT_BIN,
@@ -517,7 +542,7 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
     `Create a new branch, implement the change end-to-end until it is complete, ` +
     `commit, push, and open a pull request that closes #${n}. ` +
     `When finished, print the pull request URL on its own line.`;
-  const args = ['-p', prompt, ...approvalFlags(mode)];
+  const args = ['-p', prompt, ...approvalFlags(mode), ...modelFlags()];
 
   store.updateRecord(repo.name, n, (r) => {
     r.work.status = 'working';
@@ -688,7 +713,7 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
       `the number Apple actually assigned, which may differ from what was requested.`;
     // Deploy must reach files outside the repo (/tmp, ~/Library, keychain) and the
     // network, so grant full path + URL + tool access.
-    const args = ['-p', prompt, '--allow-all'];
+    const args = ['-p', prompt, '--allow-all', ...modelFlags()];
 
     const job = jobs.startJob(key, {
       bin: COPILOT_BIN,
@@ -1037,14 +1062,14 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
       `The branch for PR #${prNumber} is already checked out. Do NOT modify any files. ` +
       `Read the relevant code and propose a concrete plan for the following request, ` +
       `ending with a clear plan summary: ${message}`;
-    args.push('-p', prompt, ...approvalFlags('default'));
+    args.push('-p', prompt, ...approvalFlags('default'), ...modelFlags());
   } else {
     // Implement the plan from the resumed conversation, on the SAME branch.
     const prompt =
       `Implement the plan from our conversation for this request: ${message}\n\n` +
       `Commit and push the changes to the EXISTING branch for PR #${prNumber} ` +
       `(do not open a new PR, do not force-push). Confirm what you committed and pushed.`;
-    args.push('-p', prompt, '--allow-all');
+    args.push('-p', prompt, '--allow-all', ...modelFlags());
   }
 
   const job = jobs.startJob(key, {
@@ -1106,7 +1131,7 @@ app.post('/api/run', (req, res) => {
 
   const args = [];
   if (sessionId) args.push(`--resume=${sessionId}`);
-  args.push('-p', prompt, ...approvalFlags(mode));
+  args.push('-p', prompt, ...approvalFlags(mode), ...modelFlags());
 
   writeSseHead(res);
   runCopilotSSE({
@@ -1187,13 +1212,27 @@ app.post('/api/admin/chat', (req, res) => {
   const savedImages = saveUploadedImages(req.body?.images);
   const imageRefs = savedImages.map((img) => ({ url: img.url, name: img.name }));
   for (const img of savedImages) args.push('--attachment', img.path);
-  args.push('-p', message, ...approvalFlags(mode));
+  args.push('-p', message, ...approvalFlags(mode), ...modelFlags());
+
+  // Durably buffer this turn *before* spawning the child. If this very turn
+  // asks Copilot to redeploy (which restarts this server process), the
+  // `close` handler below never gets to run — without this pre-write, the
+  // whole turn would vanish with no trace. See store.startAdminTurn.
+  store.startAdminTurn(turnId, {
+    userText: message,
+    mode,
+    repo: repoName || null,
+    images: imageRefs,
+    sessionId,
+  });
 
   const job = jobs.startJob(key, {
     bin: COPILOT_BIN,
     args,
     cwd,
     meta: { action: 'admin', turnId, repo: repoName || null },
+    onSession: (sid) => store.updateAdminTurnProgress(turnId, { sessionId: sid }),
+    onProgress: (j) => store.updateAdminTurnProgress(turnId, { assistantText: j.conversation, sessionId: j.sessionId }),
     onDone: async (j) => {
       // The job manager captures the --resume=<id> session id from the stream.
       const sid = j.sessionId;
@@ -1206,6 +1245,8 @@ app.post('/api/admin/chat', (req, res) => {
           images: imageRefs,
         });
       }
+      // Turn completed normally — the buffered copy is no longer needed.
+      store.finishAdminTurn(turnId);
       return {
         action: 'admin',
         turnId,
@@ -1270,4 +1311,11 @@ app.listen(PORT, HOST, () => {
   console.log(`cloud-copilot running at http://${HOST}:${PORT}`);
   console.log(`Authorized repos root: ${REPOS_ROOT}`);
   console.log(`Copilot binary: ${COPILOT_BIN}`);
+  // Recover any admin turn that was still in-flight when the previous
+  // process died (e.g. a chat turn triggered its own restart mid-reply) so
+  // it shows up as an "interrupted" turn instead of silently vanishing.
+  const recovered = store.reconcileInterruptedAdminTurns();
+  if (recovered.length) {
+    console.log(`Recovered ${recovered.length} interrupted admin turn(s): ${recovered.map((r) => r.turnId).join(', ')}`);
+  }
 });

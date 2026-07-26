@@ -503,6 +503,10 @@
             <option value="default">Default</option>
           </select>
         </div>
+        <div class="mode-row">
+          model:
+          <select id="modelSel"><option value="">loading…</option></select>
+        </div>
         <div class="filter">
           <button id="filterBtn" class="ghost sm">⚙ Filter</button>
           <div id="filterMenu" class="filter-menu">
@@ -604,6 +608,7 @@
 const reposEl = document.getElementById('repos');
 const rootLine = document.getElementById('rootline');
 const modeSel = document.getElementById('mode');
+const modelSel = document.getElementById('modelSel');
 const filterBtn = document.getElementById('filterBtn');
 const filterMenu = document.getElementById('filterMenu');
 const filterList = document.getElementById('filterList');
@@ -753,6 +758,32 @@ async function renderPinnedSection() {
   }
   for (const c of cards) list.appendChild(c);
 }
+
+// ---- model selection --------------------------------------------------------
+async function loadModelSetting() {
+  try {
+    const { model, models } = await fetch('/api/settings/model').then((x) => x.json());
+    modelSel.innerHTML = models.map((m) => `<option value="${escape(m)}">${escape(m)}</option>`).join('');
+    modelSel.value = model;
+  } catch {
+    modelSel.innerHTML = '<option value="">(unavailable)</option>';
+  }
+}
+
+modelSel.addEventListener('change', async () => {
+  const prev = modelSel.value;
+  try {
+    const r = await fetch('/api/settings/model', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: modelSel.value }),
+    });
+    if (!r.ok) throw new Error((await r.json()).error || 'failed to save model');
+  } catch (err) {
+    alert(err.message || 'Failed to save model');
+    modelSel.value = prev;
+  }
+});
 
 // ---- repos ----------------------------------------------------------------
 async function loadRepos() {
@@ -2692,6 +2723,11 @@ function initAdminTerminal() {
   });
 
   let sessionId = null;
+  // The chat's stable storage key (server's adminChats[id]) — distinct from
+  // sessionId, which can be null for a turn recovered after an interrupted
+  // restart that died before Copilot assigned a session id. Always use
+  // currentChatId (not sessionId) to fetch/delete/highlight a conversation.
+  let currentChatId = null;
   let activeTurn = null; // { turnId, asstBody, raw } while a turn streams/reconnects
 
   const LS_ADMIN_TURN = 'cc.adminActiveTurn';
@@ -2778,7 +2814,7 @@ function initAdminTerminal() {
       historyListEl.innerHTML = '';
       chats.forEach((c) => {
         const item = document.createElement('button');
-        item.className = `admin-history-item${c.sessionId === sessionId ? ' active' : ''}`;
+        item.className = `admin-history-item${c.id === currentChatId ? ' active' : ''}`;
         item.innerHTML =
           `<span class="ahi-main"><span class="ahi-title"></span>` +
           `<div class="ahi-meta">${c.repo ? `📁 ${escape(c.repo)} · ` : ''}${c.messageCount} msgs · ${timeAgo(c.updatedAt)}</div></span>` +
@@ -2786,12 +2822,12 @@ function initAdminTerminal() {
         item.querySelector('.ahi-title').textContent = c.title || '(untitled)';
         item.addEventListener('click', (e) => {
           if (e.target.closest('.ahi-del')) return;
-          loadConversation(c.sessionId);
+          loadConversation(c.id);
         });
         item.querySelector('.ahi-del').addEventListener('click', async (e) => {
           e.stopPropagation();
-          await fetch(`/api/admin/chats/${encodeURIComponent(c.sessionId)}`, { method: 'DELETE' });
-          if (c.sessionId === sessionId) startNewConversation();
+          await fetch(`/api/admin/chats/${encodeURIComponent(c.id)}`, { method: 'DELETE' });
+          if (c.id === currentChatId) startNewConversation();
           loadHistoryList();
         });
         historyListEl.appendChild(item);
@@ -2820,6 +2856,7 @@ function initAdminTerminal() {
       const r = await fetch(`/api/admin/chats/${encodeURIComponent(id)}`);
       if (!r.ok) return;
       const chat = await r.json();
+      currentChatId = id;
       sessionId = chat.sessionId;
       setSelectedRepo(chat.repo || '');
       logEl.innerHTML = '';
@@ -2848,6 +2885,7 @@ function initAdminTerminal() {
   function startNewConversation() {
     cancelActiveTurn();
     sessionId = null;
+    currentChatId = null;
     logEl.innerHTML = `<div class="term-empty">${emptyStateHtml()}</div>`;
     statusEl.textContent = '';
   }
@@ -2916,11 +2954,24 @@ function initAdminTerminal() {
     if (status === 'aborted') html += '<p style="color:#eab308">[aborted]</p>';
     if (note) html += `<p class="err">[${escape(note)}]</p>`;
     asstBody.innerHTML = (html || '<p style="color:#9aa0aa">(no output)</p>') + footer;
-    if (finalSession) sessionId = finalSession;
+    if (finalSession) { sessionId = finalSession; currentChatId = finalSession; }
     localStorage.removeItem(LS_ADMIN_TURN);
     activeTurn = null;
     setSending(false);
     logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // A turn that died mid-flight (server restart) but got recovered by
+  // store.reconcileInterruptedAdminTurns is filed under `sessionId` (if the
+  // turn resumed an existing chat) or the synthetic `interrupted:<turnId>`
+  // key (if it was the very first message of a brand-new chat and no
+  // Copilot session id had been assigned yet). Compute that same key here so
+  // we can load and display the recovered transcript instead of leaving the
+  // user staring at a dead-end message.
+  async function tryLoadRecoveredChat(turnId) {
+    const candidateId = sessionId || `interrupted:${turnId}`;
+    await loadConversation(candidateId);
+    loadHistoryList();
   }
 
   // Pump one SSE stream (a fresh POST or a reconnect GET). Returns true if the
@@ -2945,7 +2996,12 @@ function initAdminTerminal() {
     } catch {
       return false; // dropped mid-stream — not terminal
     }
-    if (gone) { finishTurn(null, null, 'session no longer running — open history for the saved reply'); return true; }
+    if (gone) {
+      const turnId = activeTurn && activeTurn.turnId;
+      finishTurn(null, null, 'session no longer running — loading saved reply…');
+      if (turnId) await tryLoadRecoveredChat(turnId);
+      return true;
+    }
     if (status) { finishTurn(status, finalSession); return true; }
     return false; // stream ended with no result — treat as a drop, reconnect
   }
@@ -2963,7 +3019,11 @@ function initAdminTerminal() {
       if (!resp.ok || !resp.body) continue;
       if (await consumeStream(resp)) return;
     }
-    if (activeTurn) finishTurn('failed', null, 'reconnect timed out — open history to see the saved reply');
+    if (activeTurn) {
+      const turnId = activeTurn.turnId;
+      finishTurn('failed', null, 'reconnect timed out — loading saved reply…');
+      await tryLoadRecoveredChat(turnId);
+    }
   }
 
   async function send() {
@@ -3041,6 +3101,7 @@ function initAdminTerminal() {
 }
 
 loadRepos().then(route);
+loadModelSetting();
 </script>
 </body>
 </html>

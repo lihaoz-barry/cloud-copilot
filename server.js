@@ -245,21 +245,27 @@ app.post('/api/settings/model', (req, res) => {
 // ---------------------------------------------------------------------------
 
 const SERVER_STARTED_AT = new Date().toISOString();
-const SELF_DIR = (() => {
+// Identify this app's directory by (device, inode) rather than by path string:
+// on macOS `realpathSync` does NOT normalise case, so "/Users/me/repos/x" and
+// "/Users/me/Repos/x" are the same directory but different strings.
+const SELF_DIR_ID = (() => {
   try {
-    return fs.realpathSync(__dirname);
+    const s = fs.statSync(__dirname);
+    return `${s.dev}:${s.ino}`;
   } catch {
-    return __dirname;
+    return null;
   }
 })();
 
 // The repo under REPOS_ROOT whose working tree IS this app's directory, or
 // null when cloud-copilot is running from outside the authorized root.
 function findSelfRepo() {
+  if (!SELF_DIR_ID) return null;
   return (
     gh.listRepos(REPOS_ROOT).find((r) => {
       try {
-        return fs.realpathSync(r.path) === SELF_DIR;
+        const s = fs.statSync(r.path);
+        return `${s.dev}:${s.ino}` === SELF_DIR_ID;
       } catch {
         return false;
       }

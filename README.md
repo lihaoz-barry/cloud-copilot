@@ -34,8 +34,12 @@ your LAN/VPN. From your phone you can:
   aborted runs get their own state and can be re-run after a confirm
 - watch every run **stream live** in **collapsible per-action logs** (hidden by
   default), with success/failure shown **on the issue** and lifecycle timing cached
-- **one PR creation per repo at a time** — other issues in that repo are greyed out
-  while one is in progress, to avoid working-tree collisions
+- **many Create PR runs per repo, in parallel** — each run gets its own **git
+  worktree** (`<repo>-worktrees/issue-<n>`), so runs never fight over the main
+  working tree. Up to `MAX_CONCURRENT_WORK` (default **4**) run at once; the rest
+  wait in a **persistent FIFO queue** shown in a top-left **queue panel** with a
+  stop button per entry — see
+  [Concurrent Create PR runs](#concurrent-create-pr-runs-git-worktrees--queue) below
 
 This is a proof-of-concept for remotely driving a local coding-agent CLI from a web UI.
 
@@ -152,6 +156,50 @@ button), never on page load.
 fully closed. Phase 1 fires notifications from the page itself, which covers the
 "app backgrounded / screen briefly locked" case, not "app killed".
 
+### Concurrent Create PR runs (git worktrees + queue)
+
+Create PR no longer takes a per-repo lock. Every run gets its **own git
+worktree**, created as a sibling of the repo:
+
+```
+~/Repos/my-app                     # main working tree — untouched, stays on your branch
+~/Repos/my-app-worktrees/issue-42  # run for issue #42
+~/Repos/my-app-worktrees/issue-57  # run for issue #57, in parallel
+```
+
+- Each worktree is created with `git worktree add --detach <dir> origin/<default>`
+  after a `git fetch origin --prune`, so every run starts from a fresh base
+  regardless of what the main checkout is doing. Copilot runs with that directory
+  as its `cwd`, so it branches, commits, pushes and opens the PR from there.
+- **Concurrency cap**: `MAX_CONCURRENT_WORK` (default `4`). Requests beyond the
+  cap are **queued**, not rejected.
+- **The queue is persistent** (`data/queue.json`) — restart the server and the
+  still-queued runs are restored and resumed. Entries that were *running* when
+  the process died are dropped (their child processes died with it).
+- **Queue panel** (top-left, collapsible, only visible when something is
+  queued/running): one row per entry — `▶` for running, its position number for
+  queued — with a **⨯ stop** button that cancels a running job or removes a
+  queued one. Issue cards get a matching badge (`▶ running` / `⏳ 3`).
+- Deploy / Chat still take the **main** working tree, so they remain
+  one-at-a-time per repo and are blocked while any Create PR run is active.
+- **Cleanup**: a worktree is removed when its PR is merged through the UI, when
+  the issue is hidden, or when its run is aborted. On startup cloud-copilot runs
+  `git worktree prune` and deletes only *orphan* `issue-N` directories git no
+  longer knows about — worktrees you made by hand are adopted, never deleted.
+- `-worktrees` containers are explicitly skipped by the repo listing, so they
+  never show up as repos of their own.
+
+**Optional warm-up** — if a repo needs dependencies installed before an agent can
+work in a brand-new worktree, add a `worktree.setup` command to its
+`.cloud-copilot.json`:
+
+```json
+{ "worktree": { "setup": "npm ci" } }
+```
+
+It runs once, inside the new worktree, right after creation (10-minute timeout).
+A failing setup is logged but does not abort the run.
+
 ### Per-repo deploy config (`.cloud-copilot.json`)
 
 Deploy is dispatched per-repo. Drop a `.cloud-copilot.json` at a repo's root:
@@ -213,11 +261,13 @@ pipeline you get:
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
 | GET  | `/api/repos` | List git repos under `REPOS_ROOT` (with remotes). |
-| GET  | `/api/repos/:name/issues[?refresh=1]` | List open issues (cached 5 min) merged with local status; includes `activeWorkIssues` (repo lock). Also auto-discovers and persists PRs referencing these issues (one whole-repo `gh pr list`, cached 5 min, `?refresh=1` bypasses it too). |
+| GET  | `/api/repos/:name/issues[?refresh=1]` | List open issues (cached 5 min) merged with local status; includes `activeWorkIssues` (issues with a running Create PR), `queuedWork`, `treeBusyIssue` (the shared working-tree lock) and `maxConcurrentWork`. Also auto-discovers and persists PRs referencing these issues (one whole-repo `gh pr list`, cached 5 min, `?refresh=1` bypasses it too). |
 | GET  | `/api/repos/:name/issues/:n/record` | Full stored record (work + per-PR deploy/merge, transcripts, `live` flags). |
 | GET  | `/api/repos/:name/issues/:n/prs` | Force-refresh the PR list for one issue from GitHub — always live, bypasses the whole-repo PR cache. |
-| POST | `/api/repos/:name/issues/:n/work` | **Create PR** — SSE stream. Body: `{ "mode": "allow-all" }`. |
-| POST | `/api/repos/:name/issues/:n/work/cancel` | Abort the running PR creation. |
+| POST | `/api/repos/:name/issues/:n/work` | **Create PR** — SSE stream. Body: `{ "mode": "allow-all" }`. Runs in a dedicated git worktree; emits `queued` and waits if the concurrency cap is reached. |
+| POST | `/api/repos/:name/issues/:n/work/cancel` | Abort the running PR creation, or drop it from the queue. |
+| GET  | `/api/queue` | Current Create PR queue — `{ maxConcurrent, runningCount, queuedCount, items }` (running first, then queued in FIFO order). |
+| POST | `/api/queue/:id/cancel` | Stop one queue entry by id — cancels it if running, dequeues it if waiting. |
 | POST | `/api/repos/:name/issues/:n/deploy/:pr` | **Deploy a specific PR** — SSE stream. Dispatched per the repo's `.cloud-copilot.json`. |
 | POST | `/api/repos/:name/issues/:n/deploy/:pr/cancel` | Abort the running deploy for that PR. |
 | POST | `/api/repos/:name/issues/:n/merge/:pr` | **Merge a specific PR** — SSE stream. Body: `{ "force": false }`. Blocked unless Deploy succeeded, unless `force: true`. |
@@ -230,8 +280,13 @@ pipeline you get:
 
 `meta` (command) → `chunk` (`{stream,text}` streamed output) → `session`
 (`{sessionId}`) → `result` (`{action,status,prUrl?,prNumber?}`, where `status` is
-`success`/`failed`/`aborted`, or `blocked` when the repo lock rejects a second
-Create PR, or Merge is attempted before Deploy has succeeded) → `done` (`{exitCode}`).
+`success`/`failed`/`aborted`, or `blocked` when a Deploy/Chat is rejected because
+the repo's working tree is busy, a queued Create PR is stopped, or Merge is
+attempted before Deploy has succeeded) → `done` (`{exitCode}`).
+
+A Create PR that has to wait for a free slot first emits `queued`
+(`{position, queueId, maxConcurrent}`) and keeps the connection open; `meta`
+follows once it actually starts.
 
 ---
 
@@ -333,6 +388,7 @@ the HTTP connection that started them:
 | `session` | `{ sessionId }`                                      | As soon as the session id is parsed from Copilot's stderr. |
 | `chunk`   | `{ stream: "stdout"\|"stderr", text }`               | Repeatedly — streamed output as it arrives. |
 | `result`  | `{ action, status, prUrl?, prNumber?, exitCode }`    | Once when an issue action finishes — the persisted outcome. |
+| `queued`  | `{ position, queueId, maxConcurrent }`               | When a Create PR has to wait for a free concurrency slot. |
 | `error`   | `{ message }`                                        | If the CLI can't be spawned. |
 | `done`    | `{ exitCode, sessionId }`                            | Once at the end. |
 
@@ -383,6 +439,7 @@ Other optional env vars:
 | `GH_BIN`     | `gh`           | Path/name of the GitHub CLI              |
 | `PORT`       | `8787`         | Port to listen on                        |
 | `HOST`       | `0.0.0.0`      | Bind address (`127.0.0.1` for local-only)|
+| `MAX_CONCURRENT_WORK` | `4`   | How many Create PR runs may execute at once (each in its own git worktree); the rest queue up |
 
 ---
 
@@ -448,6 +505,8 @@ cloud-copilot/
 │   ├── gh.js           # enumerate repos, list issues/PRs/single-PR via `gh` (cached)
 │   ├── store.js        # per-issue status persisted to data/state.json
 │   ├── jobs.js         # durable job manager: child outlives the browser connection
+│   ├── queue.js        # persistent FIFO Create PR queue (data/queue.json, cap 4)
+│   ├── worktree.js     # per-issue git worktrees: create/validate/remove/GC + setup hook
 │   ├── runner.js       # spawn copilot, stream SSE, capture transcript + session id
 │   └── repoConfig.js   # loads a repo's .cloud-copilot.json (or auto-detects iOS)
 ├── public/
@@ -459,7 +518,18 @@ cloud-copilot/
 │   └── sounds/         # success + failure chimes (generated)
 ├── scripts/
 │   └── gen-assets.js   # regenerates public/icons + public/sounds (no deps)
-├── data/               # state.json (gitignored)
+├── test/               # `npm test` (node:test) — worktrees, queue, repo listing
+├── data/               # state.json + queue.json (gitignored)
 ├── .gitignore
 └── README.md
 ```
+
+### Tests
+
+```bash
+npm test          # node --test test/*.test.js — no extra dependencies
+```
+
+Covers git-worktree lifecycle (create / reuse / parallel / remove / GC), the
+persistent work queue (FIFO, concurrency cap, restart recovery), and the
+guarantee that `-worktrees` containers are never listed as repos.

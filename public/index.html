@@ -315,13 +315,61 @@
     .issue.fail .issue-num { color: #b91c1c; font-weight: 700; }
 
     /* blocked while another PR-creation runs in the same repo */
-    .issue.blocked { opacity: .45; }
-    .issue.blocked .actions, .issue.blocked .prlist { pointer-events: none; }
+    /* A repo's shared working tree is busy (Deploy/Chat elsewhere): only those
+       actions are held back. Create PR runs in its own worktree and stays live. */
+    .issue.blocked .prlist { opacity: .45; pointer-events: none; }
     .blocked-note { color: #a16207; font-size: .72rem; padding: 2px 4px; display: none; }
     .issue.blocked .blocked-note { display: block; }
 
+    /* Create PR queue badge on an issue card */
+    .qbadge {
+      display: none; align-items: center; gap: 3px; font-size: .72rem; font-weight: 700;
+      padding: 1px 7px; border-radius: 999px; border: 1px solid #8884; white-space: nowrap;
+    }
+    .qbadge.show { display: inline-flex; }
+    .qbadge.queued { background: #a1620722; color: #a16207; }
+    .qbadge.running { background: #16a34a22; color: #16a34a; }
+
     .pritem { display: flex; flex-direction: column; gap: 6px; }
     .prlog { margin-top: 0; }
+
+    /* ---- Create PR queue panel (fixed, top-left) ------------------------- */
+    .queue-panel {
+      position: fixed; top: 10px; left: 10px; z-index: 70; width: 230px; max-width: 46vw;
+      border-radius: 12px; border: 1px solid #8884; padding: 6px 8px;
+      background: color-mix(in srgb, Canvas 86%, transparent);
+      backdrop-filter: saturate(1.6) blur(12px); -webkit-backdrop-filter: saturate(1.6) blur(12px);
+      box-shadow: 0 6px 24px #0005; font-size: .74rem;
+    }
+    .queue-head { display: flex; align-items: center; gap: 6px; }
+    .queue-title { font-weight: 700; }
+    .queue-count { opacity: .65; margin-left: auto; }
+    .queue-toggle {
+      background: transparent; border: none; color: inherit; font: inherit; cursor: pointer;
+      padding: 0 2px; opacity: .7;
+    }
+    .queue-items { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+    .queue-panel.collapsed .queue-items { display: none; }
+    .qitem {
+      display: flex; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 8px;
+      background: color-mix(in srgb, CanvasText 7%, transparent);
+    }
+    .qitem .qpos {
+      min-width: 20px; text-align: center; font-weight: 700; font-size: .7rem;
+      padding: 1px 4px; border-radius: 6px;
+    }
+    .qitem.running .qpos { background: #16a34a33; color: #16a34a; }
+    .qitem.queued .qpos { background: #a1620733; color: #a16207; }
+    .qitem .qtext { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .qitem .qrepo { opacity: .6; }
+    .qitem .qstop {
+      background: transparent; border: none; color: #dc2626; cursor: pointer; font: inherit;
+      padding: 0 2px; line-height: 1;
+    }
+    .qitem .qstop:disabled { opacity: .4; cursor: default; }
+    @media (max-width: 560px) {
+      .queue-panel { width: 168px; font-size: .68rem; }
+    }
 
     /* ---- floating top nav switcher (Home / Admin / TestFlight) ------------ */
     body { padding-top: 60px; }
@@ -521,6 +569,17 @@
   </style>
 </head>
 <body>
+  <!-- Create PR queue: what's running right now and what's waiting, with a
+       stop button on every entry. Fixed top-left, always visible. -->
+  <aside id="queuePanel" class="queue-panel" hidden>
+    <div class="queue-head">
+      <span class="queue-title">⏳ Create PR queue</span>
+      <span class="queue-count" id="queueCount"></span>
+      <button class="queue-toggle" id="queueToggle" title="Collapse / expand">▾</button>
+    </div>
+    <div class="queue-items" id="queueItems"></div>
+  </aside>
+
   <nav class="navbar">
     <button class="nav-tab active" data-tab="home">🏠 Home</button>
     <button class="nav-tab" data-tab="admin">⌨️ Admin</button>
@@ -680,18 +739,107 @@ const filterList = document.getElementById('filterList');
 const enc = encodeURIComponent;
 
 const STATE_LABEL = {
-  work:   { idle: 'Create PR', working: 'Creating PR…', success: 'PR created', failed: 'PR failed', aborted: 'PR aborted' },
+  work:   { idle: 'Create PR', queued: 'Queued…', working: 'Creating PR…', success: 'PR created', failed: 'PR failed', aborted: 'PR aborted' },
   deploy: { idle: 'Deploy', deploying: 'Deploying…', success: 'Deployed', failed: 'Deploy failed', aborted: 'Aborted' },
   merge:  { idle: 'Merge', merging: 'Merging…', success: 'Merged', failed: 'Merge failed', aborted: 'Merge aborted' },
 };
 const STATE_CLASS = {
-  idle: 'st-idle', working: 'st-working', deploying: 'st-deploying', merging: 'st-merging',
+  idle: 'st-idle', queued: 'st-working', working: 'st-working', deploying: 'st-deploying', merging: 'st-merging',
   success: 'st-success', failed: 'st-failed', aborted: 'st-failed',
 };
 const CHEV_CLASS = {
-  idle: 'chev-idle', working: 'chev-working', deploying: 'chev-deploying', merging: 'chev-merging',
+  idle: 'chev-idle', queued: 'chev-working', working: 'chev-working', deploying: 'chev-deploying', merging: 'chev-merging',
   success: 'chev-success', failed: 'chev-failed', aborted: 'chev-aborted',
 };
+
+// ---- Create PR queue -------------------------------------------------------
+// Create PR runs are concurrent (each gets its own git worktree) but capped by
+// the server's MAX_CONCURRENT_WORK; the rest wait in a persistent FIFO queue.
+// This panel polls that queue, mirrors each entry's position onto its issue
+// card, and offers a stop button that cancels running *and* queued entries.
+const queuePanel = document.getElementById('queuePanel');
+const queueItemsEl = document.getElementById('queueItems');
+const queueCountEl = document.getElementById('queueCount');
+const queueToggle = document.getElementById('queueToggle');
+
+// Issue cards register here so their ⏳ badge can be updated from the poll.
+// Entries are keyed by repo#issue and pruned once their DOM node is detached
+// (the repo list re-renders on every refresh).
+const queueBadges = new Map(); // "repo#n" -> Set<{ el, apply }>
+function queueBadgeKey(repoName, issueNumber) { return `${repoName}#${issueNumber}`; }
+function registerQueueBadge(repoName, issueNumber, el, apply) {
+  const k = queueBadgeKey(repoName, issueNumber);
+  if (!queueBadges.has(k)) queueBadges.set(k, new Set());
+  queueBadges.get(k).add({ el, apply });
+}
+function eachQueueBadge(fn) {
+  for (const [k, set] of queueBadges) {
+    for (const entry of set) {
+      if (!entry.el.isConnected) { set.delete(entry); continue; }
+      fn(k, entry);
+    }
+    if (!set.size) queueBadges.delete(k);
+  }
+}
+
+queueToggle?.addEventListener('click', () => {
+  queuePanel.classList.toggle('collapsed');
+  queueToggle.textContent = queuePanel.classList.contains('collapsed') ? '▸' : '▾';
+});
+
+async function cancelQueueItem(id, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    await fetch(`/api/queue/${enc(id)}/cancel`, { method: 'POST' });
+  } catch { /* ignore — the next poll re-syncs */ }
+  refreshQueue();
+}
+
+function renderQueue(data) {
+  const items = (data && data.items) || [];
+  queuePanel.hidden = items.length === 0;
+  if (!items.length) {
+    queueItemsEl.innerHTML = '';
+    eachQueueBadge((_k, entry) => entry.apply(null));
+    return;
+  }
+  const running = items.filter((i) => i.status === 'running').length;
+  queueCountEl.textContent = `${running}/${data.maxConcurrent} running`;
+
+  queueItemsEl.innerHTML = '';
+  for (const it of items) {
+    const row = document.createElement('div');
+    row.className = `qitem ${it.status}`;
+    const pos = document.createElement('span');
+    pos.className = 'qpos';
+    pos.textContent = it.status === 'running' ? '▶' : String(it.position ?? '');
+    const text = document.createElement('span');
+    text.className = 'qtext';
+    text.innerHTML = `<span class="qrepo">${escape(it.repo)}</span> #${it.issueNumber} ${escape(it.title || '')}`;
+    text.title = `${it.repo} #${it.issueNumber} ${it.title || ''}`;
+    const stop = document.createElement('button');
+    stop.className = 'qstop';
+    stop.textContent = '⨯';
+    stop.title = it.status === 'running' ? 'Cancel this run' : 'Remove from the queue';
+    stop.addEventListener('click', () => cancelQueueItem(it.id, stop));
+    row.append(pos, text, stop);
+    queueItemsEl.appendChild(row);
+  }
+
+  // Mirror onto the issue cards.
+  const byIssue = new Map();
+  for (const it of items) byIssue.set(queueBadgeKey(it.repo, it.issueNumber), it);
+  eachQueueBadge((k, entry) => entry.apply(byIssue.get(k) || null));
+}
+
+async function refreshQueue() {
+  try {
+    const d = await fetch('/api/queue').then((r) => r.json());
+    renderQueue(d);
+  } catch { /* offline — try again next tick */ }
+}
+refreshQueue();
+setInterval(refreshQueue, 3000);
 
 // ---- pipeline auto-run depth (persisted in localStorage) -------------------
 const LS_DEPTH = 'cc.pipelineDepth';
@@ -888,7 +1036,7 @@ async function renderPinnedSection() {
       const data = await fetch(`/api/repos/${enc(pin.repo)}/issues`).then((x) => x.json());
       const issue = (data.issues || []).find((i) => i.number === pin.issueNumber);
       if (!issue) continue;
-      const repoCtx = createRepoCtx((data.activeWorkIssues && data.activeWorkIssues[0]) ?? null);
+      const repoCtx = createRepoCtx(data.treeBusyIssue ?? null);
       cards.push(renderIssue(repoObj, issue, repoCtx, { pinned: true }));
     } catch { /* ignore — that repo/issue just won't show up in the pinned list */ }
   }
@@ -1005,19 +1153,21 @@ async function loadIssues(repo, body, force = false) {
   // Per-repo context enforcing "one working-tree action (Create PR / Deploy /
   // Chat) at a time" and greying out everything else in this repo while one
   // is in progress.
-  const repoCtx = createRepoCtx((data.activeWorkIssues && data.activeWorkIssues[0]) ?? null);
+  const repoCtx = createRepoCtx(data.treeBusyIssue ?? null);
 
   for (const issue of data.issues) body.appendChild(renderIssue(repo, issue, repoCtx));
   repoCtx.update();
 }
 
-// Shared per-repo lock context: only one working-tree action (Create PR,
-// Deploy, or Chat) may be active per repo at a time; every other issue/PR in
-// that repo gets greyed out (`setBlocked`) while one is running. Used by the
-// repo list, the Pinned section, and the PR detail page alike, seeded from
-// the same `activeWorkIssues` field the server already returns — so a
-// pinned/detail card correctly starts greyed out if something else in that
-// repo is already busy, instead of the old no-op stub that never blocked.
+// Shared per-repo lock context. Only ONE shared-working-tree action (Deploy or
+// Chat) may be active per repo at a time, so those get greyed out on every
+// other issue while one runs (`setBlocked`).
+//
+// Create PR is deliberately exempt: each run gets its own git worktree, so any
+// number of issues in the same repo can be worked on at once (capped by the
+// server-side queue). Seeded from `treeBusyIssue`, which the server computes
+// from the shared-tree lock — `activeWorkIssues` is now just the list of
+// running Create PR jobs and never blocks anything.
 function createRepoCtx(initialBusyIssue) {
   return {
     activeWorkIssue: initialBusyIssue ?? null,
@@ -1043,6 +1193,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       <div class="issue-toprow">
         ${opts.pinned ? `<span class="repo-badge">${escape(repo.name)}</span>` : ''}
         <span class="issue-num">#${issue.number}</span>
+        <span class="qbadge"></span>
         <span class="spacer"></span>
         <button class="pinbtn" title="Pin to top">📌</button>
         <a class="ghlink" target="_blank" rel="noopener">↗ GitHub</a>
@@ -1054,7 +1205,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     </div>
     <div class="actions"></div>
     <div class="worklog panel"></div>
-    <div class="blocked-note">⏸ Waiting — another PR creation is running in this repo…</div>
+    <div class="blocked-note">⏸ Waiting — a Deploy or chat is using this repo's working tree…</div>
     <div class="prlist"></div>`;
 
   const actions = el.querySelector('.actions');
@@ -1062,6 +1213,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   const worklog = el.querySelector('.worklog');
   const ghLink = el.querySelector('.ghlink');
   const hideBtn = el.querySelector('.hidebtn');
+  const qbadge = el.querySelector('.qbadge');
   ghLink.href = issue.url;
   hideBtn.addEventListener('click', () => onHide('Remove this issue from the list?'));
 
@@ -1134,6 +1286,8 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
 
   // Register with the repo-level lock so we can be greyed out / re-enabled.
   repoCtx.issues.push({ issueNumber: issue.number, setBlocked });
+  // Register for live queue-position updates (⏳ 2 / ▶ running badge).
+  registerQueueBadge(repo.name, issue.number, el, setQueueBadge);
 
   // Re-attach to any jobs still running server-side after a reload/reconnect.
   // IMPORTANT: go through reconcile*(), which checks the server's live-job
@@ -1144,28 +1298,49 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   // brand-new copilot/deploy run. Rendering the same issue twice (e.g. once
   // pinned, once in the repo list) doubles this risk, which is how a single
   // stuck "Creating PR…" turned into two real duplicate PRs (#109 and #110).
-  if (st.work.status === 'working') reconcileWork();
+  if (st.work.status === 'working' || st.work.status === 'queued') reconcileWork();
   for (const pr of st.prs) {
     if (pr.deploy && pr.deploy.status === 'deploying') reconcileDeploy(pr.prNumber);
     if (pr.merge && pr.merge.status === 'merging') reconcileMerge(pr.prNumber);
   }
 
   // --- blocking -------------------------------------------------------------
+  // Only the SHARED working tree is contended (Deploy / Chat). Create PR runs
+  // in its own git worktree, so its button is never disabled by another issue.
   function setBlocked(blocked) {
     el.classList.toggle('blocked', blocked);
-    workBtn.disabled = blocked;
     refreshPrsBtn.disabled = blocked;
+  }
+
+  // --- queue badge ----------------------------------------------------------
+  // `item` is this issue's entry in the server-side Create PR queue, or null.
+  function setQueueBadge(item) {
+    if (!item) {
+      qbadge.className = 'qbadge';
+      qbadge.textContent = '';
+      return;
+    }
+    if (item.status === 'running') {
+      qbadge.className = 'qbadge running show';
+      qbadge.textContent = '▶ running';
+      qbadge.title = 'Create PR is running in its own worktree';
+    } else {
+      qbadge.className = 'qbadge queued show';
+      qbadge.textContent = `⏳ ${item.position ?? ''}`;
+      qbadge.title = `Waiting in the Create PR queue — position ${item.position}`;
+    }
   }
 
   // --- Create PR visuals: success/fail shown ON THE ISSUE, not the button ---
   function paintWork(status) {
-    const visual = status === 'working' ? 'working' : 'idle'; // button stays "Create PR"
+    // The button stays "Create PR" except while it's queued/running.
+    const visual = status === 'working' || status === 'queued' ? status : 'idle';
     paintBtn(workBtn, 'work', visual, st.work);
     el.classList.toggle('ok', status === 'success');
     el.classList.toggle('fail', status === 'failed' || status === 'aborted');
-    const hasLog = status === 'working' || status === 'success' || status === 'failed' || status === 'aborted' || st.work.hasConversation;
+    const hasLog = status === 'working' || status === 'queued' || status === 'success' || status === 'failed' || status === 'aborted' || st.work.hasConversation;
     workLogBtn.hidden = !hasLog;
-    workAbortBtn.hidden = status !== 'working';
+    workAbortBtn.hidden = status !== 'working' && status !== 'queued';
     updateAllPrWorkTimings();
   }
 
@@ -1456,23 +1631,26 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   // --- Create PR flow -------------------------------------------------------
   async function onWork() {
     const s = st.work.status;
-    if (s === 'working') return void worklog.classList.toggle('show');
-    // Enforce the repo-level lock on the client too.
-    if (repoCtx.activeWorkIssue != null && repoCtx.activeWorkIssue !== issue.number) return;
-    st.work.status = 'working';
-    paintWork('working');
+    if (s === 'working' || s === 'queued') return void worklog.classList.toggle('show');
+    // No repo-level lock any more: Create PR runs in its own git worktree, so
+    // several issues in one repo can be in flight at once. The server-side
+    // queue caps how many actually run concurrently.
+    st.work.status = 'queued';
+    paintWork('queued');
     await streamWork(false);
   }
 
   async function onWorkAbort() {
-    if (st.work.status !== 'working') return;
-    if (!window.confirm(`Abort creating PR for issue #${issue.number}?`)) return;
+    if (st.work.status !== 'working' && st.work.status !== 'queued') return;
+    const verb = st.work.status === 'queued' ? 'Remove queued PR creation for' : 'Abort creating PR for';
+    if (!window.confirm(`${verb} issue #${issue.number}?`)) return;
     appendWork('\n[abort requested…]\n', 'stderr');
     try {
       await fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/work/cancel`, { method: 'POST' });
     } catch (e) {
       appendWork(`\n[abort failed: ${e.message}]\n`, 'err');
     }
+    refreshQueue();
   }
 
   async function streamWork(reconnect) {
@@ -1482,11 +1660,24 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     try {
       const resp = await fetch(url, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: modeSel.value }),
+        body: JSON.stringify({ mode: modeSel.value, title: issue.title }),
       });
       if (!resp.ok || !resp.body) { appendWork(`\n[error] HTTP ${resp.status}\n`, 'err'); return reconcileWork(); }
       await pumpSSE(resp, {
-        onMeta: () => repoCtx.setActive(issue.number),
+        // The request stays open while queued; `queued` arrives first, then the
+        // normal meta/chunk stream once this run actually starts.
+        onQueued: (d) => {
+          if (st.work.status === 'working') return; // already running
+          st.work.status = 'queued';
+          paintWork('queued');
+          appendWork(`\n[queued] position ${d.position} (max ${d.maxConcurrent} concurrent)\n`, 'stderr');
+          refreshQueue();
+        },
+        onMeta: () => {
+          st.work.status = 'working';
+          paintWork('working');
+          refreshQueue();
+        },
         onChunk: (t, s) => appendWork(t, s === 'stderr' ? 'stderr' : null),
         onError: (m) => appendWork(`\n[error] ${m}\n`, 'err'),
         onResult: (d) => { finalStatus = d.status; resultData = d; },
@@ -1501,6 +1692,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       paintWork('idle');
       worklog.classList.add('show');
       appendWork(`\n${resultData.message || 'blocked'}\n`, 'err');
+      refreshQueue();
       return;
     }
     if (finalStatus) {
@@ -1509,7 +1701,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       paintWork(finalStatus);
       if (resultData && resultData.prNumber) upsertLocalPr({ prNumber: resultData.prNumber, prUrl: resultData.prUrl });
       appendWork(`\n[work] finished: ${finalStatus}\n`, finalStatus === 'success' ? 'ok' : 'err');
-      repoCtx.clearActive(issue.number);
+      refreshQueue();
       // Auto-run depth: a successful Create PR keeps going into Deploy (and
       // from there possibly Merge) unless depth is "Create PR only".
       if (finalStatus === 'success' && resultData && resultData.prNumber && pipelineDepth() !== 'pr') {
@@ -1528,16 +1720,21 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       if (s === 'success' || s === 'failed' || s === 'aborted') {
         st.work.status = s; st.work.hasConversation = true; paintWork(s); syncPrsFromRecord(rec);
         appendWork(`\n[work] finished: ${s}\n`, s === 'success' ? 'ok' : 'err');
-        repoCtx.clearActive(issue.number);
         if (window.CCNotify) CCNotify.jobFinished(notifyWork({ status: s, replayed: true }));
         if (s === 'success' && rec.work.prNumber && pipelineDepth() !== 'pr') onDeploy(rec.work.prNumber);
         return;
       }
-      if (rec.live && rec.live.work) { repoCtx.setActive(issue.number); return streamWork(true); }
+      if (rec.live && rec.live.work) return streamWork(true);
+      // Still waiting in the queue — keep watching indefinitely rather than
+      // timing out just because the line is long.
+      if (rec.live && rec.live.queued) {
+        st.work.status = 'queued';
+        paintWork('queued');
+        i = 0;
+      }
       await sleep(3000);
     }
     appendWork(`\n[work] status check timed out — tap Create PR again to re-check.\n`, 'stderr');
-    repoCtx.clearActive(issue.number);
   }
 
   // --- Deploy flow (per PR) -------------------------------------------------
@@ -1842,7 +2039,7 @@ async function friendlyHttpError(resp) {
 // lib/jobs.js, which always emits a `meta` event carrying the job's current
 // status before replaying anything — so this one place can announce completion
 // for *every* action type instead of each button rolling its own.
-async function pumpSSE(resp, { onChunk, onError, onResult, onMeta, notify }) {
+async function pumpSSE(resp, { onChunk, onError, onResult, onMeta, onQueued, notify }) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
@@ -1860,6 +2057,9 @@ async function pumpSSE(resp, { onChunk, onError, onResult, onMeta, notify }) {
       const evt = parseEvent(raw);
       if (!evt) continue;
       if (evt.event === 'chunk') onChunk && onChunk(evt.data.text, evt.data.stream);
+      // The run is waiting its turn in the Create PR queue; the connection
+      // stays open and the normal meta/chunk events follow once it starts.
+      else if (evt.event === 'queued') onQueued && onQueued(evt.data);
       else if (evt.event === 'meta') {
         if (evt.data && evt.data.status === 'done') replayed = true;
         else if (notify && window.CCNotify) CCNotify.watch(notify);
@@ -2289,7 +2489,7 @@ async function renderPrDetail(repoName, issueNumber, prNumber) {
   back.textContent = '← Back to all repos';
   prDetailView.appendChild(back);
 
-  const repoCtx = createRepoCtx((issuesData.activeWorkIssues && issuesData.activeWorkIssues[0]) ?? null);
+  const repoCtx = createRepoCtx(issuesData.treeBusyIssue ?? null);
   prDetailView.appendChild(renderIssue(repoObj, issue, repoCtx, { pinned: true }));
 
   const extra = document.createElement('div');

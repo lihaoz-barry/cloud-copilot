@@ -25,6 +25,8 @@ const express = require('express');
 const store = require('./lib/store');
 const gh = require('./lib/gh');
 const repoConfig = require('./lib/repoConfig');
+const worktree = require('./lib/worktree');
+const { WorkQueue, DEFAULT_MAX_CONCURRENT } = require('./lib/queue');
 const { runCopilotSSE, writeSseHead } = require('./lib/runner');
 const jobs = require('./lib/jobs');
 const { UPLOADS_DIR, saveUploadedImages, cleanupOldUploads } = require('./lib/attachments');
@@ -32,6 +34,12 @@ const { UPLOADS_DIR, saveUploadedImages, cleanupOldUploads } = require('./lib/at
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 8787);
 const REPOS_ROOT = process.env.REPOS_ROOT || path.join(os.homedir(), 'repos');
+// How many Create PR runs may execute at once. Each one owns a private git
+// worktree, so they don't collide — this cap is purely about machine load.
+const MAX_CONCURRENT_WORK = Math.max(
+  1,
+  Number(process.env.MAX_CONCURRENT_WORK) || DEFAULT_MAX_CONCURRENT,
+);
 
 // ---------------------------------------------------------------------------
 // Locate the Copilot CLI binary without requiring COPILOT_BIN / PATH fiddling.
@@ -122,32 +130,66 @@ function resolveRepo(name) {
   return repos.find((r) => r.name === name) || null;
 }
 
-// Actions that check out a branch on a repo's single shared working tree —
-// Create PR, Deploy, and Chat (even "plan" mode checks out the PR's branch) —
-// must be mutually exclusive per repo, or concurrent runs collide on the same
-// checkout. Merge is excluded: it only calls `gh pr merge` via the API, no
-// local checkout involved.
-const WORKING_TREE_ACTION_RE = /^(\d+):(work|deploy|chat)(?::(\d+))?$/;
+// Job-key grammar: "<issue>:<action>[:<prNumber>]" (the "<repo>#" prefix is
+// stripped before matching).
+const ACTION_KEY_RE = /^(\d+):(work|deploy|chat)(?::(\d+))?$/;
 
-// First OTHER running job (excluding `excludeKey`) that touches this repo's
-// shared working tree, or null. Used to block a second such action from
-// starting concurrently.
-function findOtherRepoBusyKey(repoName, excludeKey) {
+// Actions that check out a branch on a repo's SHARED working tree (`repo.path`)
+// — Deploy and Chat (even "plan" mode checks out the PR's branch) — must be
+// mutually exclusive per repo, or concurrent runs collide on the same checkout.
+// Merge is excluded: it only calls `gh pr merge` via the API, no local checkout
+// involved.
+//
+// Create PR ("work") is deliberately NOT in this set any more: every work run
+// gets its own git worktree (see lib/worktree.js), so N of them run side by
+// side without ever checking anything out in `repo.path`.
+const WORKING_TREE_ACTIONS = new Set(['deploy', 'chat']);
+
+// What blocks a shared-tree action from starting. Work runs no longer take the
+// shared-tree lock, but they still drive `git fetch` / branch creation / push
+// against the same object store, so starting a Deploy or Chat next to one is
+// still refused — work remains a blocker even though it is no longer blocked.
+const BLOCKING_ACTIONS = new Set(['work', ...WORKING_TREE_ACTIONS]);
+
+function parseActionKey(repoName, key) {
   const prefix = `${repoName}#`;
+  if (!key.startsWith(prefix)) return null;
+  const m = key.slice(prefix.length).match(ACTION_KEY_RE);
+  if (!m) return null;
+  return { issueNumber: Number(m[1]), action: m[2], prNumber: m[3] ? Number(m[3]) : null };
+}
+
+// First OTHER running job (excluding `excludeKey`) that would collide with a
+// shared-working-tree action in this repo, or null.
+function findOtherRepoBusyKey(repoName, excludeKey) {
   for (const k of jobs.runningKeys()) {
-    if (!k.startsWith(prefix) || k === excludeKey) continue;
-    if (WORKING_TREE_ACTION_RE.test(k.slice(prefix.length))) return k;
+    if (k === excludeKey) continue;
+    const parsed = parseActionKey(repoName, k);
+    if (parsed && BLOCKING_ACTIONS.has(parsed.action)) return k;
   }
   return null;
 }
 
 // The issue number behind a repo's current working-tree-touching job, if any
-// — used by the issues list so the client can grey out other issues/PRs.
+// — used by the issues list so the client can grey out other issues' Deploy /
+// Chat actions (Create PR is never greyed out any more).
 function repoBusyIssueNumber(repoName) {
   const k = findOtherRepoBusyKey(repoName, null);
   if (!k) return null;
-  const m = k.slice(repoName.length + 1).match(WORKING_TREE_ACTION_RE);
-  return m ? Number(m[1]) : null;
+  const parsed = parseActionKey(repoName, k);
+  return parsed ? parsed.issueNumber : null;
+}
+
+// Issue numbers of every Create PR run currently executing in a repo. Unlike
+// `repoBusyIssueNumber` this is a genuine list — several may run at once — and
+// it's informational (a "running" badge), not a lock.
+function activeWorkIssueNumbers(repoName) {
+  const out = [];
+  for (const k of jobs.runningKeys()) {
+    const parsed = parseActionKey(repoName, k);
+    if (parsed && parsed.action === 'work') out.push(parsed.issueNumber);
+  }
+  return out.sort((a, b) => a - b);
 }
 
 const BUSY_ACTION_LABEL = { work: 'a Create PR run', deploy: 'a Deploy', chat: 'a chat turn' };
@@ -155,12 +197,11 @@ const BUSY_ACTION_LABEL = { work: 'a Create PR run', deploy: 'a Deploy', chat: '
 // Human-readable description of what's holding a repo's working-tree lock,
 // for the "blocked" message shown when a second action tries to start.
 function describeBusyKey(repoName, busyKey) {
-  const m = busyKey.slice(repoName.length + 1).match(WORKING_TREE_ACTION_RE);
-  if (!m) return `something else is already running in ${repoName}`;
-  const [, issueNum, action, prNum] = m;
-  const label = BUSY_ACTION_LABEL[action] || action;
-  const prSuffix = prNum ? ` (PR #${prNum})` : '';
-  return `${label}${prSuffix} is already running for issue #${issueNum} in ${repoName}`;
+  const parsed = parseActionKey(repoName, busyKey);
+  if (!parsed) return `something else is already running in ${repoName}`;
+  const label = BUSY_ACTION_LABEL[parsed.action] || parsed.action;
+  const prSuffix = parsed.prNumber ? ` (PR #${parsed.prNumber})` : '';
+  return `${label}${prSuffix} is already running for issue #${parsed.issueNumber} in ${repoName}`;
 }
 
 // Map a UI mode to copilot approval flags.
@@ -281,12 +322,28 @@ app.get('/api/repos/:name/issues', async (req, res) => {
       labels: (i.labels || []).map((l) => l.name),
       status: statuses[i.number],
     }));
-    // Which issue currently holds this repo's working-tree lock (Create PR,
-    // Deploy, or Chat) — kept as an array for backward compatibility with the
-    // existing `activeWorkIssues[0]` client contract.
-    const busyIssue = repoBusyIssueNumber(repo.name);
-    const activeWorkIssues = busyIssue != null ? [busyIssue] : [];
-    res.json({ repo: repo.name, ownerRepo: repo.ownerRepo, cached, at, issues: merged, activeWorkIssues });
+    // `activeWorkIssues` now lists EVERY issue with a Create PR run in flight
+    // — several can run at once, each in its own worktree — and is purely
+    // informational. `treeBusyIssue` is the real lock: the issue whose
+    // Deploy/Chat (or Create PR) is holding the shared working tree, which is
+    // what greys out other issues' Deploy/Chat actions.
+    const treeBusyIssue = repoBusyIssueNumber(repo.name);
+    const activeWorkIssues = activeWorkIssueNumbers(repo.name);
+    const queuedWork = workQueue
+      .queued()
+      .map((i) => ({ issueNumber: i.issueNumber, position: workQueue.positionOf(i.id), id: i.id, repo: i.repo }))
+      .filter((i) => i.repo === repo.name);
+    res.json({
+      repo: repo.name,
+      ownerRepo: repo.ownerRepo,
+      cached,
+      at,
+      issues: merged,
+      activeWorkIssues,
+      queuedWork,
+      treeBusyIssue,
+      maxConcurrentWork: workQueue.maxConcurrent,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message, stderr: (err.stderr || '').toString() });
   }
@@ -298,9 +355,14 @@ app.get('/api/repos/:name/issues/:n/record', (req, res) => {
   if (!repo) return res.status(404).json({ error: 'repo not found' });
   const n = Number(req.params.n);
   const record = store.getRecord(repo.name, n);
+  const queued = workQueue.findTarget(repo.name, n, 'work');
   // Annotate with whether a live job is still running (survives browser drop).
   record.live = {
     work: Boolean(jobs.getJob(`${repo.name}#${n}:work`)?.status === 'running'),
+    // Waiting in the Create PR queue: not running yet, but definitely not
+    // finished either — reconnecting clients must keep waiting, not restart.
+    queued: Boolean(queued && queued.status === 'queued'),
+    queuePosition: queued ? workQueue.positionOf(queued.id) : null,
     deploy: {},
     merge: {},
     chat: {},
@@ -357,10 +419,13 @@ app.post('/api/repos/:name/issues/:n/hide', (req, res) => {
 
   const record = store.getRecord(repo.name, n);
   const cancelledJobs = [];
-  if (jobs.cancelJob(`${repo.name}#${n}:work`)) cancelledJobs.push('work');
+  const { cancelled, dequeued } = cancelWork(repo.name, n);
+  if (cancelled) cancelledJobs.push(dequeued ? 'work (queued)' : 'work');
   for (const pr of Object.values(record.prs || {})) {
     if (jobs.cancelJob(`${repo.name}#${n}:deploy:${pr.prNumber}`)) cancelledJobs.push(`deploy:${pr.prNumber}`);
   }
+  // The issue is gone from the dashboard — its worktree has no reason to exist.
+  worktree.removeWorktree(repo, n).catch(() => {});
 
   store.dismissIssue(repo.name, n);
   res.json({ ok: true, cancelledJobs });
@@ -526,47 +591,78 @@ app.post('/api/repos/:name/preissues/:id/create-issue', async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // Action: Create PR (implement the issue end-to-end and open a PR)
+//
+// Concurrency model: each run executes in its OWN git worktree
+// (`<repo>-worktrees/issue-<n>`), so several issues in the same repo can be
+// worked on simultaneously without colliding on a checkout. A persistent FIFO
+// queue caps how many run at once (MAX_CONCURRENT_WORK); the rest wait their
+// turn instead of being rejected.
 // ---------------------------------------------------------------------------
 
-app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
-  const repo = resolveRepo(req.params.name);
-  if (!repo) return res.status(404).json({ error: 'repo not found' });
-  const n = Number(req.params.n);
-  const key = `${repo.name}#${n}:work`;
+const workQueue = new WorkQueue({ maxConcurrent: MAX_CONCURRENT_WORK });
 
-  writeSseHead(res);
+// Actually launch a queued Create PR run: materialise its worktree, warm it up
+// if the repo asked for it, then spawn Copilot inside it and hand the stream to
+// whoever is waiting.
+async function startWorkItem(item) {
+  const repo = resolveRepo(item.repo);
+  const n = Number(item.issueNumber);
+  const key = `${item.repo}#${n}:work`;
+  const waiters = workQueue.takeWaiters(item.id);
 
-  // Reconnect: if a job for this issue is already running, just attach to it.
-  const existing = jobs.getJob(key);
-  if (existing && existing.status === 'running') {
-    jobs.subscribe(existing, res);
-    return;
+  if (!repo) {
+    const message = `repo "${item.repo}" is no longer available under REPOS_ROOT`;
+    store.updateRecord(item.repo, n, (r) => {
+      r.work.status = 'failed';
+      r.work.finishedAt = new Date().toISOString();
+    });
+    for (const res of waiters) sendSseBlocked(res, { action: 'work', status: 'failed', message });
+    throw new Error(message);
   }
 
-  // Repo-level lock: only one working-tree action (Create PR, Deploy, Chat)
-  // may run per repo at a time, otherwise concurrent runs collide on the same
-  // checkout.
-  const busyKey = findOtherRepoBusyKey(repo.name, key);
-  if (busyKey) {
-    const msg = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`;
-    return sendSseBlocked(res, { action: 'work', status: 'blocked', message: msg });
+  // Reuse the worktree when a job for this issue is somehow still alive
+  // (defensive: the queue shouldn't allow it), otherwise rebuild it from a
+  // fresh default branch so no leftovers from a previous attempt leak in.
+  const live = jobs.getJob(key);
+  const reuse = Boolean(live && live.status === 'running');
+  let tree;
+  try {
+    tree = await worktree.ensureWorktree(repo, n, { reuse });
+  } catch (err) {
+    const message = `Failed to prepare a git worktree for issue #${n}: ${err.message}`;
+    store.updateRecord(repo.name, n, (r) => {
+      r.work.status = 'failed';
+      r.work.conversation = `${r.work.conversation || ''}\n[worktree] ${message}\n`;
+      r.work.finishedAt = new Date().toISOString();
+    });
+    for (const res of waiters) sendSseBlocked(res, { action: 'work', status: 'failed', message });
+    throw err;
   }
 
-  const mode = ['default', 'granular', 'allow-all'].includes(req.body?.mode)
-    ? req.body.mode
-    : 'allow-all'; // implementing an issue needs to edit files, run git & gh
+  // Optional per-repo warm-up (`{"worktree":{"setup":"npm ci"}}`) — a brand new
+  // worktree has none of the gitignored build artifacts.
+  let setupNote = '';
+  if (tree.created) {
+    const setup = await worktree.runSetup(repo.path, tree.path);
+    if (setup.ran) {
+      setupNote = setup.ok
+        ? `[worktree] setup "${setup.cmd}" ok\n`
+        : `[worktree] setup "${setup.cmd}" FAILED — continuing anyway\n${setup.stderr}\n`;
+    }
+  }
 
   const prompt =
     `Work on GitHub issue #${n} in this repository (${repo.ownerRepo}). ` +
     `Create a new branch, implement the change end-to-end until it is complete, ` +
     `commit, push, and open a pull request that closes #${n}. ` +
     `When finished, print the pull request URL on its own line.`;
-  const args = ['-p', prompt, ...approvalFlags(mode), ...modelFlags()];
+  const args = ['-p', prompt, ...approvalFlags(item.mode), ...modelFlags()];
 
   store.updateRecord(repo.name, n, (r) => {
     r.work.status = 'working';
     r.work.startedAt = new Date().toISOString();
-    r.work.conversation = '';
+    r.work.conversation = setupNote;
+    r.work.worktree = tree.path;
     r.work.prUrl = null;
     r.work.prNumber = null;
   });
@@ -574,8 +670,9 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
   const job = jobs.startJob(key, {
     bin: COPILOT_BIN,
     args,
-    cwd: repo.path,
-    meta: { action: 'work' },
+    // The whole point: a private working tree, never `repo.path`.
+    cwd: tree.path,
+    meta: { action: 'work', worktree: tree.path, queueId: item.id },
     onSession: (id) =>
       store.updateRecord(repo.name, n, (r) => {
         r.work.sessionId = id;
@@ -630,26 +727,184 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
         });
       }
 
+      // An aborted run leaves a half-edited tree behind and will never produce
+      // a PR — drop it so the next attempt starts clean and disk stays tidy.
+      if (status === 'aborted') {
+        worktree.removeWorktree(repo, n).catch(() => {});
+      }
+
+      // Free the slot and let the next queued run start.
+      workQueue.finish(item.id);
+
       return {
         action: 'work',
         status,
         prUrl,
         prNumber,
+        worktree: tree.path,
         sessionId: j.sessionId,
       };
     },
   });
 
-  jobs.subscribe(job, res);
+  for (const res of waiters) jobs.subscribe(job, res);
+  return job;
+}
+
+workQueue.setStarter(startWorkItem);
+
+app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const n = Number(req.params.n);
+  const key = `${repo.name}#${n}:work`;
+
+  writeSseHead(res);
+
+  // Reconnect: if a job for this issue is already running, just attach to it.
+  const existing = jobs.getJob(key);
+  if (existing && existing.status === 'running') {
+    jobs.subscribe(existing, res);
+    return;
+  }
+
+  // Same issue already waiting in line (or mid-launch)? Attach to that entry
+  // rather than enqueuing a duplicate.
+  const pending = workQueue.findTarget(repo.name, n, 'work');
+  if (pending) {
+    workQueue.addWaiter(pending.id, res);
+    sendSseQueued(res, {
+      action: 'work',
+      queueId: pending.id,
+      position: workQueue.positionOf(pending.id),
+      maxConcurrent: workQueue.maxConcurrent,
+    });
+    return;
+  }
+
+  const mode = ['default', 'granular', 'allow-all'].includes(req.body?.mode)
+    ? req.body.mode
+    : 'allow-all'; // implementing an issue needs to edit files, run git & gh
+  const title = typeof req.body?.title === 'string' ? req.body.title.slice(0, 200) : null;
+
+  const item = workQueue.enqueue({ repo: repo.name, issueNumber: n, action: 'work', mode, title });
+  workQueue.addWaiter(item.id, res);
+
+  // Show up as "queued" immediately so a reload/reconnect can tell the
+  // difference between "waiting in line" and "never started".
+  store.updateRecord(repo.name, n, (r) => {
+    r.work.status = 'queued';
+    r.work.queuedAt = item.enqueuedAt;
+    r.work.conversation = '';
+    r.work.prUrl = null;
+    r.work.prNumber = null;
+  });
+
+  const position = workQueue.positionOf(item.id);
+  if (position != null) {
+    sendSseQueued(res, {
+      action: 'work',
+      queueId: item.id,
+      position,
+      maxConcurrent: workQueue.maxConcurrent,
+    });
+  }
+
+  // Starts immediately when a slot is free; otherwise the response stays open
+  // until this entry's turn comes up.
+  workQueue.pump();
 });
 
-// Abort a running PR creation for an issue.
+// Abort a running PR creation for an issue — or drop it from the queue if it
+// hasn't started yet.
 app.post('/api/repos/:name/issues/:n/work/cancel', (req, res) => {
   const repo = resolveRepo(req.params.name);
   if (!repo) return res.status(404).json({ error: 'repo not found' });
   const n = Number(req.params.n);
-  const cancelled = jobs.cancelJob(`${repo.name}#${n}:work`);
-  res.json({ cancelled });
+  res.json(cancelWork(repo.name, n));
+});
+
+// ---------------------------------------------------------------------------
+// Work queue API — the top-left queue panel reads this, and its stop buttons
+// post to the cancel endpoint below.
+// ---------------------------------------------------------------------------
+
+// Tell a still-open SSE subscriber that its run is waiting in line. The
+// connection deliberately stays open: when the entry's turn comes it is handed
+// straight to the job's stream, so the browser never has to re-POST.
+function sendSseQueued(res, payload) {
+  if (res.writableEnded) return;
+  try {
+    res.write(`event: queued\n`);
+    res.write(`data: ${JSON.stringify({ status: 'queued', ...payload })}\n\n`);
+  } catch {
+    /* subscriber gone */
+  }
+}
+
+// Cancel a Create PR run: kill it if it's running (and bin its worktree), or
+// silently drop it from the queue if it hasn't started yet.
+function cancelWork(repoName, n) {
+  const key = `${repoName}#${n}:work`;
+  const item = workQueue.findTarget(repoName, n, 'work');
+  const job = jobs.getJob(key);
+
+  if (job && job.status === 'running') {
+    const cancelled = jobs.cancelJob(key);
+    // The job's onDone frees the queue slot and starts the next entry.
+    return { cancelled, dequeued: false };
+  }
+
+  if (item) {
+    // Still waiting: drop it, tell whoever is listening, and shuffle the rest up.
+    for (const res of workQueue.takeWaiters(item.id)) {
+      sendSseBlocked(res, {
+        action: 'work',
+        status: 'blocked',
+        message: 'Removed from the Create PR queue before it started.',
+      });
+    }
+    workQueue.remove(item.id);
+    store.updateRecord(repoName, n, (r) => {
+      if (r.work.status === 'queued') {
+        r.work.status = 'idle';
+        r.work.queuedAt = null;
+      }
+    });
+    const repo = resolveRepo(repoName);
+    if (repo) worktree.removeWorktree(repo, n).catch(() => {});
+    workQueue.pump();
+    return { cancelled: true, dequeued: true };
+  }
+
+  return { cancelled: false, dequeued: false };
+}
+
+app.get('/api/queue', (req, res) => {
+  const snap = workQueue.snapshot();
+  res.json({
+    maxConcurrent: snap.maxConcurrent,
+    runningCount: snap.runningCount,
+    queuedCount: snap.queuedCount,
+    items: snap.items.map((i) => ({
+      id: i.id,
+      repo: i.repo,
+      issueNumber: i.issueNumber,
+      action: i.action,
+      title: i.title,
+      status: i.status,
+      position: i.position,
+      enqueuedAt: i.enqueuedAt,
+      startedAt: i.startedAt || null,
+    })),
+  });
+});
+
+// Stop button in the queue panel — works for running and queued entries alike.
+app.post('/api/queue/:id/cancel', (req, res) => {
+  const item = workQueue.find(req.params.id);
+  if (!item) return res.status(404).json({ error: 'queue item not found' });
+  res.json({ ...cancelWork(item.repo, item.issueNumber), id: item.id });
 });
 
 // ---------------------------------------------------------------------------
@@ -988,6 +1243,11 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
         } catch {
           /* best-effort only — merge itself already succeeded */
         }
+      }
+      // The PR is merged, so this issue's Create PR worktree has served its
+      // purpose — remove it so `git worktree list` doesn't accumulate leftovers.
+      if (success) {
+        worktree.removeWorktree(repo, n).catch(() => {});
       }
       return { action: 'merge', prNumber, status };
     },
@@ -1333,6 +1593,7 @@ app.listen(PORT, HOST, () => {
   console.log(`cloud-copilot running at http://${HOST}:${PORT}`);
   console.log(`Authorized repos root: ${REPOS_ROOT}`);
   console.log(`Copilot binary: ${COPILOT_BIN}`);
+  console.log(`Max concurrent Create PR runs: ${workQueue.maxConcurrent}`);
   // Recover any admin turn that was still in-flight when the previous
   // process died (e.g. a chat turn triggered its own restart mid-reply) so
   // it shows up as an "interrupted" turn instead of silently vanishing.
@@ -1340,4 +1601,29 @@ app.listen(PORT, HOST, () => {
   if (recovered.length) {
     console.log(`Recovered ${recovered.length} interrupted admin turn(s): ${recovered.map((r) => r.turnId).join(', ')}`);
   }
+
+  // Adopt / tidy per-issue worktrees. Hand-created worktrees that git still
+  // knows about are kept as-is; only orphan directories are removed.
+  worktree
+    .gcWorktrees(gh.listRepos(REPOS_ROOT))
+    .then(({ pruned, kept }) => {
+      if (kept.length) console.log(`Adopted ${kept.length} existing worktree(s): ${kept.join(', ')}`);
+      if (pruned.length) console.log(`Pruned ${pruned.length} orphan worktree(s): ${pruned.join(', ')}`);
+    })
+    .catch((err) => console.warn(`worktree gc failed: ${err.message}`));
+
+  // Restore the persisted Create PR queue. Entries that were mid-run when the
+  // old process died are dropped by load(); anything still waiting resumes.
+  const restored = workQueue.load();
+  if (restored.length) {
+    console.log(`Restored ${restored.length} queued Create PR run(s) from data/queue.json`);
+    for (const item of restored) {
+      store.updateRecord(item.repo, item.issueNumber, (r) => {
+        r.work.status = 'queued';
+      });
+    }
+  }
+  // Persist the (possibly filtered) queue and start whatever fits.
+  workQueue.save();
+  workQueue.pump();
 });

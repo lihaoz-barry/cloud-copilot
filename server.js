@@ -123,11 +123,11 @@ function resolveRepo(name) {
 }
 
 // Actions that check out a branch on a repo's single shared working tree —
-// Create PR, Deploy, and Chat (even "plan" mode checks out the PR's branch) —
-// must be mutually exclusive per repo, or concurrent runs collide on the same
-// checkout. Merge is excluded: it only calls `gh pr merge` via the API, no
-// local checkout involved.
-const WORKING_TREE_ACTION_RE = /^(\d+):(work|deploy|chat)(?::(\d+))?$/;
+// Create PR, Deploy, Chat (even "plan" mode checks out the PR's branch) and
+// Merge main (checkout + merge + push) — must be mutually exclusive per repo,
+// or concurrent runs collide on the same checkout. Merge is excluded: it only
+// calls `gh pr merge` via the API, no local checkout involved.
+const WORKING_TREE_ACTION_RE = /^(\d+):(work|deploy|chat|merge-main)(?::(\d+))?$/;
 
 // First OTHER running job (excluding `excludeKey`) that touches this repo's
 // shared working tree, or null. Used to block a second such action from
@@ -150,7 +150,12 @@ function repoBusyIssueNumber(repoName) {
   return m ? Number(m[1]) : null;
 }
 
-const BUSY_ACTION_LABEL = { work: 'a Create PR run', deploy: 'a Deploy', chat: 'a chat turn' };
+const BUSY_ACTION_LABEL = {
+  work: 'a Create PR run',
+  deploy: 'a Deploy',
+  chat: 'a chat turn',
+  'merge-main': 'a Merge main run',
+};
 
 // Human-readable description of what's holding a repo's working-tree lock,
 // for the "blocked" message shown when a second action tries to start.
@@ -303,6 +308,7 @@ app.get('/api/repos/:name/issues/:n/record', (req, res) => {
     work: Boolean(jobs.getJob(`${repo.name}#${n}:work`)?.status === 'running'),
     deploy: {},
     merge: {},
+    mergeMain: {},
     chat: {},
   };
   for (const pr of Object.values(record.prs || {})) {
@@ -311,6 +317,9 @@ app.get('/api/repos/:name/issues/:n/record', (req, res) => {
     );
     record.live.merge[pr.prNumber] = Boolean(
       jobs.getJob(`${repo.name}#${n}:merge:${pr.prNumber}`)?.status === 'running',
+    );
+    record.live.mergeMain[pr.prNumber] = Boolean(
+      jobs.getJob(`${repo.name}#${n}:merge-main:${pr.prNumber}`)?.status === 'running',
     );
     record.live.chat[pr.prNumber] = Boolean(
       jobs.getJob(`${repo.name}#${n}:chat:${pr.prNumber}`)?.status === 'running',
@@ -346,8 +355,9 @@ app.get('/api/repos/:name/issues/:n/prs', async (req, res) => {
 });
 
 // Dismiss/hide an issue from the dashboard. Cancels any in-flight jobs tied to
-// it (work + every PR's deploy), then clears its tracked state and remembers
-// the dismissal so it doesn't reappear on the next issue-list refresh/poll.
+// it (work + every PR's deploy / merge / merge-main / chat), then clears its
+// tracked state and remembers the dismissal so it doesn't reappear on the next
+// issue-list refresh/poll.
 // This never touches the issue on GitHub itself.
 app.post('/api/repos/:name/issues/:n/hide', (req, res) => {
   const repo = resolveRepo(req.params.name);
@@ -360,6 +370,9 @@ app.post('/api/repos/:name/issues/:n/hide', (req, res) => {
   if (jobs.cancelJob(`${repo.name}#${n}:work`)) cancelledJobs.push('work');
   for (const pr of Object.values(record.prs || {})) {
     if (jobs.cancelJob(`${repo.name}#${n}:deploy:${pr.prNumber}`)) cancelledJobs.push(`deploy:${pr.prNumber}`);
+    if (jobs.cancelJob(`${repo.name}#${n}:merge:${pr.prNumber}`)) cancelledJobs.push(`merge:${pr.prNumber}`);
+    if (jobs.cancelJob(`${repo.name}#${n}:merge-main:${pr.prNumber}`)) cancelledJobs.push(`merge-main:${pr.prNumber}`);
+    if (jobs.cancelJob(`${repo.name}#${n}:chat:${pr.prNumber}`)) cancelledJobs.push(`chat:${pr.prNumber}`);
   }
 
   store.dismissIssue(repo.name, n);
@@ -1006,6 +1019,146 @@ app.post('/api/repos/:name/issues/:n/merge/:pr/cancel', (req, res) => {
     return res.status(400).json({ error: 'invalid PR number' });
   }
   const cancelled = jobs.cancelJob(`${repo.name}#${n}:merge:${prNumber}`);
+  res.json({ cancelled });
+});
+
+// ---------------------------------------------------------------------------
+// Action: Merge main INTO a PR's branch (base → head, the opposite direction of
+// the Merge action above). Brings a PR that has fallen behind back up to date
+// without dropping to a terminal: fetch, checkout the head branch, merge
+// origin/<base>, push. On conflict it aborts the merge so the shared working
+// tree is never left dirty.
+// ---------------------------------------------------------------------------
+
+// Distinct sentinel exit code the script uses for "merge conflict" so it can be
+// told apart from a generic git failure.
+const MERGE_MAIN_CONFLICT_EXIT = 21;
+
+// Branch names come from GitHub, so they're passed as positional args ($1/$2)
+// instead of being interpolated into the script — a branch containing shell
+// metacharacters can never be executed.
+const MERGE_MAIN_SCRIPT = `
+set -u
+head_ref="$1"
+base_ref="$2"
+echo "+ git fetch origin"
+git fetch origin || exit 1
+echo "+ git checkout $head_ref"
+git checkout "$head_ref" || exit 1
+echo "+ git merge --no-edit origin/$base_ref"
+if ! git merge --no-edit "origin/$base_ref"; then
+  echo ""
+  echo "!! Merge conflict — conflicting files:"
+  git diff --name-only --diff-filter=U
+  echo ""
+  echo "+ git merge --abort  (working tree restored; resolve these manually)"
+  git merge --abort || true
+  exit ${MERGE_MAIN_CONFLICT_EXIT}
+fi
+echo "+ git push origin $head_ref"
+git push origin "$head_ref" || exit 1
+echo ""
+echo "$base_ref merged into $head_ref and pushed."
+`;
+
+app.post('/api/repos/:name/issues/:n/merge-main/:pr', async (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  if (!repo.github) return res.status(400).json({ error: 'repo has no github.com remote' });
+  const n = Number(req.params.n);
+  const prNumber = Number(req.params.pr);
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    return res.status(400).json({ error: 'invalid PR number' });
+  }
+  const key = `${repo.name}#${n}:merge-main:${prNumber}`;
+
+  writeSseHead(res);
+
+  const existing = jobs.getJob(key);
+  if (existing && existing.status === 'running') {
+    jobs.subscribe(existing, res);
+    return;
+  }
+
+  // Repo-level lock: this checks out a branch on the same shared working tree
+  // as Create PR / Deploy / Chat, so it must be mutually exclusive with them.
+  const busyKey = findOtherRepoBusyKey(repo.name, key);
+  if (busyKey) {
+    const msg = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`;
+    return sendSseBlocked(res, { action: 'merge-main', prNumber, status: 'blocked', message: msg });
+  }
+
+  let pr;
+  try {
+    pr = await gh.getPr(repo.ownerRepo, prNumber);
+  } catch {
+    pr = null;
+  }
+  if (!pr || !pr.headRefName || !pr.baseRefName) {
+    const message = `Could not resolve the head/base branch for PR #${prNumber} via gh.`;
+    store.updateMergeMain(repo.name, n, prNumber, (m) => {
+      m.status = 'failed';
+      m.finishedAt = new Date().toISOString();
+      m.conversation = message;
+    });
+    return sendSseBlocked(res, { action: 'merge-main', prNumber, status: 'failed', message });
+  }
+
+  store.updateMergeMain(repo.name, n, prNumber, (m) => {
+    m.status = 'merging';
+    m.headRef = pr.headRefName;
+    m.baseRef = pr.baseRefName;
+    m.exitCode = null;
+    m.startedAt = new Date().toISOString();
+    m.finishedAt = null;
+    m.conversation = '';
+  });
+
+  const job = jobs.startJob(key, {
+    bin: 'bash',
+    args: ['-c', MERGE_MAIN_SCRIPT, 'merge-main', pr.headRefName, pr.baseRefName],
+    cwd: repo.path,
+    meta: { action: 'merge-main', prNumber, headRef: pr.headRefName, baseRef: pr.baseRefName },
+    onDone: async (j) => {
+      const status = j.cancelled
+        ? 'aborted'
+        : j.exitCode === 0
+          ? 'success'
+          : j.exitCode === MERGE_MAIN_CONFLICT_EXIT
+            ? 'conflict'
+            : 'failed';
+      store.updateMergeMain(repo.name, n, prNumber, (m) => {
+        m.status = status;
+        m.exitCode = j.exitCode;
+        m.conversation = j.conversation;
+        m.finishedAt = new Date().toISOString();
+      });
+      // An aborted run can leave a half-finished merge behind (the kill can land
+      // mid-`git merge`), so make sure the shared working tree is clean again.
+      if (j.cancelled) {
+        try {
+          execFileSync('git', ['merge', '--abort'], { cwd: repo.path, stdio: 'ignore', timeout: 15000 });
+        } catch {
+          /* nothing to abort — fine */
+        }
+      }
+      return { action: 'merge-main', prNumber, status };
+    },
+  });
+
+  jobs.subscribe(job, res);
+});
+
+// Abort a running "merge main" for a specific PR.
+app.post('/api/repos/:name/issues/:n/merge-main/:pr/cancel', (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const n = Number(req.params.n);
+  const prNumber = Number(req.params.pr);
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    return res.status(400).json({ error: 'invalid PR number' });
+  }
+  const cancelled = jobs.cancelJob(`${repo.name}#${n}:merge-main:${prNumber}`);
   res.json({ cancelled });
 });
 

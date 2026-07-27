@@ -32,6 +32,7 @@
     work: 'Create PR',
     deploy: 'Deploy',
     merge: 'Merge',
+    'merge-main': 'Merge main',
     chat: 'PR chat',
     'admin-chat': 'Admin chat',
     'preissue-chat': 'Issue draft',
@@ -40,6 +41,7 @@
     success: 'finished successfully',
     failed: 'failed',
     aborted: 'was aborted',
+    conflict: 'hit a merge conflict',
   };
 
   // ---------------------------------------------------------------- settings

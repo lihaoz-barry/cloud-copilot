@@ -18,6 +18,10 @@ your LAN/VPN. From your phone you can:
   [`.cloud-copilot.json`](#per-repo-deploy-config-cloud-copilotjson) below
 - **Merge** (`gh pr merge --merge --delete-branch`) unlocks once Deploy succeeds;
   you can still force it early behind a confirm if you're confident
+- **Merge main** (⤵, on every PR row) goes the *opposite* direction — it merges the
+  PR's base branch **into** the PR's branch and pushes, so a PR that fell behind
+  `main` catches up without dropping to a terminal. Conflicts abort the merge
+  (`git merge --abort`) so the working tree is never left dirty
 - **click a PR** to open its own **detail page** (`#/pr/<repo>/<issue>/<pr>`,
   bookmarkable/shareable) — same pipeline, plus a **Deploy History** list (every
   build number/version/status the PR has ever shipped, not just the latest) and
@@ -50,13 +54,15 @@ the Issues + PR flow through `gh` + `copilot -p`.
 
 Per-issue state is a small machine persisted to `data/state.json`. Each issue keeps
 one **work** (Create PR) record plus a map of **PRs**, and every PR carries its own
-**deploy** and **merge** lifecycle (status, start/finish, `durationMs`, transcript):
+**deploy**, **merge** and **mergeMain** lifecycle (status, start/finish,
+`durationMs`, transcript):
 
 | Stage      | idle              | running           | success         | failed / aborted                |
 | ---------- | ----------------- | ----------------- | --------------- | -------------------------------- |
 | Create PR  | `Create PR` 🔵    | `Creating PR…` 🟡  | issue turns 🟢  | `PR failed` 🔴 / `PR aborted`    |
 | Deploy     | `Deploy` 🔵       | `Deploying…` 🟡    | `Deployed` 🟢   | `Deploy failed` 🔴 / `Aborted`   |
 | Merge      | `🔒 Merge` 🔵 (dim until Deploy succeeds) | `Merging…` 🟡 | `Merged` 🟢 | `Merge failed` 🔴 / `Aborted` |
+| Merge main | `⤵ Merge main` 🔵 | `Merging main…` 🟡 | `Main merged` 🟢 | `Conflict` 🟠 / `Failed` 🔴 / `Aborted` |
 
 Each PR renders as one row across all three stages — a **Create PR | Deploy |
 Merge** pipeline, matching the state machine above: blue = planned, yellow =
@@ -71,6 +77,11 @@ running, green = done, red = failed.
   subprocesses die too; the run ends in an `aborted` state you can re-run.
 - **Re-deploy**: clicking Deploy on a finished/failed/aborted PR asks to confirm
   before starting a new run.
+- **Merge main** sits just below the step bar on every PR row. It takes the same
+  per-repo working-tree lock as Create PR / Deploy / chat (it checks out and pushes
+  the PR's branch), so it's blocked while any of those run — and blocks them while
+  it runs. A conflict is reported as `Conflict` 🟠 with the conflicting files listed
+  in its log, and the merge is rolled back with `git merge --abort`.
 - **Merge is gated on Deploy succeeding** — the Merge cell stays a dimmed, locked
   `🔒 Merge` until then. You can still click it early; it asks you to confirm a
   **force-merge** that skips the gate.
@@ -222,6 +233,8 @@ pipeline you get:
 | POST | `/api/repos/:name/issues/:n/deploy/:pr/cancel` | Abort the running deploy for that PR. |
 | POST | `/api/repos/:name/issues/:n/merge/:pr` | **Merge a specific PR** — SSE stream. Body: `{ "force": false }`. Blocked unless Deploy succeeded, unless `force: true`. |
 | POST | `/api/repos/:name/issues/:n/merge/:pr/cancel` | Abort the running merge for that PR. |
+| POST | `/api/repos/:name/issues/:n/merge-main/:pr` | **Merge the PR's base branch into the PR's branch** (`fetch` → `checkout <head>` → `merge origin/<base>` → `push`) — SSE stream. Takes the per-repo working-tree lock. On conflict it runs `git merge --abort` and reports `conflict`. |
+| POST | `/api/repos/:name/issues/:n/merge-main/:pr/cancel` | Abort the running merge-main for that PR. |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat` | **Chat with a PR** — SSE stream. Body: `{ "message": "...", "mode": "plan"\|"apply" }`. `plan` is read-only (default approval flags); `apply` implements + pushes to the existing branch and resets Deploy/Merge on success. |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat/cancel` | Abort the running chat turn for that PR. |
 | POST | `/api/run` | Simple one-shot demo (prompt + optional `sessionId` resume). |
@@ -443,7 +456,7 @@ session). The "running mode" selector here controls *tool approval policy*, not 
 cloud-copilot/
 ├── package.json        # express dependency, `npm start`, `cc:restart` (self deploy)
 ├── .cloud-copilot.json # this repo's own deploy config (shell -> cc:restart)
-├── server.js           # Express app: repos/issues/work/deploy/merge routes + state machine
+├── server.js           # Express app: repos/issues/work/deploy/merge/merge-main routes + state machine
 ├── lib/
 │   ├── gh.js           # enumerate repos, list issues/PRs/single-PR via `gh` (cached)
 │   ├── store.js        # per-issue status persisted to data/state.json

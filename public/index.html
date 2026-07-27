@@ -151,27 +151,54 @@
       background: #8882; color: inherit; font-weight: 600; font-size: .82rem;
     }
     .err-inline { color: #dc2626; font-size: .8rem; padding: 8px 4px; }
-    .mode-row { margin: 0; font-size: .8rem; color: #888; }
     select { font: inherit; padding: 5px 8px; border-radius: 8px; border: 1px solid #8884; background: #8881; }
 
-    /* top bar with title + controls (filter lives top-right) */
+    /* top bar with title + a single settings dropdown (top-right) */
     .topbar { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
-    .topbar .grow { flex: 1; }
-    .topctrls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+    .topbar .grow { flex: 1; min-width: 0; }
+    .topbar h1 { overflow-wrap: anywhere; }
+    .topctrls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; flex: none; }
     .filter { position: relative; }
+    .settings-trigger { position: relative; white-space: nowrap; }
+    /* badge shown when a setting is non-default (e.g. repos are hidden), so
+       collapsing the controls doesn't hide active state */
+    .settings-dot {
+      position: absolute; top: -3px; right: -3px; width: 8px; height: 8px;
+      border-radius: 50%; background: #f59e0b; box-shadow: 0 0 0 2px Canvas;
+    }
     .filter-menu {
-      position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; min-width: 220px;
+      position: absolute; right: 0; top: calc(100% + 6px); z-index: 20;
+      width: min(280px, calc(100vw - 24px)); max-width: calc(100vw - 24px); box-sizing: border-box;
       background: Canvas; color: CanvasText; border: 1px solid #8884; border-radius: 10px;
       box-shadow: 0 8px 30px #0006; padding: 8px; display: none; max-height: 60vh; overflow-y: auto;
     }
     .filter-menu.show { display: block; }
     .filter-menu h4 { margin: 4px 6px 8px; font-size: .78rem; color: #888; font-weight: 600; }
+    .filter-menu h4:not(:first-child) { margin-top: 12px; }
     .filter-menu label {
       display: flex; align-items: center; gap: 8px; padding: 6px 6px; border-radius: 8px;
       font-size: .85rem; cursor: pointer;
     }
     .filter-menu label:hover { background: #8881; }
+    /* long model names must be ellipsised, never widen the panel */
+    .filter-menu select {
+      display: block; width: 100%; max-width: 100%; box-sizing: border-box;
+      text-overflow: ellipsis; font-size: .85rem;
+    }
+    .filter-menu label > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .settings-section { margin-top: 4px; }
+    .settings-note { font-size: .76rem; color: #888; padding: 2px 6px 0; overflow-wrap: anywhere; }
+    .settings-note.err { color: #dc2626; }
+    .settings-row { display: flex; gap: 6px; padding: 6px 6px 2px; }
     .filter-actions { display: flex; gap: 6px; padding: 6px 6px 2px; border-top: 1px solid #8882; margin-top: 4px; }
+
+    /* narrow screens: the title and the settings trigger share one row without
+       overflowing a ~390px viewport */
+    @media (max-width: 560px) {
+      .topbar { gap: 8px; }
+      .topbar h1 { font-size: 1.25rem; }
+      .topctrls { gap: 6px; }
+    }
 
     /* GitHub link beside the issue title */
     a.ghlink {
@@ -534,21 +561,28 @@
         <p class="sub" id="rootline">loading…</p>
       </div>
       <div class="topctrls">
-        <div class="mode-row">
-          mode:
-          <select id="mode">
-            <option value="allow-all" selected>Allow All</option>
-            <option value="granular">Granular</option>
-            <option value="default">Default</option>
-          </select>
-        </div>
-        <div class="mode-row">
-          model:
-          <select id="modelSel"><option value="">loading…</option></select>
-        </div>
         <div class="filter">
-          <button id="filterBtn" class="ghost sm">⚙ Filter</button>
-          <div id="filterMenu" class="filter-menu">
+          <button id="filterBtn" class="ghost sm settings-trigger"
+                  aria-haspopup="true" aria-expanded="false" aria-controls="filterMenu">
+            ⚙ Settings<span id="settingsDot" class="settings-dot" hidden></span>
+          </button>
+          <div id="filterMenu" class="filter-menu" role="dialog" aria-label="Settings">
+            <h4>Mode</h4>
+            <select id="mode">
+              <option value="allow-all" selected>Allow All</option>
+              <option value="granular">Granular</option>
+              <option value="default">Default</option>
+            </select>
+            <h4>Model</h4>
+            <select id="modelSel"><option value="">loading…</option></select>
+            <div id="selfSection" class="settings-section" hidden>
+              <h4>This instance</h4>
+              <div class="settings-note">branch: <strong id="selfBranch">…</strong></div>
+              <div class="settings-row">
+                <button id="restartMainBtn" class="ghost sm">🔄 Restart main</button>
+              </div>
+              <div id="restartNote" class="settings-note" hidden></div>
+            </div>
             <h4>Show repositories</h4>
             <div id="filterList"></div>
             <div class="filter-actions">
@@ -676,6 +710,11 @@ const modelSel = document.getElementById('modelSel');
 const filterBtn = document.getElementById('filterBtn');
 const filterMenu = document.getElementById('filterMenu');
 const filterList = document.getElementById('filterList');
+const settingsDot = document.getElementById('settingsDot');
+const selfSection = document.getElementById('selfSection');
+const selfBranchEl = document.getElementById('selfBranch');
+const restartMainBtn = document.getElementById('restartMainBtn');
+const restartNote = document.getElementById('restartNote');
 
 const enc = encodeURIComponent;
 
@@ -834,19 +873,70 @@ function renderFilterMenu(repos) {
       if (cb.checked) set.delete(repo.name); else set.add(repo.name);
       saveHidden(set);
       applyRepoVisibility();
+      updateSettingsBadge();
     });
+    const name = document.createElement('span');
+    name.textContent = repo.name;
     label.appendChild(cb);
-    label.appendChild(document.createTextNode(repo.name));
+    label.appendChild(name);
     filterList.appendChild(label);
   }
+  updateSettingsBadge();
+}
+
+// Badge on the collapsed trigger whenever a setting is non-default — right now
+// that means the repo filter is hiding at least one repo.
+function updateSettingsBadge() {
+  const hidden = hiddenSet();
+  const known = (window.__repos || []).map((r) => r.name);
+  const hidingSomething = known.some((n) => hidden.has(n));
+  settingsDot.hidden = !hidingSomething;
+}
+
+// Keep the panel inside the viewport on both edges, however narrow the screen
+// is and however close the trigger sits to a border.
+function clampSettingsMenu() {
+  filterMenu.style.left = '';
+  filterMenu.style.right = '0';
+  const box = filterMenu.getBoundingClientRect();
+  const margin = 12;
+  if (box.left < margin) {
+    const overflowLeft = margin - box.left;
+    filterMenu.style.right = `${Math.max(0, parseFloat(getComputedStyle(filterMenu).right || 0) - overflowLeft)}px`;
+  }
+  const after = filterMenu.getBoundingClientRect();
+  if (after.right > window.innerWidth - margin) {
+    filterMenu.style.right = `${after.right - (window.innerWidth - margin)}px`;
+  }
+}
+
+function settingsOpen() { return filterMenu.classList.contains('show'); }
+function openSettings() {
+  filterMenu.classList.add('show');
+  filterBtn.setAttribute('aria-expanded', 'true');
+  clampSettingsMenu();
+  loadSelfInfo();
+}
+function closeSettings({ focusTrigger = false } = {}) {
+  if (!settingsOpen()) return;
+  filterMenu.classList.remove('show');
+  filterBtn.setAttribute('aria-expanded', 'false');
+  if (focusTrigger) filterBtn.focus();
 }
 filterBtn.addEventListener('click', (e) => {
   e.stopPropagation();
-  filterMenu.classList.toggle('show');
+  if (settingsOpen()) closeSettings(); else openSettings();
 });
 document.addEventListener('click', (e) => {
-  if (!filterMenu.contains(e.target) && e.target !== filterBtn) filterMenu.classList.remove('show');
+  if (!filterMenu.contains(e.target) && !filterBtn.contains(e.target)) closeSettings();
 });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && settingsOpen()) {
+    e.stopPropagation();
+    closeSettings({ focusTrigger: true });
+  }
+});
+window.addEventListener('resize', () => { if (settingsOpen()) clampSettingsMenu(); });
 document.getElementById('filterAll').addEventListener('click', () => {
   saveHidden(new Set());
   renderFilterMenu(window.__repos || []);
@@ -926,6 +1016,99 @@ modelSel.addEventListener('change', async () => {
     alert(err.message || 'Failed to save model');
     modelSel.value = prev;
   }
+});
+
+// ---- self repo ("this instance") + Restart main ----------------------------
+// Only the cloud-copilot checkout serving this page gets these controls; the
+// server returns { repo: null } for every other setup.
+let selfInfo = null;
+let restarting = false;
+
+function setRestartNote(text, isErr = false) {
+  restartNote.hidden = !text;
+  restartNote.textContent = text || '';
+  restartNote.classList.toggle('err', Boolean(isErr));
+}
+
+async function loadSelfInfo() {
+  if (restarting) return;
+  try {
+    const info = await fetch('/api/settings/self', { cache: 'no-store' }).then((x) => x.json());
+    selfInfo = info;
+    if (!info.repo) { selfSection.hidden = true; return; }
+    selfSection.hidden = false;
+    selfBranchEl.textContent = info.branch || '(unknown)';
+    const branch = info.defaultBranch || 'main';
+    restartMainBtn.textContent = `🔄 Restart ${branch}`;
+    restartMainBtn.disabled = Boolean(info.busy);
+    if (info.busy) setRestartNote(`Blocked: ${info.busy}.`, true);
+    else if (info.dirty) setRestartNote('Uncommitted changes will be stashed first.');
+    else setRestartNote('');
+  } catch {
+    selfSection.hidden = true;
+  }
+}
+
+// Poll /api/health until a *different* process answers — i.e. the restart
+// finished — instead of hanging on the request that killed the old server.
+async function waitForRestart(prevStartedAt, timeoutMs = 120000) {
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await wait(1500);
+    try {
+      const r = await fetch('/api/health', { cache: 'no-store' });
+      if (r.ok) {
+        const h = await r.json();
+        if (h.ok && (!prevStartedAt || h.startedAt !== prevStartedAt)) return h;
+      }
+    } catch {
+      /* still down — keep polling */
+    }
+  }
+  throw new Error('Timed out waiting for the server to come back. Check server.log.');
+}
+
+restartMainBtn.addEventListener('click', async () => {
+  if (restarting) return;
+  const branch = (selfInfo && selfInfo.defaultBranch) || 'main';
+  const dirtyWarning = selfInfo && selfInfo.dirty
+    ? '\n\nUncommitted changes will be stashed (recoverable with `git stash pop`).'
+    : '';
+  if (!confirm(`Check out ${branch}, pull the latest code, and restart cloud-copilot?${dirtyWarning}`)) return;
+
+  const prevStartedAt = (selfInfo && selfInfo.startedAt) || null;
+  restarting = true;
+  restartMainBtn.disabled = true;
+  setRestartNote(`Switching to ${branch}…`);
+
+  let data = {};
+  try {
+    const r = await fetch('/api/settings/self/restart-main', { method: 'POST' });
+    data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  } catch (err) {
+    restarting = false;
+    restartMainBtn.disabled = false;
+    setRestartNote(err.message || 'Restart failed.', true);
+    return;
+  }
+
+  selfBranchEl.textContent = data.branch || branch;
+  setRestartNote(`${(data.steps || []).join(' · ')} · waiting for the server to come back…`);
+  try {
+    await waitForRestart(prevStartedAt);
+  } catch (err) {
+    restarting = false;
+    restartMainBtn.disabled = false;
+    setRestartNote(err.message, true);
+    return;
+  }
+  restarting = false;
+  const stashNote = data.stashed ? ` · stashed: "${data.stashed}"` : '';
+  setRestartNote(`Restarted ✓ on ${data.branch || branch}${data.head ? ` @ ${data.head}` : ''}${stashNote} · reloading…`);
+  // The server just swapped the code it serves — reload so the page matches.
+  setTimeout(() => location.reload(), 1500);
 });
 
 // ---- repos ----------------------------------------------------------------
@@ -3338,6 +3521,7 @@ function initAdminTerminal() {
 
 loadRepos().then(route);
 loadModelSetting();
+loadSelfInfo();
 </script>
 </body>
 </html>

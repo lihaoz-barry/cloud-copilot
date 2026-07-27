@@ -1114,37 +1114,67 @@ app.post('/api/repos/:name/issues/:n/merge-main/:pr', async (req, res) => {
     m.conversation = '';
   });
 
-  const job = jobs.startJob(key, {
-    bin: 'bash',
-    args: ['-c', MERGE_MAIN_SCRIPT, 'merge-main', pr.headRefName, pr.baseRefName],
-    cwd: repo.path,
-    meta: { action: 'merge-main', prNumber, headRef: pr.headRefName, baseRef: pr.baseRefName },
-    onDone: async (j) => {
-      const status = j.cancelled
-        ? 'aborted'
-        : j.exitCode === 0
-          ? 'success'
-          : j.exitCode === MERGE_MAIN_CONFLICT_EXIT
-            ? 'conflict'
-            : 'failed';
-      store.updateMergeMain(repo.name, n, prNumber, (m) => {
-        m.status = status;
-        m.exitCode = j.exitCode;
-        m.conversation = j.conversation;
-        m.finishedAt = new Date().toISOString();
-      });
-      // An aborted run can leave a half-finished merge behind (the kill can land
-      // mid-`git merge`), so make sure the shared working tree is clean again.
-      if (j.cancelled) {
-        try {
-          execFileSync('git', ['merge', '--abort'], { cwd: repo.path, stdio: 'ignore', timeout: 15000 });
-        } catch {
-          /* nothing to abort — fine */
+  // Re-check the lock: resolving the branches above was async, so another
+  // working-tree action could have started in the meantime (two clicks landing
+  // together would otherwise both pass the first check and race on the same
+  // checkout). Everything from here to startJob() is synchronous, so this
+  // second check closes the window.
+  const raceKey = findOtherRepoBusyKey(repo.name, key);
+  if (raceKey) {
+    const msg = `Blocked: ${describeBusyKey(repo.name, raceKey)}. Only one working-tree action per repo at a time.`;
+    store.updateMergeMain(repo.name, n, prNumber, (m) => {
+      m.status = 'idle';
+      m.startedAt = null;
+    });
+    return sendSseBlocked(res, { action: 'merge-main', prNumber, status: 'blocked', message: msg });
+  }
+
+  let job;
+  try {
+    job = jobs.startJob(key, {
+      bin: 'bash',
+      args: ['-c', MERGE_MAIN_SCRIPT, 'merge-main', pr.headRefName, pr.baseRefName],
+      cwd: repo.path,
+      meta: { action: 'merge-main', prNumber, headRef: pr.headRefName, baseRef: pr.baseRefName },
+      onDone: async (j) => {
+        const status = j.cancelled
+          ? 'aborted'
+          : j.exitCode === 0
+            ? 'success'
+            : j.exitCode === MERGE_MAIN_CONFLICT_EXIT
+              ? 'conflict'
+              : 'failed';
+        store.updateMergeMain(repo.name, n, prNumber, (m) => {
+          m.status = status;
+          m.exitCode = j.exitCode;
+          m.conversation = j.conversation;
+          m.finishedAt = new Date().toISOString();
+        });
+        // An aborted run can leave a half-finished merge behind (the kill can
+        // land mid-`git merge`), so make sure the working tree is clean again.
+        if (j.cancelled) {
+          try {
+            execFileSync('git', ['merge', '--abort'], { cwd: repo.path, stdio: 'ignore', timeout: 15000 });
+          } catch {
+            /* nothing to abort — fine */
+          }
         }
-      }
-      return { action: 'merge-main', prNumber, status };
-    },
-  });
+        return { action: 'merge-main', prNumber, status };
+      },
+    });
+  } catch {
+    // Same key started racing us — attach to that run instead of starting a
+    // second one.
+    const running = jobs.getJob(key);
+    if (running) return jobs.subscribe(running, res);
+    const message = `Could not start Merge main for PR #${prNumber}.`;
+    store.updateMergeMain(repo.name, n, prNumber, (m) => {
+      m.status = 'failed';
+      m.finishedAt = new Date().toISOString();
+      m.conversation = message;
+    });
+    return sendSseBlocked(res, { action: 'merge-main', prNumber, status: 'failed', message });
+  }
 
   jobs.subscribe(job, res);
 });

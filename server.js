@@ -475,14 +475,23 @@ app.post('/api/repos/:name/preissues/:id/chat', async (req, res) => {
     bin: COPILOT_BIN,
     args,
     cwd: repo.path,
-    meta: { action: 'preissue-chat', id },
+    meta: { action: 'preissue-chat', id, repo: repo.name, preIssueId: id },
     onSession: (sid) => store.setPreIssueSession(repo.name, id, sid),
     onDone: async (j) => {
       const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
       store.appendPreIssueChatMessage(repo.name, id, { role: 'assistant', text: j.conversation });
       const draft = extractDraft(j.conversation);
       if (draft) store.setPreIssueDraft(repo.name, id, draft);
-      return { action: 'preissue-chat', id, status, sessionId: j.sessionId, draft };
+      return {
+        action: 'preissue-chat',
+        id,
+        status,
+        sessionId: j.sessionId,
+        draft,
+        // Notification context: the draft's own title is the best name for
+        // this conversation, falling back to the original one-line idea.
+        notify: { chatTitle: (draft && draft.title) || pre.text },
+      };
     },
   });
 
@@ -556,6 +565,10 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
     ? req.body.mode
     : 'allow-all'; // implementing an issue needs to edit files, run git & gh
 
+  // Cache-only lookup (no network): gives the push notification a subject
+  // line, and is simply omitted when the issue list isn't cached yet.
+  const issueTitle = gh.cachedIssueTitle(repo.ownerRepo, n);
+
   const prompt =
     `Work on GitHub issue #${n} in this repository (${repo.ownerRepo}). ` +
     `Create a new branch, implement the change end-to-end until it is complete, ` +
@@ -575,7 +588,7 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
     bin: COPILOT_BIN,
     args,
     cwd: repo.path,
-    meta: { action: 'work' },
+    meta: { action: 'work', repo: repo.name, issueNumber: n, issueTitle },
     onSession: (id) =>
       store.updateRecord(repo.name, n, (r) => {
         r.work.sessionId = id;
@@ -738,7 +751,7 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
       bin: COPILOT_BIN,
       args,
       cwd: repo.path,
-      meta: { action: 'deploy', prNumber },
+      meta: { action: 'deploy', prNumber, repo: repo.name, issueNumber: n },
       onSession: (id) =>
         store.updateDeploy(repo.name, n, prNumber, (d) => {
           d.sessionId = id;
@@ -838,7 +851,7 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
       bin: 'bash',
       args: ['-lc', command],
       cwd: repo.path,
-      meta: { action: 'deploy', prNumber },
+      meta: { action: 'deploy', prNumber, repo: repo.name, issueNumber: n },
       onDone: async (j) => {
         const success = j.exitCode === 0;
         const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
@@ -965,7 +978,7 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
     bin: gh.GH_BIN,
     args: ['pr', 'merge', String(prNumber), '--repo', repo.ownerRepo, '--merge', '--delete-branch'],
     cwd: repo.path,
-    meta: { action: 'merge', prNumber },
+    meta: { action: 'merge', prNumber, repo: repo.name, issueNumber: n },
     onDone: async (j) => {
       const success = j.exitCode === 0;
       const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
@@ -1098,7 +1111,7 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
     bin: COPILOT_BIN,
     args,
     cwd: repo.path,
-    meta: { action: 'chat', prNumber, mode },
+    meta: { action: 'chat', prNumber, mode, repo: repo.name, issueNumber: n },
     onSession: (id) =>
       store.updateRecord(repo.name, n, (r) => {
         const pr2 = r.prs[prNumber];
@@ -1114,7 +1127,15 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
       if (mode === 'apply' && status === 'success') {
         store.resetForNewCommits(repo.name, n, prNumber);
       }
-      return { action: 'chat', prNumber, mode, status, sessionId: j.sessionId };
+      return {
+        action: 'chat',
+        prNumber,
+        mode,
+        status,
+        sessionId: j.sessionId,
+        // Name this turn by the request that started it, for the push body.
+        notify: { chatTitle: store.titleFromMessage(message) },
+      };
     },
   });
 
@@ -1252,7 +1273,7 @@ app.post('/api/admin/chat', (req, res) => {
     bin: COPILOT_BIN,
     args,
     cwd,
-    meta: { action: 'admin', turnId, repo: repoName || null },
+    meta: { action: 'admin', turnId, repo: repoName || null, chatTitle: store.titleFromMessage(message) },
     onSession: (sid) => store.updateAdminTurnProgress(turnId, { sessionId: sid }),
     onProgress: (j) => store.updateAdminTurnProgress(turnId, { assistantText: j.conversation, sessionId: j.sessionId }),
     onDone: async (j) => {
@@ -1274,6 +1295,12 @@ app.post('/api/admin/chat', (req, res) => {
         turnId,
         status: j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed',
         sessionId: sid,
+        // Notification context: name the conversation by its stored title (the
+        // first turn's message) and deep-link straight back to it.
+        notify: {
+          chatId: sid,
+          chatTitle: (sid && store.getAdminChat(sid) && store.getAdminChat(sid).title) || store.titleFromMessage(message),
+        },
       };
     },
   });

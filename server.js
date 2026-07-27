@@ -19,7 +19,7 @@
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const { execSync, execFileSync } = require('child_process');
+const { execSync, execFileSync, spawn } = require('child_process');
 const express = require('express');
 
 const store = require('./lib/store');
@@ -127,14 +127,26 @@ function resolveRepo(name) {
 // must be mutually exclusive per repo, or concurrent runs collide on the same
 // checkout. Merge is excluded: it only calls `gh pr merge` via the API, no
 // local checkout involved.
-const WORKING_TREE_ACTION_RE = /^(\d+):(work|deploy|chat)(?::(\d+))?$/;
+const WORKING_TREE_ACTION_RE = /^(\d+):(work|deploy|chat|restart)(?::(\d+))?$/;
+
+// Working-tree locks held by actions that are NOT backed by a `jobs` child
+// process — currently just "Restart main", which runs a few short git commands
+// in-process and then relaunches the server. Held keys use the same
+// `<repo>#<n>:<action>` shape so findOtherRepoBusyKey/describeBusyKey treat
+// them exactly like a running job.
+const manualLocks = new Set();
+
+// Every key currently holding a working-tree lock, from both sources.
+function heldWorkingTreeKeys() {
+  return [...jobs.runningKeys(), ...manualLocks];
+}
 
 // First OTHER running job (excluding `excludeKey`) that touches this repo's
 // shared working tree, or null. Used to block a second such action from
 // starting concurrently.
 function findOtherRepoBusyKey(repoName, excludeKey) {
   const prefix = `${repoName}#`;
-  for (const k of jobs.runningKeys()) {
+  for (const k of heldWorkingTreeKeys()) {
     if (!k.startsWith(prefix) || k === excludeKey) continue;
     if (WORKING_TREE_ACTION_RE.test(k.slice(prefix.length))) return k;
   }
@@ -150,7 +162,12 @@ function repoBusyIssueNumber(repoName) {
   return m ? Number(m[1]) : null;
 }
 
-const BUSY_ACTION_LABEL = { work: 'a Create PR run', deploy: 'a Deploy', chat: 'a chat turn' };
+const BUSY_ACTION_LABEL = {
+  work: 'a Create PR run',
+  deploy: 'a Deploy',
+  chat: 'a chat turn',
+  restart: 'a Restart main',
+};
 
 // Human-readable description of what's holding a repo's working-tree lock,
 // for the "blocked" message shown when a second action tries to start.
@@ -159,6 +176,8 @@ function describeBusyKey(repoName, busyKey) {
   if (!m) return `something else is already running in ${repoName}`;
   const [, issueNum, action, prNum] = m;
   const label = BUSY_ACTION_LABEL[action] || action;
+  // Restart main isn't tied to an issue — don't invent a "#0" for it.
+  if (action === 'restart') return `${label} is already running in ${repoName}`;
   const prSuffix = prNum ? ` (PR #${prNum})` : '';
   return `${label}${prSuffix} is already running for issue #${issueNum} in ${repoName}`;
 }
@@ -223,6 +242,206 @@ app.post('/api/settings/model', (req, res) => {
     return res.status(400).json({ error: `unknown model "${model}"` });
   }
   res.json({ model: store.setModel(model) });
+});
+
+// ---------------------------------------------------------------------------
+// "Self" repo — the cloud-copilot checkout that is serving this very app.
+//
+// The settings panel surfaces its current branch and a "Restart main" button,
+// used to periodically verify that whatever is on `main` still works. Only the
+// self repo gets that button; restarting is meaningless for any other repo.
+// ---------------------------------------------------------------------------
+
+const SERVER_STARTED_AT = new Date().toISOString();
+// Identify this app's directory by (device, inode) rather than by path string:
+// on macOS `realpathSync` does NOT normalise case, so "/Users/me/repos/x" and
+// "/Users/me/Repos/x" are the same directory but different strings.
+const SELF_DIR_ID = (() => {
+  try {
+    const s = fs.statSync(__dirname);
+    return `${s.dev}:${s.ino}`;
+  } catch {
+    return null;
+  }
+})();
+
+// The repo under REPOS_ROOT whose working tree IS this app's directory, or
+// null when cloud-copilot is running from outside the authorized root.
+function findSelfRepo() {
+  if (!SELF_DIR_ID) return null;
+  return (
+    gh.listRepos(REPOS_ROOT).find((r) => {
+      try {
+        const s = fs.statSync(r.path);
+        return `${s.dev}:${s.ino}` === SELF_DIR_ID;
+      } catch {
+        return false;
+      }
+    }) || null
+  );
+}
+
+// Argument-array git (never a shell string) against a specific repo.
+function git(repoPath, args, timeout = 20000) {
+  return execFileSync('git', ['-C', repoPath, ...args], {
+    encoding: 'utf8',
+    timeout,
+    maxBuffer: 4 * 1024 * 1024,
+  }).trim();
+}
+
+function isDirty(repoPath) {
+  try {
+    return git(repoPath, ['status', '--porcelain']).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+// origin's default branch (usually `main`), falling back to "main".
+function defaultBranchOf(repoPath) {
+  try {
+    const ref = git(repoPath, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']);
+    const name = ref.split('/').pop();
+    if (name) return name;
+  } catch {
+    /* origin/HEAD not set locally */
+  }
+  return 'main';
+}
+
+// Cheap liveness probe the client polls while the server restarts itself.
+// `startedAt`/`pid` let it tell "still the old process" from "back up".
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, pid: process.pid, startedAt: SERVER_STARTED_AT });
+});
+
+app.get('/api/settings/self', (req, res) => {
+  const repo = findSelfRepo();
+  if (!repo) return res.json({ repo: null, pid: process.pid, startedAt: SERVER_STARTED_AT });
+  const busyKey = findOtherRepoBusyKey(repo.name, null);
+  res.json({
+    repo: repo.name,
+    ownerRepo: repo.ownerRepo,
+    branch: gh.gitBranch(repo.path),
+    defaultBranch: defaultBranchOf(repo.path),
+    dirty: isDirty(repo.path),
+    busy: busyKey ? describeBusyKey(repo.name, busyKey) : null,
+    pid: process.pid,
+    startedAt: SERVER_STARTED_AT,
+  });
+});
+
+// Relaunch cloud-copilot *detached* from this process.
+//
+// The obvious approach — letting the restart script `pkill -f 'node server.js'`
+// — is unreliable when it is spawned by the very process it must kill, and it
+// would also take down unrelated node servers. Instead we hand a detached
+// shell a simple contract: wait for OUR pid to disappear, then `npm start`.
+// This process then exits on its own, so the handover is deterministic.
+function spawnSelfRestart(repoPath) {
+  // `pid` is a number, so this shell string carries no injectable input.
+  const script =
+    `for i in $(seq 1 100); do kill -0 ${process.pid} 2>/dev/null || break; sleep 0.3; done; ` +
+    `exec npm start > server.log 2>&1`;
+  const child = spawn('/bin/bash', ['-lc', script], {
+    cwd: repoPath,
+    env: process.env,
+    detached: true, // own session/process group — survives our own death
+    stdio: 'ignore',
+  });
+  child.unref();
+}
+
+app.post('/api/settings/self/restart-main', (req, res) => {
+  const repo = findSelfRepo();
+  if (!repo) {
+    return res.status(404).json({
+      error: 'cloud-copilot is not running from a repo under REPOS_ROOT, so it cannot restart itself.',
+    });
+  }
+
+  const key = `${repo.name}#0:restart`;
+  if (manualLocks.has(key)) {
+    return res.status(409).json({ error: 'A Restart main is already in progress.' });
+  }
+  // Same per-repo working-tree lock as Create PR / Deploy / Chat — this action
+  // checks out a branch, so it must be mutually exclusive with all of them.
+  const busyKey = findOtherRepoBusyKey(repo.name, key);
+  if (busyKey) {
+    return res.status(409).json({
+      error: `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`,
+    });
+  }
+
+  manualLocks.add(key);
+  const release = () => manualLocks.delete(key);
+
+  const branch = defaultBranchOf(repo.path);
+  const steps = [];
+  let stashed = null;
+
+  try {
+    // Never silently discard local work: park it in a stash whose message
+    // says exactly where it came from, so it can be recovered with
+    // `git stash list` / `git stash pop`.
+    if (isDirty(repo.path)) {
+      stashed = `cloud-copilot restart-main ${new Date().toISOString()}`;
+      git(repo.path, ['stash', 'push', '--include-untracked', '-m', stashed], 60000);
+      steps.push(`Stashed uncommitted changes as "${stashed}"`);
+    }
+    git(repo.path, ['checkout', branch], 60000);
+    steps.push(`Checked out ${branch}`);
+    git(repo.path, ['pull', '--ff-only'], 180000);
+    steps.push(`Pulled latest ${branch}`);
+  } catch (err) {
+    release();
+    const detail = (err.stderr || err.stdout || err.message || '').toString().trim();
+    return res.status(500).json({
+      error: `Restart main failed before restarting: ${detail || err.message}`,
+      steps,
+      stashed,
+      branch: gh.gitBranch(repo.path),
+    });
+  }
+
+  let head = null;
+  try {
+    head = git(repo.path, ['rev-parse', '--short', 'HEAD']);
+  } catch {
+    /* non-fatal */
+  }
+
+  // Safety net: this process is about to be killed, so the lock normally dies
+  // with it — but if the relaunch somehow never kills us, don't wedge the repo.
+  const guard = setTimeout(release, 120000);
+  if (guard.unref) guard.unref();
+
+  // Flush the result FIRST; only then pull the rug out from under ourselves.
+  res.json({
+    ok: true,
+    repo: repo.name,
+    branch,
+    head,
+    stashed,
+    steps: [...steps, 'Restarting server…'],
+    pid: process.pid,
+    startedAt: SERVER_STARTED_AT,
+  });
+  res.on('finish', () => {
+    // Only now that the client has the result do we hand over: spawn the
+    // detached relauncher, then exit so it can bind the port.
+    setTimeout(() => {
+      try {
+        spawnSelfRestart(repo.path);
+      } catch (err) {
+        release();
+        console.error('[restart-main] failed to spawn relauncher:', err.message);
+        return;
+      }
+      setTimeout(() => process.exit(0), 500);
+    }, 300);
+  });
 });
 
 // ---------------------------------------------------------------------------

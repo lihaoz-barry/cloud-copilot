@@ -36,6 +36,8 @@ your LAN/VPN. From your phone you can:
   default), with success/failure shown **on the issue** and lifecycle timing cached
 - **one PR creation per repo at a time** — other issues in that repo are greyed out
   while one is in progress, to avoid working-tree collisions
+- a **⚙ Settings** panel (mode / model / repo filter) that fits a phone, plus a
+  **Restart main** button that checks out `main`, pulls, and restarts cloud-copilot
 
 This is a proof-of-concept for remotely driving a local coding-agent CLI from a web UI.
 
@@ -152,6 +154,43 @@ button), never on page load.
 fully closed. Phase 1 fires notifications from the page itself, which covers the
 "app backgrounded / screen briefly locked" case, not "app killed".
 
+### Settings panel (⚙, top-right of Home)
+
+Mode, model and the per-device repo filter all live behind a single `⚙ Settings`
+button, so the header fits a phone (no horizontal overflow at 390px). The panel
+is `min(280px, calc(100vw - 24px))` wide, clamped inside the viewport, scrolls
+internally for long repo lists, and ellipsises long model names. It closes on
+`Esc` (returning focus to the trigger) or an outside click, and `aria-expanded`
+reflects its state. A dot on the trigger warns that the repo filter is currently
+hiding something.
+
+- **Mode** — Allow All / Granular / Default (applies to every Copilot run).
+- **Model** — the model every Copilot invocation uses (`GET`/`POST
+  /api/settings/model`, persisted in `data/state.json`).
+- **This instance** — only shown when cloud-copilot is itself served from a repo
+  under `REPOS_ROOT`. Displays that repo's current branch plus a **Restart main**
+  button.
+- **Show repositories** — the repo checkboxes (All / None), stored per device in
+  `localStorage`.
+
+#### Restart main
+
+One click to answer "does `main` still work?": the server stashes any
+uncommitted changes (`cloud-copilot restart-main <timestamp>` — never silently
+discarded), checks out the default branch, `git pull --ff-only`s, and restarts
+itself.
+
+The restart is deliberately *not* `pkill`-based. `POST
+/api/settings/self/restart-main` flushes its JSON result **first**, then spawns a
+detached (`detached: true`, own session) shell that waits for this process's PID
+to disappear before running `npm start`, and only then does the server exit — so
+the handover is deterministic and unrelated `node` processes are never killed.
+The browser doesn't sit on the dead request either: it polls `GET /api/health`
+until a *different* `startedAt` answers (120s timeout), then reloads.
+
+It takes the same per-repo working-tree lock as Create PR / Deploy / Chat (it
+switches branches), so a conflict is reported with the usual blocked message.
+
 ### Per-repo deploy config (`.cloud-copilot.json`)
 
 Deploy is dispatched per-repo. Drop a `.cloud-copilot.json` at a repo's root:
@@ -246,6 +285,10 @@ behaviour:
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
 | GET  | `/api/repos` | List git repos under `REPOS_ROOT` (with remotes). |
+| GET  | `/api/health` | Liveness probe: `{ ok, pid, startedAt }`. Polled by the client while the server restarts itself. |
+| GET  | `/api/settings/model` | Current model + the selectable list. `POST` the same path to change it. |
+| GET  | `/api/settings/self` | The cloud-copilot repo serving this app: `{ repo, branch, defaultBranch, dirty, busy }`, or `{ repo: null }`. |
+| POST | `/api/settings/self/restart-main` | **Restart main** — stash if dirty, check out the default branch, `pull --ff-only`, then restart detached. Takes the repo working-tree lock; `409` when it's held. |
 | GET  | `/api/repos/:name/issues[?refresh=1]` | List open issues (cached 5 min) merged with local status; includes `activeWorkIssues` (repo lock). Also auto-discovers and persists PRs referencing these issues (one whole-repo `gh pr list`, cached 5 min, `?refresh=1` bypasses it too). |
 | GET  | `/api/repos/:name/issues/:n/record` | Full stored record (work + per-PR deploy/merge, transcripts, `live` flags). |
 | GET  | `/api/repos/:name/issues/:n/prs` | Force-refresh the PR list for one issue from GitHub — always live, bypasses the whole-repo PR cache. |

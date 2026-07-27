@@ -367,23 +367,10 @@
     .tmsg-body {
       font-size: .82rem; line-height: 1.5; border-radius: 12px; padding: 9px 12px; word-break: break-word;
     }
-    .tmsg.user .tmsg-body { background: #2563eb; color: #fff; }
+    /* User turns are plain text; assistant turns are rendered by CCChat and
+       styled by the shared .cc-md rules further down. */
+    .tmsg.user .tmsg-body { background: #2563eb; color: #fff; white-space: pre-wrap; }
     .tmsg.assistant .tmsg-body { background: #17171c; color: #e6e6e6; border: 1px solid #ffffff12; }
-    .tmsg-body p { margin: 0 0 8px; }
-    .tmsg-body p:last-child { margin-bottom: 0; }
-    .tmsg-body pre {
-      background: #05050799; border: 1px solid #ffffff14; border-radius: 8px; padding: 10px 12px;
-      overflow-x: auto; margin: 8px 0; font-family: ui-monospace, Menlo, monospace; font-size: .76rem;
-    }
-    .tmsg-body code {
-      font-family: ui-monospace, Menlo, monospace; font-size: .78em;
-      background: #ffffff1a; padding: 1px 5px; border-radius: 5px;
-    }
-    .tmsg-body pre code { background: none; padding: 0; }
-    .tmsg-body strong { font-weight: 700; }
-    .tmsg-cursor { display: inline-block; width: 7px; height: 1em; background: #6ee787; vertical-align: -2px; animation: blink 1s steps(2) infinite; }
-    .tmsg-stream { white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, Menlo, monospace; font-size: .78rem; }
-    .tmsg-stream .dim { color: #9aa0aa; }
     @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
     /* Compact summary strip parsed from the CLI's end-of-turn footer. */
     .tmsg-meta {
@@ -518,7 +505,105 @@
     }
     .notify-install.show { display: block; }
     .settings-drawer .actions { display: flex; gap: 8px; margin-top: 6px; }
+
+    /* ---- Shared streamed-markdown renderer (public/chat-render.js) --------
+       One stylesheet for every surface that streams Copilot output: the PR
+       chat panel, the pre-issue chat panel and the Admin Terminal. Colours are
+       deliberately alpha-based (#888x) so the same rules read correctly on the
+       light chat bubbles and on the dark terminal. */
+    .cc-scrollhost { position: relative; display: flex; flex-direction: column; min-height: 0; }
+    .term > .cc-scrollhost { flex: 1; }
+    .cc-md { line-height: 1.55; word-break: break-word; overflow-wrap: anywhere; }
+    /* Assistant bubbles hold markdown now, not preformatted monospace text. */
+    .chat-text.cc-md { white-space: normal; font-family: inherit; font-size: .84rem; }
+    .cc-md > .cc-blk > :first-child { margin-top: 0; }
+    .cc-md > .cc-blk:last-of-type > :last-child { margin-bottom: 0; }
+    .cc-md p { margin: 0 0 .6em; }
+    .cc-md h1, .cc-md h2, .cc-md h3, .cc-md h4, .cc-md h5, .cc-md h6 {
+      margin: .9em 0 .4em; line-height: 1.3; font-weight: 700;
+    }
+    .cc-md h1 { font-size: 1.18em; }
+    .cc-md h2 { font-size: 1.1em; }
+    .cc-md h3 { font-size: 1.02em; }
+    .cc-md h4, .cc-md h5, .cc-md h6 { font-size: .96em; }
+    .cc-md ul, .cc-md ol { margin: 0 0 .6em; padding-left: 1.35em; }
+    .cc-md li { margin: .18em 0; }
+    .cc-md li > p { margin: 0 0 .3em; }
+    .cc-md li.task-list-item { list-style: none; margin-left: -1.15em; }
+    .cc-md li.task-list-item input { margin-right: .45em; }
+    .cc-md a { color: #2563eb; text-decoration: underline; }
+    .tmsg-body .cc-md a, .cc-md.tmsg-body a { color: #79b8ff; }
+    .cc-md blockquote {
+      margin: 0 0 .6em; padding: .1em 0 .1em .8em; border-left: 3px solid #8886; opacity: .88;
+    }
+    .cc-md hr { border: 0; border-top: 1px solid #8884; margin: .9em 0; }
+    .cc-md table {
+      border-collapse: collapse; margin: 0 0 .6em; font-size: .95em;
+      display: block; max-width: 100%; overflow-x: auto;
+    }
+    .cc-md th, .cc-md td { border: 1px solid #8886; padding: 4px 9px; text-align: left; }
+    .cc-md th { background: #8882; font-weight: 700; }
+    .cc-md code {
+      font-family: ui-monospace, Menlo, monospace; font-size: .88em;
+      background: #8883; padding: 1px 5px; border-radius: 5px;
+    }
+    /* Code fences stay dark on every surface so one highlight.js theme works. */
+    .cc-pre { position: relative; margin: 0 0 .6em; }
+    .cc-md pre {
+      margin: 0; background: #0d1117; color: #e6edf3; border: 1px solid #ffffff1f;
+      border-radius: 8px; padding: 10px 12px; overflow-x: auto;
+      font-family: ui-monospace, Menlo, monospace; font-size: .74rem; line-height: 1.5;
+    }
+    .cc-md pre code, .cc-md pre code.hljs {
+      background: none; padding: 0; font-size: inherit; color: inherit; display: block;
+    }
+    .cc-copy {
+      font: inherit; font-size: .66rem; line-height: 1; cursor: pointer;
+      border-radius: 6px; padding: 4px 7px; border: 1px solid #8886;
+      background: #8882; color: inherit;
+    }
+    .cc-pre > .cc-copy {
+      position: absolute; top: 6px; right: 6px; z-index: 2;
+      border-color: #ffffff2e; background: #ffffff1a; color: #c9d1d9;
+      opacity: 0; transition: opacity .12s;
+    }
+    .cc-pre:hover > .cc-copy, .cc-pre > .cc-copy:focus { opacity: 1; }
+    /* Touch devices have no hover, so keep the button faintly visible. */
+    @media (hover: none) { .cc-pre > .cc-copy { opacity: .7; } }
+    .cc-md > .cc-copy { display: inline-flex; margin-top: 8px; opacity: .65; }
+    .cc-md > .cc-copy:hover { opacity: 1; }
+    /* Very long tool/terminal dumps fold away instead of burying the answer. */
+    .cc-pre.cc-collapsed pre { max-height: 15em; overflow: hidden; }
+    .cc-pre.cc-collapsed::after {
+      content: ''; position: absolute; left: 1px; right: 1px; bottom: 26px; height: 44px;
+      background: linear-gradient(to bottom, #0d111700, #0d1117); pointer-events: none;
+    }
+    .cc-more {
+      display: block; width: 100%; margin-top: 4px; cursor: pointer; font: inherit;
+      font-size: .68rem; padding: 4px; border-radius: 6px; border: 1px solid #8886;
+      background: #8882; color: inherit;
+    }
+    /* Shimmer until the first token lands, then a blinking caret. */
+    .cc-cursor {
+      display: inline-block; width: 7px; height: 1em; background: #6ee787;
+      vertical-align: -2px; animation: blink 1s steps(2) infinite;
+    }
+    .cc-cursor:only-child {
+      width: 92px; border-radius: 5px; animation: ccshimmer 1.3s linear infinite;
+      background: linear-gradient(90deg, #8883, #8887, #8883); background-size: 200% 100%;
+    }
+    @keyframes ccshimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+    .cc-jump {
+      position: absolute; left: 50%; transform: translateX(-50%); bottom: 12px; z-index: 6;
+      font: inherit; font-size: .72rem; font-weight: 600; padding: 6px 13px; cursor: pointer;
+      border-radius: 999px; border: none; background: #2563eb; color: #fff;
+      box-shadow: 0 2px 10px #0005;
+    }
+    .cc-jump[hidden] { display: none; }
+    .cc-noout { color: #9aa0aa; }
+    .cc-aborted { color: #eab308; }
   </style>
+  <link rel="stylesheet" href="/vendor/highlight-github-dark.min.css" />
 </head>
 <body>
   <nav class="navbar">
@@ -668,6 +753,12 @@
   </div>
 
 <script src="/notify.js"></script>
+<!-- Vendored (see public/vendor/README.md) — no third-party CDN is ever hit at
+     runtime, so the app keeps working on a LAN with no internet. -->
+<script src="/vendor/marked.min.js"></script>
+<script src="/vendor/purify.min.js"></script>
+<script src="/vendor/highlight.min.js"></script>
+<script src="/chat-render.js"></script>
 <script>
 const reposEl = document.getElementById('repos');
 const rootLine = document.getElementById('rootline');
@@ -1763,7 +1854,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     worklog.classList.add('show');
     worklog.innerHTML = '<span class="stderr">loading transcript…</span>';
     const rec = await fetchRecord();
-    worklog.innerHTML = '';
+    CCChat.resetText(worklog);
     appendWork(rec.work.conversation || '(no transcript stored yet)', rec.work.conversation ? null : 'stderr');
   }
 
@@ -1771,9 +1862,10 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     const panelEl = deployPanel(prNumber);
     if (!panelEl) return;
     panelEl.classList.add('show');
+    CCChat.resetText(panelEl);
     panelEl.innerHTML = '<span class="stderr">loading transcript…</span>';
     const rec = await fetchRecord();
-    panelEl.innerHTML = '';
+    CCChat.resetText(panelEl);
     const prRec = (rec.prs || {})[prNumber];
     const conv = prRec && prRec.deploy && prRec.deploy.conversation;
     appendTo(panelEl, conv || '(no transcript stored yet)', conv ? null : 'stderr');
@@ -1783,20 +1875,22 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     const panelEl = mergePanel(prNumber);
     if (!panelEl) return;
     panelEl.classList.add('show');
+    CCChat.resetText(panelEl);
     panelEl.innerHTML = '<span class="stderr">loading transcript…</span>';
     const rec = await fetchRecord();
-    panelEl.innerHTML = '';
+    CCChat.resetText(panelEl);
     const prRec = (rec.prs || {})[prNumber];
     const conv = prRec && prRec.merge && prRec.merge.conversation;
     appendTo(panelEl, conv || '(no transcript stored yet)', conv ? null : 'stderr');
   }
 
+  // Pipeline logs are raw CLI output (interleaved stdout/stderr, progress
+  // spinners), not markdown — so they stay verbatim. They do share CCChat's
+  // sticky-bottom autoscroll and its node coalescing: consecutive chunks from
+  // the same stream extend one text node instead of adding a <span> each, which
+  // is what used to make a long Create-PR run janky on mobile.
   function appendTo(panelEl, text, cls) {
-    const span = document.createElement('span');
-    if (cls) span.className = cls;
-    span.textContent = text;
-    panelEl.appendChild(span);
-    panelEl.scrollTop = panelEl.scrollHeight;
+    CCChat.appendText(panelEl, text, cls);
   }
   function appendWork(text, cls) { appendTo(worklog, text, cls); }
   function appendDeploy(prNumber, text, cls) { const p = deployPanel(prNumber); if (p) appendTo(p, text, cls); }
@@ -2355,6 +2449,9 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
     </div>`;
 
   const messagesEl = wrap.querySelector('.chat-messages');
+  // Sticky-bottom autoscroll + "jump to latest" pill, so reading back through a
+  // live turn isn't interrupted by every incoming token.
+  const chatSticky = CCChat.sticky(messagesEl, { pill: true });
   const inputEl = wrap.querySelector('.chat-input');
   const sendBtn = wrap.querySelector('.chat-send');
   const abortBtn = wrap.querySelector('.chat-abort');
@@ -2388,20 +2485,26 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
       metaEl.textContent = `${roleLabel} · ${m.mode || ''}`;
       const textEl = document.createElement('div');
       textEl.className = 'chat-text';
-      textEl.textContent = m.text;
+      // User turns are prompts, not markdown, so they stay verbatim. Assistant
+      // turns go through the shared renderer + the CLI footer chip strip.
+      if (m.role === 'user') textEl.textContent = m.text;
+      else {
+        const { body, footer } = renderAssistant(m.text || '');
+        CCChat.renderInto(textEl, body, { trailingHtml: footer });
+      }
       bubble.append(metaEl, textEl);
       if (m.images && m.images.length) bubble.insertAdjacentHTML('beforeend', renderMsgImages(m.images));
       messagesEl.appendChild(bubble);
     }
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    chatSticky.pin();
   }
   renderMessages();
 
-  // Append a live assistant bubble and return its text element. Streamed chunks
-  // are appended as text nodes (the Create-PR log approach) instead of
-  // re-rendering the whole message list per chunk — the latter left the
-  // in-flight reply out of `messages` entirely, so nothing showed until the
-  // turn finished (and it silently drops on mobile besides).
+  // Append a live assistant bubble and return a CCChat stream sink for it. The
+  // sink re-parses the accumulated buffer as markdown on a throttled cadence
+  // and patches only the blocks that changed, so the reply is readable *while*
+  // it streams instead of flipping from raw monospace to HTML at the end — and
+  // a long turn no longer costs one DOM node (and one reflow) per SSE chunk.
   function appendLiveAssistant(mode) {
     const empty = messagesEl.querySelector('.chat-empty');
     if (empty) empty.remove();
@@ -2414,8 +2517,8 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
     textEl.className = 'chat-text';
     bubble.append(metaEl, textEl);
     messagesEl.appendChild(bubble);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-    return textEl;
+    chatSticky.pin();
+    return CCChat.createStream(textEl, { scrollEl: messagesEl });
   }
 
   function setSending(sending) {
@@ -2437,9 +2540,8 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
       messages.push(userMsg);
       renderMessages();
     }
-    // Live streaming bubble — append chunks incrementally so the reply shows in
-    // real time (mobile-safe), instead of only appearing once the turn ends.
-    const textEl = appendLiveAssistant(mode);
+    // Live streaming bubble — markdown is rendered incrementally as chunks land.
+    const stream = appendLiveAssistant(mode);
     let raw = '';
     let finalStatus = null;
     try {
@@ -2449,13 +2551,13 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
       });
       if (!resp.ok || !resp.body) {
         raw = `[error] ${await friendlyHttpError(resp)}`;
-        textEl.appendChild(document.createTextNode(raw));
+        stream.finish({ body: raw });
         messages.push({ role: 'assistant', text: raw, mode, at: new Date().toISOString() });
         setSending(false); return;
       }
       await pumpSSE(resp, {
-        onChunk: (t) => { raw += t; textEl.appendChild(document.createTextNode(t)); messagesEl.scrollTop = messagesEl.scrollHeight; },
-        onError: (m) => { const s = `\n[error] ${m}`; raw += s; textEl.appendChild(document.createTextNode(s)); },
+        onChunk: (t) => { raw += t; stream.push(t); },
+        onError: (m) => { const s = `\n[error] ${m}`; raw += s; stream.push(s); },
         onResult: (d) => { finalStatus = d.status; },
         notify: {
           action: 'chat',
@@ -2468,8 +2570,10 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
       });
     } catch (e) {
       const s = `\n[connection dropped: ${e.message}]`;
-      raw += s; textEl.appendChild(document.createTextNode(s));
+      raw += s; stream.push(s);
     }
+    const { body: finalBody, footer } = renderAssistant(raw);
+    stream.finish({ body: finalBody, trailingHtml: footer, emptyHtml: '<p class="cc-noout">(no output)</p>' });
     messages.push({ role: 'assistant', text: raw, mode, at: new Date().toISOString() });
     setSending(false);
 
@@ -2731,6 +2835,7 @@ async function renderPreIssueDetail(repoName, id) {
   preIssueDetailView.appendChild(wrap);
 
   const messagesEl = chatWrap.querySelector('.chat-messages');
+  const chatSticky = CCChat.sticky(messagesEl, { pill: true });
   const inputEl = chatWrap.querySelector('.chat-input');
   const sendBtn = chatWrap.querySelector('.chat-send');
   const abortBtn = chatWrap.querySelector('.chat-abort');
@@ -2752,11 +2857,15 @@ async function renderPreIssueDetail(repoName, id) {
       metaEl.textContent = m.role === 'user' ? 'You' : 'Copilot';
       const textEl = document.createElement('div');
       textEl.className = 'chat-text';
-      textEl.textContent = m.text;
+      if (m.role === 'user') textEl.textContent = m.text;
+      else {
+        const { body, footer } = renderAssistant(m.text || '');
+        CCChat.renderInto(textEl, body, { trailingHtml: footer });
+      }
       bubble.append(metaEl, textEl);
       messagesEl.appendChild(bubble);
     }
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    chatSticky.pin();
   }
   renderMessages();
 
@@ -2772,8 +2881,8 @@ async function renderPreIssueDetail(repoName, id) {
     textEl.className = 'chat-text';
     bubble.append(metaEl, textEl);
     messagesEl.appendChild(bubble);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-    return textEl;
+    chatSticky.pin();
+    return CCChat.createStream(textEl, { scrollEl: messagesEl });
   }
 
   function setSending(sending) {
@@ -2788,7 +2897,7 @@ async function renderPreIssueDetail(repoName, id) {
       messages.push({ role: 'user', text, at: new Date().toISOString() });
       renderMessages();
     }
-    const textEl = appendLiveAssistant();
+    const stream = appendLiveAssistant();
     let raw = '';
     let finalDraft = null;
     try {
@@ -2798,13 +2907,13 @@ async function renderPreIssueDetail(repoName, id) {
       });
       if (!resp.ok || !resp.body) {
         raw = `[error] HTTP ${resp.status}`;
-        textEl.appendChild(document.createTextNode(raw));
+        stream.finish({ body: raw });
         messages.push({ role: 'assistant', text: raw, at: new Date().toISOString() });
         setSending(false); return;
       }
       await pumpSSE(resp, {
-        onChunk: (t) => { raw += t; textEl.appendChild(document.createTextNode(t)); messagesEl.scrollTop = messagesEl.scrollHeight; },
-        onError: (m) => { const s = `\n[error] ${m}`; raw += s; textEl.appendChild(document.createTextNode(s)); },
+        onChunk: (t) => { raw += t; stream.push(t); },
+        onError: (m) => { const s = `\n[error] ${m}`; raw += s; stream.push(s); },
         onResult: (d) => { finalDraft = d.draft || null; },
         notify: {
           action: 'preissue-chat',
@@ -2815,8 +2924,10 @@ async function renderPreIssueDetail(repoName, id) {
       });
     } catch (e) {
       const s = `\n[connection dropped: ${e.message}]`;
-      raw += s; textEl.appendChild(document.createTextNode(s));
+      raw += s; stream.push(s);
     }
+    const { body: finalBody, footer } = renderAssistant(raw);
+    stream.finish({ body: finalBody, trailingHtml: footer, emptyHtml: '<p class="cc-noout">(no output)</p>' });
     messages.push({ role: 'assistant', text: raw, at: new Date().toISOString() });
     setSending(false);
     if (finalDraft) {
@@ -2847,27 +2958,8 @@ async function renderPreIssueDetail(repoName, id) {
 }
 
 // ---- Admin terminal: free-form Copilot CLI chat rooted at REPOS_ROOT -------
-function mdToHtml(text) {
-  // Escape first, then apply a tiny, safe subset of markdown. Order matters:
-  // fenced code blocks are pulled out before inline formatting so their
-  // contents aren't reinterpreted.
-  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const blocks = [];
-  let s = text.replace(/```(?:[\w-]*)\n?([\s\S]*?)```/g, (_, code) => {
-    blocks.push(`<pre><code>${esc(code.replace(/\n$/, ''))}</code></pre>`);
-    return `\u0000${blocks.length - 1}\u0000`;
-  });
-  s = esc(s);
-  s = s.replace(/`([^`\n]+)`/g, (_, c) => `<code>${c}</code>`);
-  s = s.replace(/\*\*([^*\n]+)\*\*/g, (_, b) => `<strong>${b}</strong>`);
-  // paragraphs / line breaks
-  s = s
-    .split(/\n{2,}/)
-    .map((para) => `<p>${para.replace(/\n/g, '<br>')}</p>`)
-    .join('');
-  s = s.replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[Number(i)]);
-  return s;
-}
+// Markdown rendering itself lives in public/chat-render.js (marked + DOMPurify
+// + highlight.js, all vendored) and is shared with every chat surface.
 
 // The Copilot CLI appends a plain-text summary footer after each turn, e.g.
 //   Changes    +0 -0
@@ -2919,11 +3011,12 @@ function footerHtml(meta) {
   return chips.length ? `<div class="tmsg-meta">${chips.join('')}</div>` : '';
 }
 
-// Render an assistant turn: clean answer body + chip strip, footer stripped.
+// Split an assistant turn into the answer body (markdown, to be handed to
+// CCChat) and the pre-rendered chip strip, with the CLI footer stripped out.
 function renderAssistant(raw) {
   const { body, meta } = splitCopilotFooter(raw);
   const hasBody = body.trim().length > 0;
-  return { html: hasBody ? mdToHtml(body) : '', footer: footerHtml(meta), hasBody };
+  return { body: hasBody ? body : '', footer: footerHtml(meta), hasBody };
 }
 
 let adminInited = false;
@@ -2932,6 +3025,8 @@ function initAdminTerminal() {
   adminInited = true;
 
   const logEl = document.getElementById('termLog');
+  // Sticky-bottom autoscroll + "jump to latest" pill for the terminal log.
+  const termSticky = CCChat.sticky(logEl, { pill: true });
   const inputEl = document.getElementById('termInput');
   const sendBtn = document.getElementById('termSend');
   const abortBtn = document.getElementById('termAbort');
@@ -2958,7 +3053,7 @@ function initAdminTerminal() {
   // restart that died before Copilot assigned a session id. Always use
   // currentChatId (not sessionId) to fetch/delete/highlight a conversation.
   let currentChatId = null;
-  let activeTurn = null; // { turnId, asstBody, raw } while a turn streams/reconnects
+  let activeTurn = null; // { turnId, asstBody, stream } while a turn streams/reconnects
 
   const LS_ADMIN_TURN = 'cc.adminActiveTurn';
   const LS_ADMIN_REPO = 'cc.adminRepo';
@@ -2975,6 +3070,10 @@ function initAdminTerminal() {
     if (!activeTurn) return;
     const t = activeTurn;
     activeTurn = null;
+    // The bubble is about to be replaced by another transcript, so tear the
+    // renderer down rather than finishing it — otherwise its pending repaint
+    // keeps firing and the log stays in "a turn is live" mode.
+    if (t.stream) t.stream.dispose();
     localStorage.removeItem(LS_ADMIN_TURN);
     setSending(false);
     try { await fetch(`/api/admin/chat/${encodeURIComponent(t.turnId)}/cancel`, { method: 'POST' }); } catch { /* ignore */ }
@@ -3091,10 +3190,13 @@ function initAdminTerminal() {
       setSelectedRepo(chat.repo || '');
       logEl.innerHTML = '';
       (chat.messages || []).forEach((m) => {
-        const body = addMessage(m.role === 'user' ? 'user' : 'assistant');
-        if (m.role === 'user') body.textContent = m.text || '';
-        else { const { html, footer } = renderAssistant(m.text || ''); body.innerHTML = html + footer; }
-        if (m.images && m.images.length) body.insertAdjacentHTML('beforeend', renderMsgImages(m.images));
+        const bodyEl = addMessage(m.role === 'user' ? 'user' : 'assistant');
+        if (m.role === 'user') bodyEl.textContent = m.text || '';
+        else {
+          const { body, footer } = renderAssistant(m.text || '');
+          CCChat.renderInto(bodyEl, body, { trailingHtml: footer });
+        }
+        if (m.images && m.images.length) bodyEl.insertAdjacentHTML('beforeend', renderMsgImages(m.images));
       });
       if (!chat.messages || !chat.messages.length) {
         logEl.innerHTML = '<div class="term-empty">This conversation has no messages yet.</div>';
@@ -3140,7 +3242,7 @@ function initAdminTerminal() {
     body.className = 'tmsg-body';
     wrap.append(roleEl, body);
     logEl.appendChild(wrap);
-    logEl.scrollTop = logEl.scrollHeight;
+    termSticky.pin();
     return body;
   }
 
@@ -3153,42 +3255,41 @@ function initAdminTerminal() {
     statusEl.textContent = sending ? 'Copilot is thinking…' : '';
   }
 
-  // Stream chunks in by appending text nodes (the Create-PR log approach),
-  // NOT by re-rendering the whole reply per chunk — repeated innerHTML rewrites
-  // during a streaming fetch read silently fail to repaint on mobile Safari.
-  // The tidy markdown + chip render happens once at the end in finishTurn.
-  function appendActiveChunk(t, streamName) {
-    if (!activeTurn || !activeTurn.streamEl) return;
-    activeTurn.raw += t;
-    const node = document.createElement('span');
-    if (streamName === 'stderr') node.className = 'dim';
-    node.textContent = t;
-    activeTurn.streamEl.appendChild(node);
-    logEl.scrollTop = logEl.scrollHeight;
+  // Feed a chunk into the turn's CCChat stream sink, which re-parses the whole
+  // accumulated buffer as markdown on a throttled cadence and patches only the
+  // block that changed. stdout and stderr both land in the same buffer — the
+  // final render never distinguished them either, and interleaving styled spans
+  // with markdown blocks isn't meaningful.
+  function appendActiveChunk(t) {
+    if (!activeTurn || !activeTurn.stream) return;
+    activeTurn.stream.push(t);
   }
 
   // On a job re-subscribe the server replays the whole transcript as one chunk
   // preceded by meta{replay:true}; clear both the buffer and the DOM so it
   // isn't doubled.
   function resetActiveStream() {
-    if (!activeTurn || !activeTurn.streamEl) return;
-    activeTurn.raw = '';
-    activeTurn.streamEl.textContent = '';
+    if (!activeTurn || !activeTurn.stream) return;
+    activeTurn.stream.reset();
   }
 
   function finishTurn(status, finalSession, note) {
     if (!activeTurn) return;
-    const { asstBody, raw } = activeTurn;
-    const { html: bodyHtml, footer, hasBody } = renderAssistant(raw);
-    let html = hasBody ? bodyHtml : '';
-    if (status === 'aborted') html += '<p style="color:#eab308">[aborted]</p>';
-    if (note) html += `<p class="err">[${escape(note)}]</p>`;
-    asstBody.innerHTML = (html || '<p style="color:#9aa0aa">(no output)</p>') + footer;
+    const { stream } = activeTurn;
+    const { body, footer, hasBody } = renderAssistant(stream.getRaw());
+    let trailing = footer;
+    if (status === 'aborted') trailing = '<p class="cc-aborted">[aborted]</p>' + trailing;
+    if (note) trailing = `<p class="err">[${escape(note)}]</p>` + trailing;
+    stream.finish({
+      body: hasBody ? body : '',
+      trailingHtml: trailing,
+      emptyHtml: '<p class="cc-noout">(no output)</p>',
+    });
     if (finalSession) { sessionId = finalSession; currentChatId = finalSession; }
     localStorage.removeItem(LS_ADMIN_TURN);
     activeTurn = null;
     setSending(false);
-    logEl.scrollTop = logEl.scrollHeight;
+    termSticky.follow();
   }
 
   // A turn that died mid-flight (server restart) but got recovered by
@@ -3215,8 +3316,8 @@ function initAdminTerminal() {
     try {
       await pumpSSE(resp, {
         onMeta: (m) => { if (m && m.replay) resetActiveStream(); },
-        onChunk: (t, s) => appendActiveChunk(t, s),
-        onError: (m) => appendActiveChunk(`\n[error] ${m}`, 'stderr'),
+        onChunk: (t) => appendActiveChunk(t),
+        onError: (m) => appendActiveChunk(`\n[error] ${m}`),
         onResult: (d) => {
           if (!d) return;
           if (d.sessionId) finalSession = d.sessionId;
@@ -3273,10 +3374,9 @@ function initAdminTerminal() {
     userBody.textContent = text;
     if (images.length) userBody.insertAdjacentHTML('beforeend', renderMsgImages(images));
     const asstBody = addMessage('assistant');
-    asstBody.innerHTML = '<span class="tmsg-stream"></span><span class="tmsg-cursor"></span>';
 
     const turnId = makeTurnId();
-    activeTurn = { turnId, asstBody, raw: '', streamEl: asstBody.querySelector('.tmsg-stream') };
+    activeTurn = { turnId, asstBody, stream: CCChat.createStream(asstBody, { scrollEl: logEl }) };
     localStorage.setItem(LS_ADMIN_TURN, JSON.stringify({ turnId, sessionId, text }));
     setSending(true);
 
@@ -3290,12 +3390,12 @@ function initAdminTerminal() {
     } catch {
       // Couldn't reach the server to start — the job may still have launched,
       // so try reconnecting rather than giving up.
-      appendActiveChunk('\n[connection dropped — reconnecting…]', 'stderr');
+      appendActiveChunk('\n[connection dropped — reconnecting…]');
       return reconnectLoop();
     }
     if (!resp.ok || !resp.body) { finishTurn('failed', null, await friendlyHttpError(resp)); return; }
     if (!(await consumeStream(resp))) {
-      if (activeTurn) appendActiveChunk('\n[connection dropped — reconnecting…]', 'stderr');
+      if (activeTurn) appendActiveChunk('\n[connection dropped — reconnecting…]');
       await reconnectLoop();
     }
   }
@@ -3310,8 +3410,7 @@ function initAdminTerminal() {
     clearEmpty();
     if (saved.text) { const ub = addMessage('user'); ub.textContent = saved.text; }
     const asstBody = addMessage('assistant');
-    asstBody.innerHTML = '<span class="tmsg-stream"></span><span class="tmsg-cursor"></span>';
-    activeTurn = { turnId: saved.turnId, asstBody, raw: '', streamEl: asstBody.querySelector('.tmsg-stream') };
+    activeTurn = { turnId: saved.turnId, asstBody, stream: CCChat.createStream(asstBody, { scrollEl: logEl }) };
     setSending(true);
     let resp;
     try { resp = await fetch(`/api/admin/chat/${encodeURIComponent(saved.turnId)}/stream`); }
@@ -3326,7 +3425,7 @@ function initAdminTerminal() {
   });
   abortBtn.addEventListener('click', async () => {
     if (!activeTurn) return;
-    appendActiveChunk('\n[abort requested…]', 'stderr');
+    appendActiveChunk('\n[abort requested…]');
     try { await fetch(`/api/admin/chat/${encodeURIComponent(activeTurn.turnId)}/cancel`, { method: 'POST' }); } catch { /* ignore */ }
     // The job then emits result(aborted)+done, which the live stream turns into
     // a finished turn.

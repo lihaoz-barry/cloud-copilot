@@ -206,6 +206,39 @@ pipeline you get:
     history after reload. The same attachment support is available in the
     Admin Terminal composer.
 
+### Non-blocking chat: type ahead, queue, pick a model
+
+Every composer (PR chat, PreIssue chat, Admin Terminal) shares the same
+behaviour:
+
+- **The input never locks while a reply streams.** Anything sent mid-stream is
+  **queued** (the send button reads *Queue*) and shown as a grey "QUEUED"
+  bubble at the bottom of the conversation. Queued turns are dispatched
+  automatically in FIFO order, each getting its own reply bubble.
+  Only one Copilot process may run per chat (the job key is per PR / PreIssue /
+  admin turn and the conversation is chained with `--resume`), so this is
+  strictly *serial type-ahead*, not parallel conversations.
+- **Per-message controls**: ✕ drops a queued message, ⚡ sends it *now* — it
+  jumps to the front of the queue and the running turn is aborted.
+- Aborting a turn does **not** clear the queue: the next queued message goes out
+  as soon as the aborted turn ends.
+- Queued messages (with their attachments, where size permits) are mirrored to
+  `localStorage`, so a refresh or a dropped phone connection doesn't throw away
+  what was already typed — they resume sending after the live turn has been
+  re-attached.
+- **Per-chat model picker** next to each composer, populated from
+  `/api/settings/model`. It starts at the global default, but changing it only
+  affects *that chat's* following turns — the homepage setting is never
+  silently overwritten. The model is captured **when a message is queued**, so
+  switching the dropdown afterwards never rewrites what's already waiting, and
+  each reply bubble carries a small badge naming the model that answered.
+  If the model list can't be loaded the picker shows `(unavailable)` and is
+  disabled — sending still works and the server falls back to the global model.
+- **Enter sends**, Shift+Enter inserts a newline, ⌘/Ctrl+Enter still sends.
+  Enter never fires mid-IME-composition (so picking Chinese/Japanese candidates
+  is safe), and on touch devices Enter always inserts a newline — sending there
+  goes through the button, so a soft keyboard can't fire off a message.
+
 ---
 
 ## API
@@ -222,7 +255,7 @@ pipeline you get:
 | POST | `/api/repos/:name/issues/:n/deploy/:pr/cancel` | Abort the running deploy for that PR. |
 | POST | `/api/repos/:name/issues/:n/merge/:pr` | **Merge a specific PR** — SSE stream. Body: `{ "force": false }`. Blocked unless Deploy succeeded, unless `force: true`. |
 | POST | `/api/repos/:name/issues/:n/merge/:pr/cancel` | Abort the running merge for that PR. |
-| POST | `/api/repos/:name/issues/:n/prs/:pr/chat` | **Chat with a PR** — SSE stream. Body: `{ "message": "...", "mode": "plan"\|"apply" }`. `plan` is read-only (default approval flags); `apply` implements + pushes to the existing branch and resets Deploy/Merge on success. |
+| POST | `/api/repos/:name/issues/:n/prs/:pr/chat` | **Chat with a PR** — SSE stream. Body: `{ "message": "...", "mode": "plan"\|"apply", "model": "..." }`. `plan` is read-only (default approval flags); `apply` implements + pushes to the existing branch and resets Deploy/Merge on success. The optional `model` overrides the global setting for that turn only (unknown values fall back to it). |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat/cancel` | Abort the running chat turn for that PR. |
 | POST | `/api/run` | Simple one-shot demo (prompt + optional `sessionId` resume). |
 

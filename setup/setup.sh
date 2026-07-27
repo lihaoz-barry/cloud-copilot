@@ -31,6 +31,9 @@ GLOBAL_SKILLS="$HOME/.agents/skills"
 CONFIG_DIR="$HOME/.config/cloud-copilot"
 DEPLOY_ENV="$CONFIG_DIR/deploy.env"
 DEPLOY_ENV_EXAMPLE="$REPO_DIR/setup/deploy.env.example"
+NOTIFY_ENV="$CONFIG_DIR/notify.env"
+NOTIFY_ENV_EXAMPLE="$REPO_DIR/setup/notify.env.example"
+COPILOT_HOOK="$HOME/Repos/hooks/copilot-notify.sh"
 
 SKILLS_SCOPE="global"
 OVERRIDE_SKILLS=""
@@ -204,7 +207,32 @@ else
 fi
 
 # --------------------------------------------------------------------------
-section "6. cloud-copilot dependencies"
+section "6. Push notifications (ntfy)"
+# --------------------------------------------------------------------------
+mkdir -p "$CONFIG_DIR"
+if [[ ! -f "$NOTIFY_ENV" ]]; then
+  cp "$NOTIFY_ENV_EXAMPLE" "$NOTIFY_ENV"
+  warn "created $NOTIFY_ENV — set NTFY_TOPIC (and APP_BASE_URL) to get task-aware pushes"
+else
+  # shellcheck disable=SC1090
+  ( set +u; source "$NOTIFY_ENV" 2>/dev/null; [[ -n "${NTFY_TOPIC:-}" ]] ) \
+    && ok "ntfy configured ($NOTIFY_ENV)" \
+    || warn "$NOTIFY_ENV has no NTFY_TOPIC — pushes are disabled"
+fi
+
+# The Copilot CLI's own sessionEnd hook can only say "[repo] session complete".
+# cloud-copilot sends a far more specific push per job, so the hook must stay
+# quiet for runs it starts (they carry CLOUD_COPILOT_JOB=1).
+if [[ -f "$COPILOT_HOOK" ]]; then
+  if grep -q 'CLOUD_COPILOT_JOB' "$COPILOT_HOOK"; then
+    ok "sessionEnd hook already mutes cloud-copilot jobs"
+  else
+    warn "add to the top of $COPILOT_HOOK:  [[ -n \"\$CLOUD_COPILOT_JOB\" ]] && exit 0"
+  fi
+fi
+
+# --------------------------------------------------------------------------
+section "7. cloud-copilot dependencies"
 # --------------------------------------------------------------------------
 if [[ -z "$NO_INSTALL" ]] && have npm; then
   ( cd "$REPO_DIR" && npm install --no-audit --no-fund >/dev/null 2>&1 ) && ok "npm install complete" || warn "npm install had issues — run it manually in $REPO_DIR"

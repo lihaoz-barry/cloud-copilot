@@ -2220,6 +2220,13 @@ function parseHash() {
   return { repo: m[1], issueNumber: Number(m[2]), prNumber: Number(m[3]) };
 }
 
+// Deep link from a push notification straight into one Admin conversation:
+// #/chat/<chatId> (see lib/notifier.js).
+function parseAdminChatHash() {
+  const m = decodeURIComponent(location.hash).match(/^#\/chat\/(.+)$/);
+  return m ? { id: m[1] } : null;
+}
+
 function parsePreIssuesHash() {
   const m = decodeURIComponent(location.hash).match(/^#\/preissues\/([^/]+)$/);
   return m ? { repo: m[1] } : null;
@@ -2238,6 +2245,14 @@ function hideAllHomeViews() {
 }
 
 function route() {
+  // An admin-chat deep link owns the whole page: switch tabs, then open it.
+  const adminChat = parseAdminChatHash();
+  if (adminChat) {
+    if (currentTab !== 'admin') setTab('admin');
+    else initAdminTerminal();
+    if (window.__ccOpenAdminChat) window.__ccOpenAdminChat(adminChat.id);
+    return;
+  }
   if (currentTab !== 'home') return;
   const parsed = parseHash();
   const preList = parsePreIssuesHash();
@@ -3119,6 +3134,9 @@ function initAdminTerminal() {
     logEl.innerHTML = `<div class="term-empty">${emptyStateHtml()}</div>`;
     statusEl.textContent = '';
   }
+
+  // Lets the #/chat/<id> deep link (push notifications) open a conversation.
+  window.__ccOpenAdminChat = loadConversation;
 
   menuBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleHistory(); });
   // Tap anywhere outside the popover (or press Esc) to dismiss it.

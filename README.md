@@ -150,7 +150,54 @@ button), never on page load.
 
 **Not covered (follow-up):** Web Push (VAPID) so alerts arrive with the app
 fully closed. Phase 1 fires notifications from the page itself, which covers the
-"app backgrounded / screen briefly locked" case, not "app killed".
+"app backgrounded / screen briefly locked" case, not "app killed" — that gap is
+what the ntfy push below closes.
+
+### Push to your phone with the app closed (ntfy)
+
+`lib/notifier.js` pushes **one message per finished job** to
+[ntfy](https://ntfy.sh), sent by the server, so it arrives even when the app
+isn't open anywhere. Each push names the exact task, not just "something
+finished":
+
+| Job | Notification |
+| --- | --- |
+| Create PR | `✅ Create PR · cloud-copilot#27` — body: the issue title + the resulting PR link |
+| Deploy | `✅ Deploy · ios-diet-expert PR #112` — body: the version/build Apple actually got |
+| Merge | `✅ Merge · cloud-copilot PR #31` |
+| PR chat | `✅ PR chat · cloud-copilot PR #31` — body: `(apply)` + the request + a summary of the reply |
+| Admin / issue-draft chat | `✅ Admin chat · 刷新页面后聊天新开了一个 tab` — body: a summary of that turn's reply |
+| Anything that fails / is aborted | same title with ` 失败` / ` 已中断` and a ❌ / ⚠️ tag, plus the first error line |
+
+Tapping a push opens the app at the matching place (`#/pr/<repo>/<issue>/<pr>`,
+`#/preissue/<repo>/<id>` or `#/chat/<chatId>`); successful Create PR runs also
+get an **Open PR** action button pointing at GitHub.
+
+**Setup** — copy `setup/notify.env.example` to
+`~/.config/cloud-copilot/notify.env` (or let `setup/setup.sh` do it) and set:
+
+```sh
+NTFY_TOPIC=some-unguessable-topic   # subscribe to the same topic in the ntfy app
+APP_BASE_URL=http://your-mac.local:8787   # optional: makes pushes tappable
+# NTFY_SERVER=https://ntfy.sh       # or your own instance
+# NTFY_TOKEN=tk_...                 # only for a protected server
+# NTFY_ENABLED=0                    # temporarily mute without deleting the config
+```
+
+Every key can also be passed as a real environment variable, which wins over the
+file. **With no `NTFY_TOPIC` nothing is pushed and nothing errors** — pushing is
+best-effort by design: it runs after the job's state is already persisted, has a
+10s timeout, is wrapped in try/catch, and de-duplicates the same job key within
+60s, so a dead network can never change a job's outcome.
+
+**Don't double-notify.** If you also use the Copilot CLI's own `sessionEnd` ntfy
+hook, mute it for runs cloud-copilot starts — every job's child process is
+spawned with `CLOUD_COPILOT_JOB=1`, so one line at the top of the hook script is
+enough:
+
+```sh
+[[ -n "$CLOUD_COPILOT_JOB" ]] && exit 0   # cloud-copilot sends its own, specific push
+```
 
 ### Per-repo deploy config (`.cloud-copilot.json`)
 
@@ -448,6 +495,7 @@ cloud-copilot/
 │   ├── gh.js           # enumerate repos, list issues/PRs/single-PR via `gh` (cached)
 │   ├── store.js        # per-issue status persisted to data/state.json
 │   ├── jobs.js         # durable job manager: child outlives the browser connection
+│   ├── notifier.js     # task-aware push notifications to ntfy when a job ends
 │   ├── runner.js       # spawn copilot, stream SSE, capture transcript + session id
 │   └── repoConfig.js   # loads a repo's .cloud-copilot.json (or auto-detects iOS)
 ├── public/
@@ -459,6 +507,11 @@ cloud-copilot/
 │   └── sounds/         # success + failure chimes (generated)
 ├── scripts/
 │   └── gen-assets.js   # regenerates public/icons + public/sounds (no deps)
+├── setup/
+│   ├── setup.sh        # one-shot machine setup (CLI, gh, skills, deploy + ntfy config)
+│   ├── deploy.env.example  # → ~/.config/cloud-copilot/deploy.env
+│   └── notify.env.example  # → ~/.config/cloud-copilot/notify.env (ntfy topic)
+├── test/               # `npm test` (node:test, no dependencies)
 ├── data/               # state.json (gitignored)
 ├── .gitignore
 └── README.md

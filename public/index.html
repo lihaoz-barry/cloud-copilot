@@ -246,8 +246,9 @@
       width: 100%; font: inherit; padding: 10px 12px; border-radius: 10px; border: 1px solid #8884;
       background: #8881; color: inherit; resize: vertical; min-height: 60px;
     }
-    .chat-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .chat-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; row-gap: 8px; }
     .chat-actions .spacer { flex: 1; }
+    .chat-send { margin-left: auto; }
     .chat-pending-list { display: flex; flex-direction: column; gap: 10px; align-items: flex-end; }
     .chat-pending-list:empty { display: none; }
     .chat-empty { color: #888; font-size: .8rem; padding: 4px 0 10px; }
@@ -265,7 +266,7 @@
     /* ---- Per-chat model picker + "which model answered" badge ------------- */
     .chat-model {
       font: inherit; font-size: .72rem; padding: 5px 6px; border-radius: 8px;
-      border: 1px solid #8884; background: #8881; color: inherit; max-width: 190px;
+      border: 1px solid #8884; background: #8881; color: inherit; max-width: 190px; min-width: 0;
     }
     .chat-model:disabled { opacity: .6; }
     .model-badge {
@@ -377,7 +378,11 @@
     .term {
       border: 1px solid #8883; border-radius: 14px; overflow: hidden;
       display: flex; flex-direction: column; background: #0b0b0e;
-      height: calc(100vh - 200px); min-height: 340px;
+      height: calc(100vh - 200px);
+      /* dvh tracks the *dynamic* mobile viewport, so the input bar is never
+         hidden underneath the browser's collapsing chrome. */
+      height: calc(100dvh - 200px);
+      min-height: 340px;
     }
     .term-log {
       flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px;
@@ -440,14 +445,18 @@
       font-family: ui-monospace, Menlo, monospace;
     }
     .term-input:focus { outline: none; border-color: #2563eb; }
-    .term-controls { display: flex; align-items: center; gap: 8px; }
+    .term-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; row-gap: 8px; }
     .term-controls .spacer { flex: 1; }
-    .term-controls label { font-size: .74rem; color: #9aa0aa; display: flex; align-items: center; gap: 6px; }
+    .term-controls-selects { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+    .term-controls label { font-size: .74rem; color: #9aa0aa; display: flex; align-items: center; gap: 6px; min-width: 0; }
     .term-controls select {
       /* 16px min — see .term-input note (prevents iOS focus auto-zoom). */
       font-size: 16px; background: #05050799; color: #e6e6e6; border-color: #ffffff1f;
+      /* Flex children default to min-width:auto and would otherwise force this
+         row wider than .term, which clips (overflow:hidden) and eats Send. */
+      min-width: 0; max-width: 42vw;
     }
-    .term-send { padding: 8px 16px; }
+    .term-send { padding: 8px 16px; margin-left: auto; }
     .term-status { font-size: .72rem; color: #9aa0aa; padding: 0 2px; min-height: 1em; }
     #adminMenuBtn { font-size: 1rem; line-height: 1; padding: 6px 10px; }
     /* Compact history popover anchored right under the hamburger (no full-screen drawer). */
@@ -550,6 +559,25 @@
     }
     .notify-install.show { display: block; }
     .settings-drawer .actions { display: flex; gap: 8px; margin-top: 6px; }
+
+    /* ---- Narrow screens: keep the composer's Send button on screen ---------
+       The composer control rows are single-line flex rows on desktop. On a
+       phone the selects (16px font, to avoid iOS focus auto-zoom) no longer fit
+       alongside the buttons, so the rows have to break into "selects" +
+       "buttons". Without this the Admin Terminal's row overflows .term, which
+       clips (overflow:hidden for its radius) and hides Send entirely. */
+    @media (max-width: 560px) {
+      .term-controls-selects { flex: 1 1 100%; }
+      .term-controls .spacer, .chat-actions .spacer { display: none; }
+      .term-controls select { max-width: none; flex: 1 1 120px; }
+      .chat-model { flex: 1 1 140px; max-width: none; }
+    }
+
+    /* Touch devices: form controls below 16px make iOS Safari zoom the whole
+       page on focus, which scrolls the right-hand side (Send) out of view. */
+    @media (pointer: coarse) {
+      .chat-model { font-size: 16px; padding: 6px; }
+    }
   </style>
 </head>
 <body>
@@ -631,16 +659,18 @@
         <textarea id="termInput" class="term-input attach-dropzone" rows="2" placeholder="Type a message…  (Enter to send, Shift+Enter for a new line)"></textarea>
         <input type="file" id="termAttachInput" accept="image/*" multiple hidden>
         <div class="term-controls">
-          <label>permission:
-            <select id="termMode">
-              <option value="bypass" selected>Bypass</option>
-              <option value="granular">Granular</option>
-              <option value="default">Default</option>
-            </select>
-          </label>
-          <label>model:
-            <select id="termModel" class="chat-model" title="Model used for this chat" aria-label="Model used for this chat"></select>
-          </label>
+          <div class="term-controls-selects">
+            <label>permission:
+              <select id="termMode">
+                <option value="bypass" selected>Bypass</option>
+                <option value="granular">Granular</option>
+                <option value="default">Default</option>
+              </select>
+            </label>
+            <label>model:
+              <select id="termModel" class="chat-model" title="Model used for this chat" aria-label="Model used for this chat"></select>
+            </label>
+          </div>
           <span class="spacer"></span>
           <button id="termAttachBtn" class="attach-btn" type="button" title="Attach image" aria-label="Attach image">📎</button>
           <button id="termAbort" class="iconbtn abortbtn" hidden>⨯ Abort</button>

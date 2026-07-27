@@ -246,8 +246,31 @@
       width: 100%; font: inherit; padding: 10px 12px; border-radius: 10px; border: 1px solid #8884;
       background: #8881; color: inherit; resize: vertical; min-height: 60px;
     }
-    .chat-actions { display: flex; gap: 8px; align-items: center; }
+    .chat-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .chat-empty { color: #888; font-size: .8rem; padding: 4px 0 10px; }
+
+    /* Sent history and not-yet-sent (queued) bubbles live in two stacked lists
+       inside the same scroll box, so re-rendering the queue never disturbs the
+       live streaming bubble in the history list. */
+    .chat-msglist, .chat-pendinglist { display: flex; flex-direction: column; gap: 10px; }
+    .chat-pendinglist:empty { display: none; }
+    .chat-pendinglist { margin-top: 10px; }
+    .chat-bubble.chat-pending {
+      background: #8881; border: 1px dashed #8887; align-self: flex-end; max-width: 85%;
+    }
+    .chat-pending .chat-text { color: #999; }
+    .chat-pending-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 6px; }
+    .chat-pending-actions button {
+      cursor: pointer; font: inherit; font-size: .7rem; line-height: 1;
+      border: 1px solid #8884; border-radius: 7px; padding: 4px 7px;
+      background: transparent; color: inherit;
+    }
+    .chat-pending-actions button:hover { background: #8882; }
+    /* Per-chat model override, sitting in the composer's action row. */
+    .chat-modelrow { display: inline-flex; align-items: center; gap: 5px; font-size: .72rem; color: #888; }
+    .chat-model { font: inherit; font-size: .72rem; max-width: 168px; padding: 4px 6px; border-radius: 7px;
+      border: 1px solid #8884; background: #8881; color: inherit; }
+    .chat-queuenote { font-size: .72rem; color: #888; }
 
     /* ---- Image attachments: paperclip button + drop target + preview chips */
     .attach-btn {
@@ -395,6 +418,20 @@
       padding: 2px 7px; font-family: ui-monospace, Menlo, monospace; white-space: nowrap;
     }
     .tmsg-meta .mchip-diff { color: #6ee787; background: #6ee78714; }
+    /* Queued-but-not-yet-sent turns, pinned to the bottom of the log. */
+    .term-pending { display: flex; flex-direction: column; gap: 12px; }
+    .term-pending:empty { display: none; }
+    .tmsg.pending { align-self: flex-end; align-items: flex-end; }
+    .tmsg.pending .tmsg-body {
+      background: #2563eb26; color: #c9cdd6; border: 1px dashed #2563eb66;
+      white-space: pre-wrap; font-family: ui-monospace, Menlo, monospace; font-size: .78rem;
+    }
+    .tmsg-pending-actions { display: flex; gap: 6px; margin-top: 7px; justify-content: flex-end; }
+    .tmsg-pending-actions button {
+      cursor: pointer; font: inherit; font-size: .68rem; line-height: 1; color: #c9cdd6;
+      background: #ffffff0f; border: 1px solid #ffffff1f; border-radius: 7px; padding: 4px 7px;
+    }
+    .tmsg-pending-actions button:hover { background: #ffffff1f; }
     .term-inputbar {
       display: flex; flex-direction: column; gap: 8px; padding: 10px; border-top: 1px solid #ffffff12;
       background: #101014;
@@ -596,7 +633,7 @@
       </div>
       <div class="term-inputbar">
         <div class="attach-previews" id="termAttachPreviews"></div>
-        <textarea id="termInput" class="term-input attach-dropzone" rows="2" placeholder="Type a message…  (⌘/Ctrl+Enter to send)"></textarea>
+        <textarea id="termInput" class="term-input attach-dropzone" rows="2" placeholder="Type a message…  (Enter to send, Shift+Enter for a newline)"></textarea>
         <input type="file" id="termAttachInput" accept="image/*" multiple hidden>
         <div class="term-controls">
           <label>permission:
@@ -605,6 +642,9 @@
               <option value="granular">Granular</option>
               <option value="default">Default</option>
             </select>
+          </label>
+          <label>model:
+            <select id="termModel" class="chat-model"><option value="">loading…</option></select>
           </label>
           <span class="spacer"></span>
           <button id="termAttachBtn" class="attach-btn" type="button" title="Attach image" aria-label="Attach image">📎</button>
@@ -922,6 +962,7 @@ modelSel.addEventListener('change', async () => {
       body: JSON.stringify({ model: modelSel.value }),
     });
     if (!r.ok) throw new Error((await r.json()).error || 'failed to save model');
+    invalidateModelList(); // new chats should default to the new global model
   } catch (err) {
     alert(err.message || 'Failed to save model');
     modelSel.value = prev;
@@ -2029,6 +2070,210 @@ function renderMsgImages(images) {
   return `<div class="msg-attach-images">${imgs}</div>`;
 }
 
+// ---- Per-chat model picker -------------------------------------------------
+// Every composer gets its own model dropdown. It defaults to the globally
+// configured model but changing it is chat-local: the choice rides along with
+// each turn's request (`model` in the body) and never writes the global default.
+let modelListPromise = null;
+function loadModelList() {
+  if (!modelListPromise) {
+    modelListPromise = fetch('/api/settings/model')
+      .then((x) => x.json())
+      .then((d) => ({ models: (d && d.models) || [], model: (d && d.model) || '' }))
+      .catch(() => null);
+  }
+  return modelListPromise;
+}
+
+// Called after the homepage dropdown saves a new global default so freshly
+// opened chats pick it up instead of the value cached at page load.
+function invalidateModelList() {
+  modelListPromise = null;
+}
+
+function initModelPicker(selectEl) {
+  loadModelList().then((d) => {
+    if (!d || !d.models.length) {
+      // Never block sending on this — the backend falls back to the global model.
+      selectEl.innerHTML = '<option value="">(unavailable)</option>';
+      selectEl.disabled = true;
+      return;
+    }
+    selectEl.innerHTML = d.models.map((m) => `<option value="${escape(m)}">${escape(m)}</option>`).join('');
+    selectEl.value = d.model;
+    selectEl.disabled = false;
+  });
+  return { value: () => (selectEl.disabled ? null : selectEl.value || null) };
+}
+
+// ---- Enter-to-send --------------------------------------------------------
+// Enter sends; Shift/Alt+Enter inserts a newline; ⌘/Ctrl+Enter still sends.
+// Two cases must never fire a send: an in-progress IME composition (picking
+// Chinese/Japanese candidates ends with Enter) and touch devices, where the
+// soft keyboard's return key is far too easy to hit by accident — there Enter
+// stays a newline and the send button is the only way to send.
+const IS_TOUCH_DEVICE =
+  (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
+  (navigator.maxTouchPoints || 0) > 0;
+
+function attachEnterToSend(inputEl, submit) {
+  let composing = false;
+  inputEl.addEventListener('compositionstart', () => { composing = true; });
+  inputEl.addEventListener('compositionend', () => { composing = false; });
+  inputEl.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    if (composing || e.isComposing || e.keyCode === 229) return;
+    if (e.metaKey || e.ctrlKey) { e.preventDefault(); submit(); return; }
+    if (e.shiftKey || e.altKey) return;
+    if (IS_TOUCH_DEVICE) return;
+    e.preventDefault();
+    submit();
+  });
+}
+
+// ---- Non-blocking send queue ---------------------------------------------
+// The backend allows only ONE copilot process per chat (the job key is per
+// PR / PreIssue / admin turn and the session is chained via --resume), so
+// turns can never run in parallel. This queue keeps the composer usable
+// anyway: messages sent mid-reply are appended to a FIFO queue and dispatched
+// automatically, one at a time, as each turn finishes.
+//
+// `run(item)` must resolve only when that turn is completely done. Items are
+// opaque apart from `reconnect` (a placeholder for re-attaching to a turn that
+// is already running server-side, which is meaningless to persist).
+function loadPersistedQueue(storageKey) {
+  if (!storageKey) return [];
+  try {
+    const arr = JSON.parse(localStorage.getItem(storageKey) || '[]');
+    if (!Array.isArray(arr)) return [];
+    return arr.filter((it) => it && typeof it.text === 'string' && it.text);
+  } catch {
+    return [];
+  }
+}
+
+// A dispatch the server refuses because another turn is still running (a raced
+// send, e.g. from a page being torn down) is retried rather than dropped.
+const QUEUE_RETRY_MS = 1500;
+const QUEUE_MAX_RETRIES = 30;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Live queues by storage key. A panel can be torn down and re-rendered while
+// its queue is still draining (navigating away, or the reload after a
+// successful apply): the newcomer restores the same items from storage, so the
+// old instance must stop dispatching or both would send them.
+const liveTurnQueues = new Map();
+
+function createTurnQueue({ run, onChange, storageKey, recoverInflight }) {
+  const inflightKey = storageKey ? `${storageKey}:inflight` : null;
+  let items = loadPersistedQueue(storageKey);
+  let inflight = null;
+  let sending = false;
+  let pumping = false;
+  let stopped = false;
+  if (storageKey) {
+    const previous = liveTurnQueues.get(storageKey);
+    if (previous) previous.stop();
+    // A message whose page died mid-dispatch (tab closed, reload) exists
+    // nowhere else if the server never accepted it, so it goes back to the head
+    // of the queue. `recoverInflight(item)` decides: panels answer by checking
+    // whether the message already shows up in the server-side transcript, in
+    // which case the turn did start and re-sending would duplicate it.
+    const leftover = loadPersistedQueue(inflightKey);
+    localStorage.removeItem(inflightKey);
+    const recover = leftover.filter((it) => (recoverInflight ? recoverInflight(it) : false));
+    if (recover.length) items = recover.concat(items);
+  }
+
+  function persist() {
+    if (!storageKey) return;
+    const durable = items.filter((it) => !it.reconnect);
+    try {
+      if (!durable.length) localStorage.removeItem(storageKey);
+      else localStorage.setItem(storageKey, JSON.stringify(durable));
+      if (inflight && !inflight.reconnect) localStorage.setItem(inflightKey, JSON.stringify([inflight]));
+      else localStorage.removeItem(inflightKey);
+    } catch {
+      // Almost always the quota, blown by attachment data URLs. Keep the text
+      // so a refresh doesn't lose the message itself, just its images.
+      try {
+        localStorage.setItem(storageKey, JSON.stringify(durable.map((it) => ({ ...it, images: [] }))));
+      } catch { /* give up — the in-memory queue still works */ }
+    }
+  }
+
+  function changed() {
+    persist();
+    if (onChange) onChange();
+  }
+
+  async function pump() {
+    if (pumping || stopped) return;
+    pumping = true;
+    try {
+      while (items.length && !stopped) {
+        const item = items.shift();
+        inflight = item;
+        sending = true;
+        changed();
+        try {
+          await run(item);
+        } catch (err) {
+          console.error('chat turn failed', err);
+        }
+        sending = false;
+        inflight = null;
+        // Persist before the stopped check: a panel handing over mid-drain must
+        // not leave a finished turn behind for its successor to re-send.
+        persist();
+        if (stopped) return;
+        if (onChange) onChange();
+      }
+    } finally {
+      pumping = false;
+      sending = false;
+    }
+  }
+
+  const api = {
+    list: () => items.slice(),
+    size: () => items.length,
+    isSending: () => sending,
+    enqueue(item, { front = false } = {}) {
+      const entry = { id: `q${Date.now()}${Math.random().toString(16).slice(2, 8)}`, ...item };
+      if (front) items.unshift(entry);
+      else items.push(entry);
+      changed();
+      pump();
+      return entry;
+    },
+    /** Jump a queued item to the head of the line (the ⚡ send-now action). */
+    promote(id) {
+      const i = items.findIndex((it) => it.id === id);
+      if (i > 0) {
+        items.unshift(items.splice(i, 1)[0]);
+        changed();
+      }
+    },
+    remove(id) {
+      const before = items.length;
+      items = items.filter((it) => it.id !== id);
+      if (items.length !== before) changed();
+    },
+    clear() {
+      if (!items.length) return;
+      items = [];
+      changed();
+    },
+    /** Hand ownership over: this panel is being torn down and rebuilt. The
+     *  successor restores the queue from storage and keeps draining it. */
+    stop() { stopped = true; },
+    start() { pump(); },
+  };
+  if (storageKey) liveTurnQueues.set(storageKey, api);
+  return api;
+}
+
 // ---- PR detail page: hash route #/pr/<repo>/<issue>/<pr> -------------------
 const mainView = document.getElementById('mainView');
 const prDetailView = document.getElementById('prDetailView');
@@ -2342,22 +2587,34 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
   wrap.className = 'chat-panel';
   wrap.innerHTML = `
     <h3>Chat with this PR</h3>
-    <div class="chat-messages"></div>
+    <div class="chat-messages">
+      <div class="chat-msglist"></div>
+      <div class="chat-pendinglist"></div>
+    </div>
     <div class="chat-inputrow">
       <div class="attach-previews chat-attach-previews"></div>
-      <textarea class="chat-input attach-dropzone" rows="3" placeholder="Describe a change… e.g. &quot;add a dark mode toggle&quot;"></textarea>
+      <textarea class="chat-input attach-dropzone" rows="3" placeholder="Describe a change… e.g. &quot;add a dark mode toggle&quot;  (Enter to send, Shift+Enter for a newline)"></textarea>
       <input type="file" class="chat-attach-input" accept="image/*" multiple hidden>
       <div class="chat-actions">
         <button class="attach-btn chat-attach-btn" type="button" title="Attach image" aria-label="Attach image">📎</button>
+        <span class="chat-modelrow">model:
+          <select class="chat-model"><option value="">loading…</option></select>
+        </span>
         <button class="chat-send">Send (plan)</button>
+        <button class="ghost sm chat-apply" hidden>▶ Execute this plan</button>
         <button class="iconbtn abortbtn chat-abort" hidden>⨯ Abort</button>
+        <span class="chat-queuenote"></span>
       </div>
     </div>`;
 
-  const messagesEl = wrap.querySelector('.chat-messages');
+  const scrollEl = wrap.querySelector('.chat-messages');
+  const messagesEl = wrap.querySelector('.chat-msglist');
+  const pendingEl = wrap.querySelector('.chat-pendinglist');
   const inputEl = wrap.querySelector('.chat-input');
   const sendBtn = wrap.querySelector('.chat-send');
+  const applyBtn = wrap.querySelector('.chat-apply');
   const abortBtn = wrap.querySelector('.chat-abort');
+  const queueNoteEl = wrap.querySelector('.chat-queuenote');
   const attachBtn = wrap.querySelector('.chat-attach-btn');
   const attachInput = wrap.querySelector('.chat-attach-input');
   const attachPreviewsEl = wrap.querySelector('.chat-attach-previews');
@@ -2367,11 +2624,16 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
     attachBtn,
     previewsEl: attachPreviewsEl,
   });
+  const modelPicker = initModelPicker(wrap.querySelector('.chat-model'));
 
   const messages = ((prRec && prRec.chat && prRec.chat.messages) || []).slice();
   let awaitingApply = false;
   // Gives each chat turn its own notification key so two quick turns both alert.
   let chatTurnSeq = 0;
+
+  const scrollToBottom = () => { scrollEl.scrollTop = scrollEl.scrollHeight; };
+  const metaLine = (label, mode, model) =>
+    [label, mode || '', model || ''].filter(Boolean).join(' · ');
 
   function renderMessages() {
     if (!messages.length) {
@@ -2385,7 +2647,7 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
       const roleLabel = m.role === 'user' ? 'You' : 'Copilot';
       const metaEl = document.createElement('div');
       metaEl.className = 'chat-meta';
-      metaEl.textContent = `${roleLabel} · ${m.mode || ''}`;
+      metaEl.textContent = metaLine(roleLabel, m.mode, m.model);
       const textEl = document.createElement('div');
       textEl.className = 'chat-text';
       textEl.textContent = m.text;
@@ -2393,70 +2655,143 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
       if (m.images && m.images.length) bubble.insertAdjacentHTML('beforeend', renderMsgImages(m.images));
       messagesEl.appendChild(bubble);
     }
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    scrollToBottom();
   }
   renderMessages();
 
-  // Append a live assistant bubble and return its text element. Streamed chunks
+  // Queued-but-not-yet-sent messages, drawn in their own list below the
+  // transcript so re-rendering them never touches the live streaming bubble.
+  function renderPending() {
+    pendingEl.innerHTML = '';
+    for (const item of queue.list()) {
+      if (item.reconnect) continue;
+      const bubble = document.createElement('div');
+      bubble.className = 'chat-bubble chat-user chat-pending';
+      const metaEl = document.createElement('div');
+      metaEl.className = 'chat-meta';
+      metaEl.textContent = metaLine('⏳ Queued', item.mode, item.model);
+      const textEl = document.createElement('div');
+      textEl.className = 'chat-text';
+      textEl.textContent = item.text;
+      bubble.append(metaEl, textEl);
+      if (item.images && item.images.length) bubble.insertAdjacentHTML('beforeend', renderMsgImages(item.images));
+      const actions = document.createElement('div');
+      actions.className = 'chat-pending-actions';
+      const nowBtn = document.createElement('button');
+      nowBtn.type = 'button';
+      nowBtn.textContent = '⚡ Send now';
+      nowBtn.title = 'Abort the running turn and send this one next';
+      nowBtn.addEventListener('click', () => sendNow(item.id));
+      const rmBtn = document.createElement('button');
+      rmBtn.type = 'button';
+      rmBtn.textContent = '✕ Cancel';
+      rmBtn.title = 'Remove from the queue';
+      rmBtn.addEventListener('click', () => queue.remove(item.id));
+      actions.append(nowBtn, rmBtn);
+      bubble.appendChild(actions);
+      pendingEl.appendChild(bubble);
+    }
+  }
+
+  // The composer stays editable while a turn streams — sending just queues.
+  function updateControls() {
+    const sending = queue.isSending();
+    const queued = queue.size();
+    abortBtn.hidden = !sending;
+    applyBtn.hidden = !awaitingApply;
+    sendBtn.textContent = sending || queued ? 'Queue (plan)' : 'Send (plan)';
+    queueNoteEl.textContent = queued
+      ? `${queued} queued`
+      : sending ? 'Copilot is replying…' : '';
+  }
+
+  // Append a live assistant bubble and return its elements. Streamed chunks
   // are appended as text nodes (the Create-PR log approach) instead of
   // re-rendering the whole message list per chunk — the latter left the
   // in-flight reply out of `messages` entirely, so nothing showed until the
   // turn finished (and it silently drops on mobile besides).
-  function appendLiveAssistant(mode) {
+  function appendLiveAssistant(mode, model) {
     const empty = messagesEl.querySelector('.chat-empty');
     if (empty) empty.remove();
     const bubble = document.createElement('div');
     bubble.className = 'chat-bubble chat-assistant';
     const metaEl = document.createElement('div');
     metaEl.className = 'chat-meta';
-    metaEl.textContent = `Copilot · ${mode}`;
+    metaEl.textContent = metaLine('Copilot', mode, model);
     const textEl = document.createElement('div');
     textEl.className = 'chat-text';
     bubble.append(metaEl, textEl);
     messagesEl.appendChild(bubble);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-    return textEl;
+    scrollToBottom();
+    return { metaEl, textEl };
   }
 
-  function setSending(sending) {
-    sendBtn.disabled = sending;
-    inputEl.disabled = sending;
-    abortBtn.hidden = !sending;
-  }
+  // Runs exactly one turn; resolves when it's fully finished so the queue can
+  // dispatch the next one. `item.reconnect` re-attaches to a turn that is
+  // already running server-side instead of starting a new one.
+  async function sendTurn(item) {
+    const mode = item.mode === 'apply' ? 'apply' : 'plan';
+    // The model chosen when this message was QUEUED, not whatever the dropdown
+    // shows now — a queue drained minutes later must not silently switch models.
+    let model = item.model || null;
 
-  async function sendTurn(mode, text, images) {
-    setSending(true);
-    if (text) {
-      const userMsg = {
+    // The request goes out BEFORE the message is added to the transcript: a
+    // turn the server refuses (409, another turn still running) has to be
+    // re-queued, and it must not leave a phantom bubble behind.
+    let resp = null;
+    let httpError = null;
+    try {
+      resp = await fetch(`/api/repos/${enc(repoName)}/issues/${issueNumber}/prs/${prNumber}/chat`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(item.text ? { message: item.text, mode, images: item.images || [], model } : { mode, model }),
+      });
+    } catch (e) {
+      httpError = `connection dropped: ${e.message}`;
+    }
+    if (resp && resp.status === 409 && item.text && (item.retries || 0) < QUEUE_MAX_RETRIES) {
+      // Another turn is still running (a raced dispatch). Wait it out and put
+      // this message back at the head of the queue rather than dropping it.
+      await sleep(QUEUE_RETRY_MS);
+      queue.enqueue({ ...item, retries: (item.retries || 0) + 1 }, { front: true });
+      return;
+    }
+
+    if (item.text) {
+      messages.push({
         role: 'user',
-        text: mode === 'apply' ? `[execute plan] ${text}` : text,
+        text: mode === 'apply' ? `[execute plan] ${item.text}` : item.text,
         mode,
-        images: images || [],
+        model,
+        images: item.images || [],
         at: new Date().toISOString(),
-      };
-      messages.push(userMsg);
+      });
       renderMessages();
     }
-    // Live streaming bubble — append chunks incrementally so the reply shows in
-    // real time (mobile-safe), instead of only appearing once the turn ends.
-    const textEl = appendLiveAssistant(mode);
+    const { metaEl, textEl } = appendLiveAssistant(mode, model);
     let raw = '';
     let finalStatus = null;
     try {
-      const resp = await fetch(`/api/repos/${enc(repoName)}/issues/${issueNumber}/prs/${prNumber}/chat`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(text ? { message: text, mode, images: images || [] } : { mode }),
-      });
+      if (httpError) throw new Error(httpError);
       if (!resp.ok || !resp.body) {
         raw = `[error] ${await friendlyHttpError(resp)}`;
         textEl.appendChild(document.createTextNode(raw));
-        messages.push({ role: 'assistant', text: raw, mode, at: new Date().toISOString() });
-        setSending(false); return;
+        messages.push({ role: 'assistant', text: raw, mode, model, at: new Date().toISOString() });
+        return;
       }
       await pumpSSE(resp, {
-        onChunk: (t) => { raw += t; textEl.appendChild(document.createTextNode(t)); messagesEl.scrollTop = messagesEl.scrollHeight; },
+        // On a re-attach the server reports the running job's real model.
+        onMeta: (m) => {
+          if (m && m.model && m.model !== model) {
+            model = m.model;
+            metaEl.textContent = metaLine('Copilot', mode, model);
+          }
+        },
+        onChunk: (t) => { raw += t; textEl.appendChild(document.createTextNode(t)); scrollToBottom(); },
         onError: (m) => { const s = `\n[error] ${m}`; raw += s; textEl.appendChild(document.createTextNode(s)); },
-        onResult: (d) => { finalStatus = d.status; },
+        onResult: (d) => {
+          finalStatus = d.status;
+          if (d.model) model = d.model;
+        },
         notify: {
           action: 'chat',
           repo: repoName,
@@ -2467,53 +2802,109 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
         },
       });
     } catch (e) {
-      const s = `\n[connection dropped: ${e.message}]`;
+      const s = `\n[${e.message}]`;
       raw += s; textEl.appendChild(document.createTextNode(s));
     }
-    messages.push({ role: 'assistant', text: raw, mode, at: new Date().toISOString() });
-    setSending(false);
+    metaEl.textContent = metaLine('Copilot', mode, model);
+    messages.push({ role: 'assistant', text: raw, mode, model, at: new Date().toISOString() });
 
     if (mode === 'plan' && finalStatus === 'success') {
       awaitingApply = true;
-      sendBtn.textContent = 'Execute this plan';
     } else if (mode === 'apply' && finalStatus === 'success') {
       // New commits landed — Deploy/Merge reset; reload the whole detail page
       // so the pipeline above reflects that instead of showing stale state.
+      // Anything still queued is handed to the rebuilt panel, which restores
+      // it from storage and keeps draining.
+      queue.stop();
       renderPrDetail(repoName, issueNumber, prNumber);
       return;
     } else {
       awaitingApply = false;
-      sendBtn.textContent = 'Send (plan)';
     }
+    updateControls();
   }
 
-  sendBtn.addEventListener('click', () => {
-    if (awaitingApply) {
-      const lastUser = [...messages].reverse().find((m) => m.role === 'user' && m.mode === 'plan');
-      sendTurn('apply', (lastUser && lastUser.text) || 'the plan above');
-      return;
-    }
-    const text = inputEl.value.trim();
-    if (!text) return;
-    const images = attachments.getImages();
-    inputEl.value = '';
-    attachments.clear();
-    sendTurn('plan', text, images);
+  // Did this message already make it into the transcript? Answers whether a
+  // dispatch that died with its page still needs sending. The server stores an
+  // apply turn's raw text while this panel displays it with an "[execute plan]"
+  // prefix, so both forms count as a match.
+  function alreadySent(text) {
+    if (!text) return true; // reconnect placeholder — nothing to recover
+    const lastUser = [...messages].reverse().find((m) => m.role === 'user');
+    if (!lastUser) return false;
+    return lastUser.text === text || lastUser.text === `[execute plan] ${text}`;
+  }
+
+  const queue = createTurnQueue({
+    run: sendTurn,
+    onChange: () => { renderPending(); updateControls(); },
+    storageKey: `cc.queue.pr:${repoName}#${issueNumber}:${prNumber}`,
+    // Recover a message whose dispatch died with its page — unless it already
+    // made it into the transcript, meaning the turn really did start (that one
+    // is re-attached to via chatLive below instead).
+    recoverInflight: (it) => !alreadySent(it.text),
   });
 
-  abortBtn.addEventListener('click', async () => {
+  async function abortTurn() {
     try {
       await fetch(`/api/repos/${enc(repoName)}/issues/${issueNumber}/prs/${prNumber}/chat/cancel`, { method: 'POST' });
     } catch { /* ignore */ }
+  }
+
+  // ⚡ Send now: jump the queue and cut the running turn short so this message
+  // goes out next (the aborted turn's result ends it, then the queue drains).
+  async function sendNow(id) {
+    queue.promote(id);
+    if (queue.isSending()) await abortTurn();
+  }
+
+  function submit() {
+    if (awaitingApply && !inputEl.value.trim() && !attachments.hasImages()) {
+      // Bare Enter/Send while a plan is awaiting approval keeps meaning
+      // "execute it", exactly as the old single-button flow did.
+      applyBtn.click();
+      return;
+    }
+    const images = attachments.getImages();
+    const text = inputEl.value.trim() || (images.length ? 'See the attached image(s).' : '');
+    if (!text) return;
+    inputEl.value = '';
+    attachments.clear();
+    queue.enqueue({ text, mode: 'plan', images, model: modelPicker.value() });
+  }
+
+  sendBtn.addEventListener('click', submit);
+  attachEnterToSend(inputEl, submit);
+
+  applyBtn.addEventListener('click', () => {
+    const lastUser = [...messages].reverse().find((m) => m.role === 'user' && m.mode === 'plan');
+    queue.enqueue({
+      text: (lastUser && lastUser.text) || 'the plan above',
+      mode: 'apply',
+      images: [],
+      model: modelPicker.value(),
+    });
+    // Consumed: the apply turn is queued, so stop offering the button. A later
+    // plan turn that succeeds will offer it again.
+    awaitingApply = false;
+    updateControls();
   });
+
+  // Aborting only ends the CURRENT turn — the queue is kept and the next
+  // message goes out right after, which is what "⚡ Send now" relies on.
+  abortBtn.addEventListener('click', abortTurn);
 
   // Re-attach to a chat job still running server-side (e.g. after navigating
   // away mid-turn and coming back) — mirrors the Create-PR/Deploy reconnect
-  // pattern instead of leaving the turn stuck with no way to resume.
+  // pattern instead of leaving the turn stuck with no way to resume. It goes
+  // in front of any restored queue so the running turn is consumed first.
   if (chatLive) {
     const lastUser = [...messages].reverse().find((m) => m.role === 'user');
-    sendTurn((lastUser && lastUser.mode) || 'plan', null);
+    queue.enqueue({ reconnect: true, text: null, mode: (lastUser && lastUser.mode) || 'plan' }, { front: true });
   }
+  renderPending();
+  updateControls();
+  queue.start();
 
   return wrap;
 }
@@ -2717,12 +3108,19 @@ async function renderPreIssueDetail(repoName, id) {
   chatWrap.className = 'chat-panel';
   chatWrap.innerHTML = `
     <h3>Iterate this into an issue</h3>
-    <div class="chat-messages"></div>
+    <div class="chat-messages">
+      <div class="chat-msglist"></div>
+      <div class="chat-pendinglist"></div>
+    </div>
     <div class="chat-inputrow">
-      <textarea class="chat-input" rows="3" placeholder="Add more context…"></textarea>
+      <textarea class="chat-input" rows="3" placeholder="Add more context…  (Enter to send, Shift+Enter for a newline)"></textarea>
       <div class="chat-actions">
+        <span class="chat-modelrow">model:
+          <select class="chat-model"><option value="">loading…</option></select>
+        </span>
         <button class="chat-send">Send</button>
         <button class="iconbtn abortbtn chat-abort" hidden>⨯ Abort</button>
+        <span class="chat-queuenote"></span>
       </div>
     </div>`;
   wrap.appendChild(chatWrap);
@@ -2730,13 +3128,20 @@ async function renderPreIssueDetail(repoName, id) {
   preIssueDetailView.innerHTML = '';
   preIssueDetailView.appendChild(wrap);
 
-  const messagesEl = chatWrap.querySelector('.chat-messages');
+  const scrollEl = chatWrap.querySelector('.chat-messages');
+  const messagesEl = chatWrap.querySelector('.chat-msglist');
+  const pendingEl = chatWrap.querySelector('.chat-pendinglist');
   const inputEl = chatWrap.querySelector('.chat-input');
   const sendBtn = chatWrap.querySelector('.chat-send');
   const abortBtn = chatWrap.querySelector('.chat-abort');
+  const queueNoteEl = chatWrap.querySelector('.chat-queuenote');
+  const modelPicker = initModelPicker(chatWrap.querySelector('.chat-model'));
   const messages = ((pre.chat && pre.chat.messages) || []).slice();
   // Gives each chat turn its own notification key so two quick turns both alert.
   let preTurnSeq = 0;
+
+  const scrollToBottom = () => { scrollEl.scrollTop = scrollEl.scrollHeight; };
+  const metaLine = (label, model) => [label, model || ''].filter(Boolean).join(' · ');
 
   function renderMessages() {
     if (!messages.length) {
@@ -2749,63 +3154,124 @@ async function renderPreIssueDetail(repoName, id) {
       bubble.className = `chat-bubble chat-${m.role === 'user' ? 'user' : 'assistant'}`;
       const metaEl = document.createElement('div');
       metaEl.className = 'chat-meta';
-      metaEl.textContent = m.role === 'user' ? 'You' : 'Copilot';
+      metaEl.textContent = metaLine(m.role === 'user' ? 'You' : 'Copilot', m.model);
       const textEl = document.createElement('div');
       textEl.className = 'chat-text';
       textEl.textContent = m.text;
       bubble.append(metaEl, textEl);
       messagesEl.appendChild(bubble);
     }
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    scrollToBottom();
   }
   renderMessages();
 
-  function appendLiveAssistant() {
+  function renderPending() {
+    pendingEl.innerHTML = '';
+    for (const item of queue.list()) {
+      if (item.reconnect) continue;
+      const bubble = document.createElement('div');
+      bubble.className = 'chat-bubble chat-user chat-pending';
+      const metaEl = document.createElement('div');
+      metaEl.className = 'chat-meta';
+      metaEl.textContent = metaLine('⏳ Queued', item.model);
+      const textEl = document.createElement('div');
+      textEl.className = 'chat-text';
+      textEl.textContent = item.text;
+      bubble.append(metaEl, textEl);
+      const actions = document.createElement('div');
+      actions.className = 'chat-pending-actions';
+      const nowBtn = document.createElement('button');
+      nowBtn.type = 'button';
+      nowBtn.textContent = '⚡ Send now';
+      nowBtn.title = 'Abort the running turn and send this one next';
+      nowBtn.addEventListener('click', () => sendNow(item.id));
+      const rmBtn = document.createElement('button');
+      rmBtn.type = 'button';
+      rmBtn.textContent = '✕ Cancel';
+      rmBtn.title = 'Remove from the queue';
+      rmBtn.addEventListener('click', () => queue.remove(item.id));
+      actions.append(nowBtn, rmBtn);
+      bubble.appendChild(actions);
+      pendingEl.appendChild(bubble);
+    }
+  }
+
+  function updateControls() {
+    const sending = queue.isSending();
+    const queued = queue.size();
+    abortBtn.hidden = !sending;
+    sendBtn.textContent = sending || queued ? 'Queue' : 'Send';
+    queueNoteEl.textContent = queued ? `${queued} queued` : sending ? 'Copilot is replying…' : '';
+  }
+
+  function appendLiveAssistant(model) {
     const empty = messagesEl.querySelector('.chat-empty');
     if (empty) empty.remove();
     const bubble = document.createElement('div');
     bubble.className = 'chat-bubble chat-assistant';
     const metaEl = document.createElement('div');
     metaEl.className = 'chat-meta';
-    metaEl.textContent = 'Copilot';
+    metaEl.textContent = metaLine('Copilot', model);
     const textEl = document.createElement('div');
     textEl.className = 'chat-text';
     bubble.append(metaEl, textEl);
     messagesEl.appendChild(bubble);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-    return textEl;
+    scrollToBottom();
+    return { metaEl, textEl };
   }
 
-  function setSending(sending) {
-    sendBtn.disabled = sending;
-    inputEl.disabled = sending;
-    abortBtn.hidden = !sending;
-  }
+  async function sendTurn(item) {
+    // The model picked when this message was queued — not the dropdown's
+    // current value, which may have changed while the queue drained.
+    let model = item.model || null;
 
-  async function sendTurn(text) {
-    setSending(true);
-    if (text) {
-      messages.push({ role: 'user', text, at: new Date().toISOString() });
+    // Send first, then record: a turn the server refuses (409, another turn
+    // still running) is re-queued and must leave no phantom bubble behind.
+    let resp = null;
+    let httpError = null;
+    try {
+      resp = await fetch(`/api/repos/${enc(repoName)}/preissues/${enc(id)}/chat`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(item.text ? { message: item.text, model } : { model }),
+      });
+    } catch (e) {
+      httpError = `connection dropped: ${e.message}`;
+    }
+    if (resp && resp.status === 409 && item.text && (item.retries || 0) < QUEUE_MAX_RETRIES) {
+      await sleep(QUEUE_RETRY_MS);
+      queue.enqueue({ ...item, retries: (item.retries || 0) + 1 }, { front: true });
+      return;
+    }
+
+    if (item.text) {
+      messages.push({ role: 'user', text: item.text, model, at: new Date().toISOString() });
       renderMessages();
     }
-    const textEl = appendLiveAssistant();
+    const { metaEl, textEl } = appendLiveAssistant(model);
     let raw = '';
     let finalDraft = null;
     try {
-      const resp = await fetch(`/api/repos/${enc(repoName)}/preissues/${enc(id)}/chat`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(text ? { message: text } : {}),
-      });
+      if (httpError) throw new Error(httpError);
       if (!resp.ok || !resp.body) {
         raw = `[error] HTTP ${resp.status}`;
         textEl.appendChild(document.createTextNode(raw));
-        messages.push({ role: 'assistant', text: raw, at: new Date().toISOString() });
-        setSending(false); return;
+        messages.push({ role: 'assistant', text: raw, model, at: new Date().toISOString() });
+        return;
       }
       await pumpSSE(resp, {
-        onChunk: (t) => { raw += t; textEl.appendChild(document.createTextNode(t)); messagesEl.scrollTop = messagesEl.scrollHeight; },
+        // On a re-attach the server reports the running job's real model.
+        onMeta: (m) => {
+          if (m && m.model && m.model !== model) {
+            model = m.model;
+            metaEl.textContent = metaLine('Copilot', model);
+          }
+        },
+        onChunk: (t) => { raw += t; textEl.appendChild(document.createTextNode(t)); scrollToBottom(); },
         onError: (m) => { const s = `\n[error] ${m}`; raw += s; textEl.appendChild(document.createTextNode(s)); },
-        onResult: (d) => { finalDraft = d.draft || null; },
+        onResult: (d) => {
+          finalDraft = d.draft || null;
+          if (d.model) model = d.model;
+        },
         notify: {
           action: 'preissue-chat',
           repo: repoName,
@@ -2814,36 +3280,63 @@ async function renderPreIssueDetail(repoName, id) {
         },
       });
     } catch (e) {
-      const s = `\n[connection dropped: ${e.message}]`;
+      const s = `\n[${e.message}]`;
       raw += s; textEl.appendChild(document.createTextNode(s));
     }
-    messages.push({ role: 'assistant', text: raw, at: new Date().toISOString() });
-    setSending(false);
+    metaEl.textContent = metaLine('Copilot', model);
+    messages.push({ role: 'assistant', text: raw, model, at: new Date().toISOString() });
     if (finalDraft) {
       pre.draft = finalDraft;
       renderDraft();
     }
   }
 
-  sendBtn.addEventListener('click', () => {
-    const text = inputEl.value.trim();
-    if (!text) return;
-    inputEl.value = '';
-    sendTurn(text);
+  const queue = createTurnQueue({
+    run: sendTurn,
+    onChange: () => { renderPending(); updateControls(); },
+    storageKey: `cc.queue.preissue:${repoName}:${id}`,
+    // Only re-send a message that died mid-dispatch if it never reached the
+    // transcript (otherwise its turn did start and pre.live re-attaches to it).
+    recoverInflight: (it) => {
+      if (!it.text) return false;
+      const lastUser = [...messages].reverse().find((m) => m.role === 'user');
+      return !(lastUser && lastUser.text === it.text);
+    },
   });
 
-  abortBtn.addEventListener('click', async () => {
+  async function abortTurn() {
     try {
       await fetch(`/api/repos/${enc(repoName)}/preissues/${enc(id)}/chat/cancel`, { method: 'POST' });
     } catch { /* ignore */ }
-  });
+  }
+
+  async function sendNow(qid) {
+    queue.promote(qid);
+    if (queue.isSending()) await abortTurn();
+  }
+
+  function submit() {
+    const text = inputEl.value.trim();
+    if (!text) return;
+    inputEl.value = '';
+    queue.enqueue({ text, model: modelPicker.value() });
+  }
+
+  sendBtn.addEventListener('click', submit);
+  attachEnterToSend(inputEl, submit);
+
+  // Aborting ends only the current turn; anything queued still goes out.
+  abortBtn.addEventListener('click', abortTurn);
 
   // Re-attach to a chat job still running server-side (e.g. after navigating
   // away mid-turn and coming back) — mirrors the Create-PR/Deploy reconnect
   // pattern instead of leaving the turn stuck with no way to resume.
   if (pre.live) {
-    sendTurn(null);
+    queue.enqueue({ reconnect: true, text: null }, { front: true });
   }
+  renderPending();
+  updateControls();
+  queue.start();
 }
 
 // ---- Admin terminal: free-form Copilot CLI chat rooted at REPOS_ROOT -------
@@ -2951,6 +3444,7 @@ function initAdminTerminal() {
     attachBtn,
     previewsEl: attachPreviewsEl,
   });
+  const modelPicker = initModelPicker(document.getElementById('termModel'));
 
   let sessionId = null;
   // The chat's stable storage key (server's adminChats[id]) — distinct from
@@ -2971,12 +3465,15 @@ function initAdminTerminal() {
   // Stop tracking (and kill) the in-flight turn — used when the user navigates
   // to another conversation or starts a new one. The server job is cancelled so
   // it doesn't keep running headless.
+  // Switching conversations drops anything still queued for the old one — a
+  // queued message only makes sense in the chat it was written in.
   async function cancelActiveTurn() {
+    queue.clear();
     if (!activeTurn) return;
     const t = activeTurn;
     activeTurn = null;
     localStorage.removeItem(LS_ADMIN_TURN);
-    setSending(false);
+    updateControls();
     try { await fetch(`/api/admin/chat/${encodeURIComponent(t.turnId)}/cancel`, { method: 'POST' }); } catch { /* ignore */ }
   }
 
@@ -3091,7 +3588,7 @@ function initAdminTerminal() {
       setSelectedRepo(chat.repo || '');
       logEl.innerHTML = '';
       (chat.messages || []).forEach((m) => {
-        const body = addMessage(m.role === 'user' ? 'user' : 'assistant');
+        const { body } = addMessage(m.role === 'user' ? 'user' : 'assistant', m.model);
         if (m.role === 'user') body.textContent = m.text || '';
         else { const { html, footer } = renderAssistant(m.text || ''); body.innerHTML = html + footer; }
         if (m.images && m.images.length) body.insertAdjacentHTML('beforeend', renderMsgImages(m.images));
@@ -3129,28 +3626,79 @@ function initAdminTerminal() {
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeHistory(); });
 
-  function addMessage(role) {
+  // `model` (when known) is shown next to the role so a conversation that mixed
+  // models stays readable afterwards.
+  function addMessage(role, model) {
     clearEmpty();
     const wrap = document.createElement('div');
     wrap.className = `tmsg ${role}`;
     const roleEl = document.createElement('div');
     roleEl.className = 'tmsg-role';
-    roleEl.textContent = role === 'user' ? 'You' : 'Copilot';
+    roleEl.textContent = (role === 'user' ? 'You' : 'Copilot') + (model ? ` · ${model}` : '');
     const body = document.createElement('div');
     body.className = 'tmsg-body';
     wrap.append(roleEl, body);
     logEl.appendChild(wrap);
+    keepPendingLast();
     logEl.scrollTop = logEl.scrollHeight;
-    return body;
+    return { body, roleEl };
   }
 
-  function setSending(sending) {
-    sendBtn.disabled = sending;
-    inputEl.disabled = sending;
-    modeSel.disabled = sending;
-    repoSel.disabled = sending;
+  // Queued messages live in their own container pinned to the bottom of the
+  // log, so redrawing the queue never disturbs the streaming reply above it.
+  const pendingEl = document.createElement('div');
+  pendingEl.className = 'term-pending';
+  function keepPendingLast() {
+    if (pendingEl.childElementCount) logEl.appendChild(pendingEl);
+    else if (pendingEl.parentNode) pendingEl.remove();
+  }
+
+  function renderPending() {
+    pendingEl.innerHTML = '';
+    for (const item of queue.list()) {
+      if (item.reconnect) continue;
+      const msg = document.createElement('div');
+      msg.className = 'tmsg pending';
+      const roleEl = document.createElement('div');
+      roleEl.className = 'tmsg-role';
+      roleEl.textContent = ['⏳ Queued', item.model || ''].filter(Boolean).join(' · ');
+      const body = document.createElement('div');
+      body.className = 'tmsg-body';
+      body.textContent = item.text;
+      if (item.images && item.images.length) body.insertAdjacentHTML('beforeend', renderMsgImages(item.images));
+      const actions = document.createElement('div');
+      actions.className = 'tmsg-pending-actions';
+      const nowBtn = document.createElement('button');
+      nowBtn.type = 'button';
+      nowBtn.textContent = '⚡ Send now';
+      nowBtn.title = 'Abort the running turn and send this one next';
+      nowBtn.addEventListener('click', () => sendNow(item.id));
+      const rmBtn = document.createElement('button');
+      rmBtn.type = 'button';
+      rmBtn.textContent = '✕ Cancel';
+      rmBtn.title = 'Remove from the queue';
+      rmBtn.addEventListener('click', () => queue.remove(item.id));
+      actions.append(nowBtn, rmBtn);
+      body.appendChild(actions);
+      msg.append(roleEl, body);
+      pendingEl.appendChild(msg);
+    }
+    keepPendingLast();
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // The composer is never disabled: typing mid-reply queues the message
+  // instead of blocking. Permission/repo/model are captured per message when
+  // it's queued, so changing them later doesn't rewrite what's already queued.
+  function updateControls() {
+    const sending = Boolean(activeTurn);
+    const queued = queue.size();
     abortBtn.hidden = !sending;
-    statusEl.textContent = sending ? 'Copilot is thinking…' : '';
+    sendBtn.textContent = sending || queued ? 'Queue' : 'Send';
+    statusEl.textContent = [
+      sending ? 'Copilot is thinking…' : '',
+      queued ? `${queued} queued` : '',
+    ].filter(Boolean).join(' · ');
   }
 
   // Stream chunks in by appending text nodes (the Create-PR log approach),
@@ -3187,8 +3735,16 @@ function initAdminTerminal() {
     if (finalSession) { sessionId = finalSession; currentChatId = finalSession; }
     localStorage.removeItem(LS_ADMIN_TURN);
     activeTurn = null;
-    setSending(false);
+    updateControls();
     logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // Label the streaming reply with the model the server says it's running, for
+  // reconnects (and recovered turns) where the client never knew it.
+  function setActiveModel(model) {
+    if (!activeTurn || !model || activeTurn.model === model) return;
+    activeTurn.model = model;
+    if (activeTurn.roleEl) activeTurn.roleEl.textContent = `Copilot \u00b7 ${model}`;
   }
 
   // A turn that died mid-flight (server restart) but got recovered by
@@ -3214,7 +3770,10 @@ function initAdminTerminal() {
     const turnId = activeTurn && activeTurn.turnId;
     try {
       await pumpSSE(resp, {
-        onMeta: (m) => { if (m && m.replay) resetActiveStream(); },
+        onMeta: (m) => {
+          if (m && m.replay) resetActiveStream();
+          if (m && m.model) setActiveModel(m.model);
+        },
         onChunk: (t, s) => appendActiveChunk(t, s),
         onError: (m) => appendActiveChunk(`\n[error] ${m}`, 'stderr'),
         onResult: (d) => {
@@ -3222,6 +3781,7 @@ function initAdminTerminal() {
           if (d.sessionId) finalSession = d.sessionId;
           if (d.status) status = d.status;
           if (d.status === 'gone') gone = true;
+          if (d.model) setActiveModel(d.model);
         },
         // Keyed on the turn id so the reconnect loop's repeated subscribes to
         // the same turn collapse into a single alert.
@@ -3262,30 +3822,49 @@ function initAdminTerminal() {
     }
   }
 
-  async function send() {
-    const text = inputEl.value.trim();
-    if (!text || activeTurn) return;
-    const images = attachments.getImages();
-    inputEl.value = '';
-    attachments.clear();
+  // Run one queued turn. Resolves only when the turn is completely finished
+  // (including any reconnect loop), which is what lets the queue dispatch the
+  // next message immediately afterwards. `sessionId` is module state updated by
+  // finishTurn, so consecutive queued turns chain onto the same conversation.
+  async function runTurn(item) {
+    const text = item.text;
+    const images = item.images || [];
 
-    const userBody = addMessage('user');
-    userBody.textContent = text;
-    if (images.length) userBody.insertAdjacentHTML('beforeend', renderMsgImages(images));
-    const asstBody = addMessage('assistant');
+    const user = addMessage('user');
+    user.body.textContent = text;
+    if (images.length) user.body.insertAdjacentHTML('beforeend', renderMsgImages(images));
+    const asst = addMessage('assistant', item.model);
+    const asstBody = asst.body;
     asstBody.innerHTML = '<span class="tmsg-stream"></span><span class="tmsg-cursor"></span>';
 
     const turnId = makeTurnId();
-    activeTurn = { turnId, asstBody, raw: '', streamEl: asstBody.querySelector('.tmsg-stream') };
+    activeTurn = {
+      turnId,
+      asstBody,
+      roleEl: asst.roleEl,
+      model: item.model || null,
+      raw: '',
+      streamEl: asstBody.querySelector('.tmsg-stream'),
+    };
     localStorage.setItem(LS_ADMIN_TURN, JSON.stringify({ turnId, sessionId, text }));
-    setSending(true);
+    updateControls();
 
     let resp;
     try {
       resp = await fetch('/api/admin/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, mode: modeSel.value, sessionId, turnId, repo: repoSel.value, images }),
+        // mode / repo / model are the values captured when this message was
+        // queued, not the dropdowns' current state.
+        body: JSON.stringify({
+          message: text,
+          mode: item.mode,
+          sessionId,
+          turnId,
+          repo: item.repo || '',
+          images,
+          model: item.model || undefined,
+        }),
       });
     } catch {
       // Couldn't reach the server to start — the job may still have launched,
@@ -3300,37 +3879,92 @@ function initAdminTerminal() {
     }
   }
 
-  // On (re)entering the Admin tab, resume any turn that was still streaming when
-  // the page was last closed/reloaded.
-  async function maybeReconnect() {
-    let saved;
-    try { saved = JSON.parse(localStorage.getItem(LS_ADMIN_TURN) || 'null'); } catch { saved = null; }
-    if (!saved || !saved.turnId) return;
-    if (saved.sessionId) sessionId = saved.sessionId;
+  // Re-attach to the turn that was streaming when the page was last closed.
+  async function resumeTurn(turnIdToResume, savedText) {
     clearEmpty();
-    if (saved.text) { const ub = addMessage('user'); ub.textContent = saved.text; }
-    const asstBody = addMessage('assistant');
+    if (savedText) { const ub = addMessage('user'); ub.body.textContent = savedText; }
+    const asst = addMessage('assistant');
+    const asstBody = asst.body;
     asstBody.innerHTML = '<span class="tmsg-stream"></span><span class="tmsg-cursor"></span>';
-    activeTurn = { turnId: saved.turnId, asstBody, raw: '', streamEl: asstBody.querySelector('.tmsg-stream') };
-    setSending(true);
+    activeTurn = {
+      turnId: turnIdToResume,
+      asstBody,
+      roleEl: asst.roleEl,
+      model: null,
+      raw: '',
+      streamEl: asstBody.querySelector('.tmsg-stream'),
+    };
+    updateControls();
     let resp;
-    try { resp = await fetch(`/api/admin/chat/${encodeURIComponent(saved.turnId)}/stream`); }
+    try { resp = await fetch(`/api/admin/chat/${encodeURIComponent(turnIdToResume)}/stream`); }
     catch { return reconnectLoop(); }
     if (!resp.ok || !resp.body) { return reconnectLoop(); }
     if (!(await consumeStream(resp))) await reconnectLoop();
   }
 
-  sendBtn.addEventListener('click', send);
-  inputEl.addEventListener('keydown', (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); send(); }
+  // The turn that was streaming when the page was last closed, if any — read
+  // before the queue is built so it can decide whether a dispatched-but-lost
+  // message needs recovering (it doesn't when that turn is still running).
+  let savedAdminTurn = null;
+  try { savedAdminTurn = JSON.parse(localStorage.getItem(LS_ADMIN_TURN) || 'null'); } catch { savedAdminTurn = null; }
+
+  // One copilot process per admin turn, so turns are serial: sending while a
+  // reply streams queues the message and it goes out as soon as the current
+  // turn ends. `reconnect` items re-attach to a turn already running instead.
+  const queue = createTurnQueue({
+    run: (item) => (item.reconnect ? resumeTurn(item.turnId, item.text) : runTurn(item)),
+    onChange: () => { renderPending(); updateControls(); },
+    storageKey: 'cc.queue.admin',
+    // Re-send a message whose dispatch died with its page, unless it's the very
+    // turn we're about to re-attach to (which would duplicate it).
+    recoverInflight: (it) => Boolean(it.text) && !(savedAdminTurn && savedAdminTurn.text === it.text),
   });
-  abortBtn.addEventListener('click', async () => {
+
+  function submit() {
+    const images = attachments.getImages();
+    const text = inputEl.value.trim() || (images.length ? 'See the attached image(s).' : '');
+    if (!text) return;
+    inputEl.value = '';
+    attachments.clear();
+    queue.enqueue({
+      text,
+      images,
+      mode: modeSel.value,
+      repo: repoSel.value,
+      model: modelPicker.value(),
+    });
+  }
+
+  async function abortActiveTurn() {
     if (!activeTurn) return;
     appendActiveChunk('\n[abort requested…]', 'stderr');
     try { await fetch(`/api/admin/chat/${encodeURIComponent(activeTurn.turnId)}/cancel`, { method: 'POST' }); } catch { /* ignore */ }
     // The job then emits result(aborted)+done, which the live stream turns into
-    // a finished turn.
-  });
+    // a finished turn — anything queued then goes out next.
+  }
+
+  // ⚡ Send now: jump the queue and cut the running turn short.
+  async function sendNow(id) {
+    queue.promote(id);
+    if (activeTurn) await abortActiveTurn();
+  }
+
+  // On (re)entering the Admin tab, resume any turn that was still streaming when
+  // the page was last closed/reloaded, then drain anything left in the queue.
+  async function maybeReconnect() {
+    const saved = savedAdminTurn;
+    if (saved && saved.turnId) {
+      if (saved.sessionId) sessionId = saved.sessionId;
+      queue.enqueue({ reconnect: true, turnId: saved.turnId, text: saved.text || '' }, { front: true });
+    }
+    renderPending();
+    updateControls();
+    queue.start();
+  }
+
+  sendBtn.addEventListener('click', submit);
+  attachEnterToSend(inputEl, submit);
+  abortBtn.addEventListener('click', abortActiveTurn);
   newBtn.addEventListener('click', startNewConversation);
 
   maybeReconnect();

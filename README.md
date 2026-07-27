@@ -191,10 +191,10 @@ pipeline you get:
      Copilot to read the code and propose a plan **without touching any
      files** — enforced by running with the same restrictive `default`
      approval mode as read-only actions, not just prompted.
-  2. Once a plan comes back, the button becomes **Execute this plan** — this
-     resumes the *same* session and actually implements it: commits and pushes
-     **to the existing PR branch** (no new PR, no force-push), so PR history on
-     GitHub is just new commits, same as pushing manually.
+  2. Once a plan comes back, an **Execute this plan** button appears next to
+     Send — this resumes the *same* session and actually implements it: commits
+     and pushes **to the existing PR branch** (no new PR, no force-push), so PR
+     history on GitHub is just new commits, same as pushing manually.
   - A successful "Execute this plan" **resets Deploy and re-locks Merge** for
     that PR (the old build no longer reflects the new code) — the just-applied
     turn's page reload shows this immediately, and the previous Deploy attempt
@@ -205,6 +205,29 @@ pipeline you get:
     via `--attachment` and stay visible as thumbnails in the conversation
     history after reload. The same attachment support is available in the
     Admin Terminal composer.
+
+Every composer (PR chat, PreIssue chat, Admin Terminal) shares three behaviours:
+
+- **Non-blocking sending.** The message box is never disabled while a reply
+  streams. Only one copilot process is allowed per chat (the session is chained
+  via `--resume`), so messages sent mid-reply join a **queue** and are dispatched
+  automatically in FIFO order as each turn finishes — the send button reads
+  *Queue* while a turn is in flight. Queued messages appear as dashed "⏳ Queued"
+  bubbles with **✕ Cancel** and **⚡ Send now** (which aborts the running turn so
+  yours goes next). Aborting a turn keeps the queue and moves on to the next
+  message. The queue is stored per chat in `localStorage`, so a refresh or a
+  closed tab doesn't lose unsent messages; a turn that was already running is
+  re-attached to on return instead of being sent twice.
+- **Per-chat model picker.** A `model:` dropdown next to each composer lists the
+  models from `/api/settings/model` and defaults to the global setting from the
+  homepage. Changing it affects **only that chat's later turns** — the global
+  default is untouched. The model is captured when a message is *queued*, so a
+  queue drained later still uses the model you picked at the time, and each
+  reply bubble is badged with the model that produced it.
+- **Enter to send.** Enter sends, Shift+Enter inserts a newline, ⌘/Ctrl+Enter
+  still sends. Enter never sends mid-IME-composition (so picking Chinese or
+  Japanese candidates can't fire a message), and on touch devices Enter stays a
+  newline — sending there goes through the button.
 
 ---
 
@@ -222,7 +245,7 @@ pipeline you get:
 | POST | `/api/repos/:name/issues/:n/deploy/:pr/cancel` | Abort the running deploy for that PR. |
 | POST | `/api/repos/:name/issues/:n/merge/:pr` | **Merge a specific PR** — SSE stream. Body: `{ "force": false }`. Blocked unless Deploy succeeded, unless `force: true`. |
 | POST | `/api/repos/:name/issues/:n/merge/:pr/cancel` | Abort the running merge for that PR. |
-| POST | `/api/repos/:name/issues/:n/prs/:pr/chat` | **Chat with a PR** — SSE stream. Body: `{ "message": "...", "mode": "plan"\|"apply" }`. `plan` is read-only (default approval flags); `apply` implements + pushes to the existing branch and resets Deploy/Merge on success. |
+| POST | `/api/repos/:name/issues/:n/prs/:pr/chat` | **Chat with a PR** — SSE stream. Body: `{ "message": "...", "mode": "plan"\|"apply", "model": "claude-opus-4.8" }`. `plan` is read-only (default approval flags); `apply` implements + pushes to the existing branch and resets Deploy/Merge on success. `model` is optional and falls back to the global setting; unknown values fall back too. Omitting `message` re-attaches to a turn already running; sending one *with* a turn in flight returns **409** (one copilot per PR) and the UI re-queues it. |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat/cancel` | Abort the running chat turn for that PR. |
 | POST | `/api/run` | Simple one-shot demo (prompt + optional `sessionId` resume). |
 

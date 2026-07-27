@@ -178,11 +178,17 @@ function approvalFlags(mode) {
   }
 }
 
-// The AI model to use for every Copilot CLI invocation, configurable from the
-// homepage dropdown (persisted via store.setModel) and defaulting to
-// store.DEFAULT_MODEL otherwise.
-function modelFlags() {
-  return ['--model', store.getModel()];
+// The AI model to use for a Copilot CLI invocation. Chats can pick a model per
+// turn (a `model` field on the request body); anything unset, unknown, or not
+// chat-scoped falls back to the global setting from the homepage dropdown
+// (persisted via store.setModel, defaulting to store.DEFAULT_MODEL).
+function resolveModel(requested) {
+  const m = typeof requested === 'string' ? requested.trim() : '';
+  return m && store.AVAILABLE_MODELS.includes(m) ? m : store.getModel();
+}
+
+function modelFlags(model) {
+  return ['--model', model || store.getModel()];
 }
 
 // ---------------------------------------------------------------------------
@@ -442,8 +448,14 @@ app.post('/api/repos/:name/preissues/:id/chat', async (req, res) => {
   // Reconnect: if a job is already running (e.g. the client navigated away
   // and back), just re-attach — no new message required. Checking this
   // BEFORE validating `message` is what lets a plain reconnect succeed.
+  // A request that DOES carry a message is a different intent, and only one
+  // copilot process per PreIssue is allowed, so it's rejected instead of being
+  // silently swallowed as a re-attach — the client re-queues it.
   const existing = jobs.getJob(key);
   if (existing && existing.status === 'running') {
+    if (typeof req.body?.message === 'string' && req.body.message.trim()) {
+      return res.status(409).json({ error: 'a chat turn is already running for this PreIssue' });
+    }
     writeSseHead(res);
     jobs.subscribe(existing, res);
     return;
@@ -452,8 +464,10 @@ app.post('/api/repos/:name/preissues/:id/chat', async (req, res) => {
   const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
   if (!message) return res.status(400).json({ error: 'message is required' });
 
+  const model = resolveModel(req.body?.model);
+
   writeSseHead(res);
-  store.appendPreIssueChatMessage(repo.name, id, { role: 'user', text: message });
+  store.appendPreIssueChatMessage(repo.name, id, { role: 'user', text: message, model });
 
   const resumeId = pre.chat && pre.chat.sessionId;
   const args = [];
@@ -469,20 +483,20 @@ app.post('/api/repos/:name/preissues/:id/chat', async (req, res) => {
     `Reply conversationally, then ALWAYS end your reply with the current best draft as a ` +
     `fenced json block of the exact shape {"title": "...", "body": "..."} (a short, clear ` +
     `title and a body with motivation + concrete acceptance criteria).`;
-  args.push('-p', prompt, ...approvalFlags('default'), ...modelFlags());
+  args.push('-p', prompt, ...approvalFlags('default'), ...modelFlags(model));
 
   const job = jobs.startJob(key, {
     bin: COPILOT_BIN,
     args,
     cwd: repo.path,
-    meta: { action: 'preissue-chat', id },
+    meta: { action: 'preissue-chat', id, model },
     onSession: (sid) => store.setPreIssueSession(repo.name, id, sid),
     onDone: async (j) => {
       const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
-      store.appendPreIssueChatMessage(repo.name, id, { role: 'assistant', text: j.conversation });
+      store.appendPreIssueChatMessage(repo.name, id, { role: 'assistant', text: j.conversation, model });
       const draft = extractDraft(j.conversation);
       if (draft) store.setPreIssueDraft(repo.name, id, draft);
-      return { action: 'preissue-chat', id, status, sessionId: j.sessionId, draft };
+      return { action: 'preissue-chat', id, status, sessionId: j.sessionId, draft, model };
     },
   });
 
@@ -1025,9 +1039,15 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
   const key = `${repo.name}#${n}:chat:${prNumber}`;
 
   // Reconnect: if a job is already running (e.g. the client navigated away
-  // and back), just re-attach — no new message required.
+  // and back), just re-attach — no new message required. A request that DOES
+  // carry a message is a different intent, and only one copilot process per PR
+  // is allowed, so it's rejected instead of being silently swallowed as a
+  // re-attach (which would drop the message) — the client re-queues it.
   const existing = jobs.getJob(key);
   if (existing && existing.status === 'running') {
+    if (typeof req.body?.message === 'string' && req.body.message.trim()) {
+      return res.status(409).json({ error: `a chat turn is already running for PR #${prNumber}` });
+    }
     writeSseHead(res);
     jobs.subscribe(existing, res);
     return;
@@ -1035,6 +1055,8 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
 
   const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
   if (!message) return res.status(400).json({ error: 'message is required' });
+
+  const model = resolveModel(req.body?.model);
 
   writeSseHead(res);
 
@@ -1072,7 +1094,7 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
   const savedImages = saveUploadedImages(req.body?.images);
   const imageRefs = savedImages.map((img) => ({ url: img.url, name: img.name }));
 
-  store.appendChatMessage(repo.name, n, prNumber, { role: 'user', text: message, mode, images: imageRefs });
+  store.appendChatMessage(repo.name, n, prNumber, { role: 'user', text: message, mode, images: imageRefs, model });
 
   const args = [];
   if (resumeId) args.push(`--resume=${resumeId}`);
@@ -1084,21 +1106,21 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
       `The branch for PR #${prNumber} is already checked out. Do NOT modify any files. ` +
       `Read the relevant code and propose a concrete plan for the following request, ` +
       `ending with a clear plan summary: ${message}`;
-    args.push('-p', prompt, ...approvalFlags('default'), ...modelFlags());
+    args.push('-p', prompt, ...approvalFlags('default'), ...modelFlags(model));
   } else {
     // Implement the plan from the resumed conversation, on the SAME branch.
     const prompt =
       `Implement the plan from our conversation for this request: ${message}\n\n` +
       `Commit and push the changes to the EXISTING branch for PR #${prNumber} ` +
       `(do not open a new PR, do not force-push). Confirm what you committed and pushed.`;
-    args.push('-p', prompt, '--allow-all', ...modelFlags());
+    args.push('-p', prompt, '--allow-all', ...modelFlags(model));
   }
 
   const job = jobs.startJob(key, {
     bin: COPILOT_BIN,
     args,
     cwd: repo.path,
-    meta: { action: 'chat', prNumber, mode },
+    meta: { action: 'chat', prNumber, mode, model },
     onSession: (id) =>
       store.updateRecord(repo.name, n, (r) => {
         const pr2 = r.prs[prNumber];
@@ -1109,12 +1131,12 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
       }),
     onDone: async (j) => {
       const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
-      store.appendChatMessage(repo.name, n, prNumber, { role: 'assistant', text: j.conversation, mode });
+      store.appendChatMessage(repo.name, n, prNumber, { role: 'assistant', text: j.conversation, mode, model });
       // New commits landed — the old Deploy/Merge no longer reflect this code.
       if (mode === 'apply' && status === 'success') {
         store.resetForNewCommits(repo.name, n, prNumber);
       }
-      return { action: 'chat', prNumber, mode, status, sessionId: j.sessionId };
+      return { action: 'chat', prNumber, mode, status, sessionId: j.sessionId, model };
     },
   });
 
@@ -1234,7 +1256,8 @@ app.post('/api/admin/chat', (req, res) => {
   const savedImages = saveUploadedImages(req.body?.images);
   const imageRefs = savedImages.map((img) => ({ url: img.url, name: img.name }));
   for (const img of savedImages) args.push('--attachment', img.path);
-  args.push('-p', message, ...approvalFlags(mode), ...modelFlags());
+  const model = resolveModel(req.body?.model);
+  args.push('-p', message, ...approvalFlags(mode), ...modelFlags(model));
 
   // Durably buffer this turn *before* spawning the child. If this very turn
   // asks Copilot to redeploy (which restarts this server process), the
@@ -1246,13 +1269,14 @@ app.post('/api/admin/chat', (req, res) => {
     repo: repoName || null,
     images: imageRefs,
     sessionId,
+    model,
   });
 
   const job = jobs.startJob(key, {
     bin: COPILOT_BIN,
     args,
     cwd,
-    meta: { action: 'admin', turnId, repo: repoName || null },
+    meta: { action: 'admin', turnId, repo: repoName || null, model },
     onSession: (sid) => store.updateAdminTurnProgress(turnId, { sessionId: sid }),
     onProgress: (j) => store.updateAdminTurnProgress(turnId, { assistantText: j.conversation, sessionId: j.sessionId }),
     onDone: async (j) => {
@@ -1265,6 +1289,7 @@ app.post('/api/admin/chat', (req, res) => {
           mode,
           repo: repoName || null,
           images: imageRefs,
+          model,
         });
       }
       // Turn completed normally — the buffered copy is no longer needed.
@@ -1274,6 +1299,7 @@ app.post('/api/admin/chat', (req, res) => {
         turnId,
         status: j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed',
         sessionId: sid,
+        model,
       };
     },
   });

@@ -1117,7 +1117,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         <span class="spacer"></span>
         <button class="pinbtn" title="Pin to top">📌</button>
         <a class="ghlink" target="_blank" rel="noopener">↗ GitHub</a>
-        <button class="hidebtn" title="Remove this issue from the list" aria-label="Remove this issue from the list">🗑</button>
+        <button class="hidebtn" title="Hide this issue from cloud-copilot (local only — does not touch GitHub)" aria-label="Hide this issue from the list">🗑</button>
       </div>
       <div class="issue-title">${escape(issue.title)}
         <div class="labels">${labels}</div>
@@ -1134,7 +1134,12 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   const ghLink = el.querySelector('.ghlink');
   const hideBtn = el.querySelector('.hidebtn');
   ghLink.href = issue.url;
-  hideBtn.addEventListener('click', () => onHide('Remove this issue from the list?'));
+  hideBtn.addEventListener('click', () =>
+    onHide(
+      `Hide issue #${issue.number} from cloud-copilot? This only hides it locally — it will NOT close ` +
+        `or delete the issue on GitHub. Any running work/deploy jobs for it will be cancelled first.`,
+    ),
+  );
 
   const pinBtn = el.querySelector('.pinbtn');
   const paintPin = () => pinBtn.classList.toggle('active', isPinned(repo.name, issue.number));
@@ -1191,13 +1196,8 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   const deleteBtn = document.createElement('button');
   deleteBtn.className = 'iconbtn abortbtn smallbtn';
   deleteBtn.textContent = '🗑 Delete issue';
-  deleteBtn.title = 'Remove this issue from cloud-copilot (does not touch GitHub)';
-  deleteBtn.addEventListener('click', () =>
-    onHide(
-      `Delete issue #${issue.number} from cloud-copilot? This only hides it locally — it will NOT close ` +
-        `or delete the issue on GitHub. Any running work/deploy jobs for it will be cancelled first.`,
-    ),
-  );
+  deleteBtn.title = 'PERMANENTLY delete this issue on GitHub — cannot be undone';
+  deleteBtn.addEventListener('click', onDelete);
   actions.append(deleteBtn);
 
   paintWork(st.work.status);
@@ -1890,8 +1890,38 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     }
   }
 
-  function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+  // --- Permanent delete (really removes the issue on GitHub) ---------------
+  // Irreversible, so it's gated behind typing the issue number rather than a
+  // one-click confirm. Local state is only cleared once the server (and thus
+  // GitHub) confirmed the deletion.
+  async function onDelete() {
+    const answer = window.prompt(
+      `PERMANENTLY DELETE issue #${issue.number} on GitHub?\n\n` +
+        `"${issue.title}"\n\n` +
+        `This deletes the issue on github.com — it cannot be undone, and it is NOT the same as ` +
+        `closing it. Any running work/deploy jobs for it will be cancelled first.\n\n` +
+        `Type ${issue.number} to confirm:`,
+    );
+    if (answer === null) return;
+    if (answer.trim() !== String(issue.number)) {
+      window.alert('Deletion cancelled — the issue number did not match.');
+      return;
+    }
+    hideBtn.disabled = true;
+    deleteBtn.disabled = true;
+    try {
+      const resp = await fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}`, { method: 'DELETE' });
+      if (!resp.ok) throw new Error(await friendlyHttpError(resp));
+      repoCtx.clearActive(issue.number);
+      el.remove();
+    } catch (e) {
+      hideBtn.disabled = false;
+      deleteBtn.disabled = false;
+      window.alert(`Failed to delete issue #${issue.number}: ${e.message}`);
+    }
+  }
 
+  function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
   return el;
 }
 

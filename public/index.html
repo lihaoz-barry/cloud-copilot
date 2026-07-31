@@ -151,27 +151,54 @@
       background: #8882; color: inherit; font-weight: 600; font-size: .82rem;
     }
     .err-inline { color: #dc2626; font-size: .8rem; padding: 8px 4px; }
-    .mode-row { margin: 0; font-size: .8rem; color: #888; }
     select { font: inherit; padding: 5px 8px; border-radius: 8px; border: 1px solid #8884; background: #8881; }
 
-    /* top bar with title + controls (filter lives top-right) */
+    /* top bar with title + a single settings dropdown (top-right) */
     .topbar { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
-    .topbar .grow { flex: 1; }
-    .topctrls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+    .topbar .grow { flex: 1; min-width: 0; }
+    .topbar h1 { overflow-wrap: anywhere; }
+    .topctrls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; flex: none; }
     .filter { position: relative; }
+    .settings-trigger { position: relative; white-space: nowrap; }
+    /* badge shown when a setting is non-default (e.g. repos are hidden), so
+       collapsing the controls doesn't hide active state */
+    .settings-dot {
+      position: absolute; top: -3px; right: -3px; width: 8px; height: 8px;
+      border-radius: 50%; background: #f59e0b; box-shadow: 0 0 0 2px Canvas;
+    }
     .filter-menu {
-      position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; min-width: 220px;
+      position: absolute; right: 0; top: calc(100% + 6px); z-index: 20;
+      width: min(280px, calc(100vw - 24px)); max-width: calc(100vw - 24px); box-sizing: border-box;
       background: Canvas; color: CanvasText; border: 1px solid #8884; border-radius: 10px;
       box-shadow: 0 8px 30px #0006; padding: 8px; display: none; max-height: 60vh; overflow-y: auto;
     }
     .filter-menu.show { display: block; }
     .filter-menu h4 { margin: 4px 6px 8px; font-size: .78rem; color: #888; font-weight: 600; }
+    .filter-menu h4:not(:first-child) { margin-top: 12px; }
     .filter-menu label {
       display: flex; align-items: center; gap: 8px; padding: 6px 6px; border-radius: 8px;
       font-size: .85rem; cursor: pointer;
     }
     .filter-menu label:hover { background: #8881; }
+    /* long model names must be ellipsised, never widen the panel */
+    .filter-menu select {
+      display: block; width: 100%; max-width: 100%; box-sizing: border-box;
+      text-overflow: ellipsis; font-size: .85rem;
+    }
+    .filter-menu label > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .settings-section { margin-top: 4px; }
+    .settings-note { font-size: .76rem; color: #888; padding: 2px 6px 0; overflow-wrap: anywhere; }
+    .settings-note.err { color: #dc2626; }
+    .settings-row { display: flex; gap: 6px; padding: 6px 6px 2px; }
     .filter-actions { display: flex; gap: 6px; padding: 6px 6px 2px; border-top: 1px solid #8882; margin-top: 4px; }
+
+    /* narrow screens: the title and the settings trigger share one row without
+       overflowing a ~390px viewport */
+    @media (max-width: 560px) {
+      .topbar { gap: 8px; }
+      .topbar h1 { font-size: 1.25rem; }
+      .topctrls { gap: 6px; }
+    }
 
     /* GitHub link beside the issue title */
     a.ghlink {
@@ -246,8 +273,34 @@
       width: 100%; font: inherit; padding: 10px 12px; border-radius: 10px; border: 1px solid #8884;
       background: #8881; color: inherit; resize: vertical; min-height: 60px;
     }
-    .chat-actions { display: flex; gap: 8px; align-items: center; }
+    .chat-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; row-gap: 8px; }
+    .chat-actions .spacer { flex: 1; }
+    .chat-send { margin-left: auto; }
+    .chat-pending-list { display: flex; flex-direction: column; gap: 10px; align-items: flex-end; }
+    .chat-pending-list:empty { display: none; }
     .chat-empty { color: #888; font-size: .8rem; padding: 4px 0 10px; }
+
+    /* ---- Queued (typed while a turn is still streaming) messages ---------- */
+    .chat-bubble.chat-pending { background: #8881; border: 1px dashed #8885; opacity: .8; }
+    .chat-pending .chat-meta { display: flex; align-items: center; gap: 6px; }
+    .chat-pending-actions { margin-left: auto; display: flex; gap: 4px; }
+    .chat-pending-actions button {
+      cursor: pointer; border: 1px solid #8884; border-radius: 6px; background: transparent;
+      color: inherit; font: inherit; font-size: .7rem; line-height: 1; padding: 3px 6px; min-height: 24px;
+    }
+    .chat-pending-actions button:hover { background: #8882; }
+
+    /* ---- Per-chat model picker + "which model answered" badge ------------- */
+    .chat-model {
+      font: inherit; font-size: .72rem; padding: 5px 6px; border-radius: 8px;
+      border: 1px solid #8884; background: #8881; color: inherit; max-width: 190px; min-width: 0;
+    }
+    .chat-model:disabled { opacity: .6; }
+    .model-badge {
+      font-size: .62rem; padding: 1px 5px; border-radius: 999px; border: 1px solid #8884;
+      color: #888; text-transform: none; letter-spacing: 0; white-space: nowrap;
+    }
+    .chat-meta .model-badge { margin-left: 6px; }
 
     /* ---- Image attachments: paperclip button + drop target + preview chips */
     .attach-btn {
@@ -352,7 +405,11 @@
     .term {
       border: 1px solid #8883; border-radius: 14px; overflow: hidden;
       display: flex; flex-direction: column; background: #0b0b0e;
-      height: calc(100vh - 200px); min-height: 340px;
+      height: calc(100vh - 200px);
+      /* dvh tracks the *dynamic* mobile viewport, so the input bar is never
+         hidden underneath the browser's collapsing chrome. */
+      height: calc(100dvh - 200px);
+      min-height: 340px;
     }
     .term-log {
       flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px;
@@ -382,6 +439,13 @@
       padding: 2px 7px; font-family: ui-monospace, Menlo, monospace; white-space: nowrap;
     }
     .tmsg-meta .mchip-diff { color: #6ee787; background: #6ee78714; }
+    /* Queued (typed while a turn is still streaming) terminal messages */
+    .tmsg-pending-list { display: flex; flex-direction: column; gap: 12px; align-items: flex-end; }
+    .tmsg-pending-list:empty { display: none; }
+    .tmsg.tmsg-pending .tmsg-body { background: #2563eb55; border: 1px dashed #ffffff33; }
+    .tmsg-role .model-badge { color: #6b7280; }
+    .tmsg-pending .tmsg-role { display: flex; align-items: center; gap: 6px; }
+    .tmsg-pending .chat-pending-actions button { border-color: #ffffff33; }
     .term-inputbar {
       display: flex; flex-direction: column; gap: 8px; padding: 10px; border-top: 1px solid #ffffff12;
       background: #101014;
@@ -395,14 +459,18 @@
       font-family: ui-monospace, Menlo, monospace;
     }
     .term-input:focus { outline: none; border-color: #2563eb; }
-    .term-controls { display: flex; align-items: center; gap: 8px; }
+    .term-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; row-gap: 8px; }
     .term-controls .spacer { flex: 1; }
-    .term-controls label { font-size: .74rem; color: #9aa0aa; display: flex; align-items: center; gap: 6px; }
+    .term-controls-selects { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+    .term-controls label { font-size: .74rem; color: #9aa0aa; display: flex; align-items: center; gap: 6px; min-width: 0; }
     .term-controls select {
       /* 16px min — see .term-input note (prevents iOS focus auto-zoom). */
       font-size: 16px; background: #05050799; color: #e6e6e6; border-color: #ffffff1f;
+      /* Flex children default to min-width:auto and would otherwise force this
+         row wider than .term, which clips (overflow:hidden) and eats Send. */
+      min-width: 0; max-width: 42vw;
     }
-    .term-send { padding: 8px 16px; }
+    .term-send { padding: 8px 16px; margin-left: auto; }
     .term-status { font-size: .72rem; color: #9aa0aa; padding: 0 2px; min-height: 1em; }
     #adminMenuBtn { font-size: 1rem; line-height: 1; padding: 6px 10px; }
     /* Compact history popover anchored right under the hamburger (no full-screen drawer). */
@@ -602,6 +670,25 @@
     .cc-jump[hidden] { display: none; }
     .cc-noout { color: #9aa0aa; }
     .cc-aborted { color: #eab308; }
+
+    /* ---- Narrow screens: keep the composer's Send button on screen ---------
+       The composer control rows are single-line flex rows on desktop. On a
+       phone the selects (16px font, to avoid iOS focus auto-zoom) no longer fit
+       alongside the buttons, so the rows have to break into "selects" +
+       "buttons". Without this the Admin Terminal's row overflows .term, which
+       clips (overflow:hidden for its radius) and hides Send entirely. */
+    @media (max-width: 560px) {
+      .term-controls-selects { flex: 1 1 100%; }
+      .term-controls .spacer, .chat-actions .spacer { display: none; }
+      .term-controls select { max-width: none; flex: 1 1 120px; }
+      .chat-model { flex: 1 1 140px; max-width: none; }
+    }
+
+    /* Touch devices: form controls below 16px make iOS Safari zoom the whole
+       page on focus, which scrolls the right-hand side (Send) out of view. */
+    @media (pointer: coarse) {
+      .chat-model { font-size: 16px; padding: 6px; }
+    }
   </style>
   <link rel="stylesheet" href="/vendor/highlight-github-dark.min.css" />
 </head>
@@ -619,21 +706,28 @@
         <p class="sub" id="rootline">loading…</p>
       </div>
       <div class="topctrls">
-        <div class="mode-row">
-          mode:
-          <select id="mode">
-            <option value="allow-all" selected>Allow All</option>
-            <option value="granular">Granular</option>
-            <option value="default">Default</option>
-          </select>
-        </div>
-        <div class="mode-row">
-          model:
-          <select id="modelSel"><option value="">loading…</option></select>
-        </div>
         <div class="filter">
-          <button id="filterBtn" class="ghost sm">⚙ Filter</button>
-          <div id="filterMenu" class="filter-menu">
+          <button id="filterBtn" class="ghost sm settings-trigger"
+                  aria-haspopup="true" aria-expanded="false" aria-controls="filterMenu">
+            ⚙ Settings<span id="settingsDot" class="settings-dot" hidden></span>
+          </button>
+          <div id="filterMenu" class="filter-menu" role="dialog" aria-label="Settings">
+            <h4>Mode</h4>
+            <select id="mode">
+              <option value="allow-all" selected>Allow All</option>
+              <option value="granular">Granular</option>
+              <option value="default">Default</option>
+            </select>
+            <h4>Model</h4>
+            <select id="modelSel"><option value="">loading…</option></select>
+            <div id="selfSection" class="settings-section" hidden>
+              <h4>This instance</h4>
+              <div class="settings-note">branch: <strong id="selfBranch">…</strong></div>
+              <div class="settings-row">
+                <button id="restartMainBtn" class="ghost sm">🔄 Restart main</button>
+              </div>
+              <div id="restartNote" class="settings-note" hidden></div>
+            </div>
             <h4>Show repositories</h4>
             <div id="filterList"></div>
             <div class="filter-actions">
@@ -681,16 +775,21 @@
       </div>
       <div class="term-inputbar">
         <div class="attach-previews" id="termAttachPreviews"></div>
-        <textarea id="termInput" class="term-input attach-dropzone" rows="2" placeholder="Type a message…  (⌘/Ctrl+Enter to send)"></textarea>
+        <textarea id="termInput" class="term-input attach-dropzone" rows="2" placeholder="Type a message…  (Enter to send, Shift+Enter for a new line)"></textarea>
         <input type="file" id="termAttachInput" accept="image/*" multiple hidden>
         <div class="term-controls">
-          <label>permission:
-            <select id="termMode">
-              <option value="bypass" selected>Bypass</option>
-              <option value="granular">Granular</option>
-              <option value="default">Default</option>
-            </select>
-          </label>
+          <div class="term-controls-selects">
+            <label>permission:
+              <select id="termMode">
+                <option value="bypass" selected>Bypass</option>
+                <option value="granular">Granular</option>
+                <option value="default">Default</option>
+              </select>
+            </label>
+            <label>model:
+              <select id="termModel" class="chat-model" title="Model used for this chat" aria-label="Model used for this chat"></select>
+            </label>
+          </div>
           <span class="spacer"></span>
           <button id="termAttachBtn" class="attach-btn" type="button" title="Attach image" aria-label="Attach image">📎</button>
           <button id="termAbort" class="iconbtn abortbtn" hidden>⨯ Abort</button>
@@ -767,6 +866,11 @@ const modelSel = document.getElementById('modelSel');
 const filterBtn = document.getElementById('filterBtn');
 const filterMenu = document.getElementById('filterMenu');
 const filterList = document.getElementById('filterList');
+const settingsDot = document.getElementById('settingsDot');
+const selfSection = document.getElementById('selfSection');
+const selfBranchEl = document.getElementById('selfBranch');
+const restartMainBtn = document.getElementById('restartMainBtn');
+const restartNote = document.getElementById('restartNote');
 
 const enc = encodeURIComponent;
 
@@ -925,19 +1029,70 @@ function renderFilterMenu(repos) {
       if (cb.checked) set.delete(repo.name); else set.add(repo.name);
       saveHidden(set);
       applyRepoVisibility();
+      updateSettingsBadge();
     });
+    const name = document.createElement('span');
+    name.textContent = repo.name;
     label.appendChild(cb);
-    label.appendChild(document.createTextNode(repo.name));
+    label.appendChild(name);
     filterList.appendChild(label);
   }
+  updateSettingsBadge();
+}
+
+// Badge on the collapsed trigger whenever a setting is non-default — right now
+// that means the repo filter is hiding at least one repo.
+function updateSettingsBadge() {
+  const hidden = hiddenSet();
+  const known = (window.__repos || []).map((r) => r.name);
+  const hidingSomething = known.some((n) => hidden.has(n));
+  settingsDot.hidden = !hidingSomething;
+}
+
+// Keep the panel inside the viewport on both edges, however narrow the screen
+// is and however close the trigger sits to a border.
+function clampSettingsMenu() {
+  filterMenu.style.left = '';
+  filterMenu.style.right = '0';
+  const box = filterMenu.getBoundingClientRect();
+  const margin = 12;
+  if (box.left < margin) {
+    const overflowLeft = margin - box.left;
+    filterMenu.style.right = `${Math.max(0, parseFloat(getComputedStyle(filterMenu).right || 0) - overflowLeft)}px`;
+  }
+  const after = filterMenu.getBoundingClientRect();
+  if (after.right > window.innerWidth - margin) {
+    filterMenu.style.right = `${after.right - (window.innerWidth - margin)}px`;
+  }
+}
+
+function settingsOpen() { return filterMenu.classList.contains('show'); }
+function openSettings() {
+  filterMenu.classList.add('show');
+  filterBtn.setAttribute('aria-expanded', 'true');
+  clampSettingsMenu();
+  loadSelfInfo();
+}
+function closeSettings({ focusTrigger = false } = {}) {
+  if (!settingsOpen()) return;
+  filterMenu.classList.remove('show');
+  filterBtn.setAttribute('aria-expanded', 'false');
+  if (focusTrigger) filterBtn.focus();
 }
 filterBtn.addEventListener('click', (e) => {
   e.stopPropagation();
-  filterMenu.classList.toggle('show');
+  if (settingsOpen()) closeSettings(); else openSettings();
 });
 document.addEventListener('click', (e) => {
-  if (!filterMenu.contains(e.target) && e.target !== filterBtn) filterMenu.classList.remove('show');
+  if (!filterMenu.contains(e.target) && !filterBtn.contains(e.target)) closeSettings();
 });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && settingsOpen()) {
+    e.stopPropagation();
+    closeSettings({ focusTrigger: true });
+  }
+});
+window.addEventListener('resize', () => { if (settingsOpen()) clampSettingsMenu(); });
 document.getElementById('filterAll').addEventListener('click', () => {
   saveHidden(new Set());
   renderFilterMenu(window.__repos || []);
@@ -994,14 +1149,18 @@ async function renderPinnedSection() {
 }
 
 // ---- model selection --------------------------------------------------------
+// This is the GLOBAL default (used by Create PR / Deploy and as the starting
+// value of every in-chat model picker). Individual chats override it per turn
+// without writing back here — see createModelPicker.
 async function loadModelSetting() {
-  try {
-    const { model, models } = await fetch('/api/settings/model').then((x) => x.json());
-    modelSel.innerHTML = models.map((m) => `<option value="${escape(m)}">${escape(m)}</option>`).join('');
-    modelSel.value = model;
-  } catch {
+  const d = await loadModelList();
+  const models = (d && Array.isArray(d.models) && d.models) || [];
+  if (!models.length) {
     modelSel.innerHTML = '<option value="">(unavailable)</option>';
+    return;
   }
+  modelSel.innerHTML = models.map((m) => `<option value="${escape(m)}">${escape(m)}</option>`).join('');
+  modelSel.value = d.model;
 }
 
 modelSel.addEventListener('change', async () => {
@@ -1013,10 +1172,105 @@ modelSel.addEventListener('change', async () => {
       body: JSON.stringify({ model: modelSel.value }),
     });
     if (!r.ok) throw new Error((await r.json()).error || 'failed to save model');
+    // New chat panels should now default to the new global model.
+    resetModelListCache();
   } catch (err) {
     alert(err.message || 'Failed to save model');
     modelSel.value = prev;
   }
+});
+
+// ---- self repo ("this instance") + Restart main ----------------------------
+// Only the cloud-copilot checkout serving this page gets these controls; the
+// server returns { repo: null } for every other setup.
+let selfInfo = null;
+let restarting = false;
+
+function setRestartNote(text, isErr = false) {
+  restartNote.hidden = !text;
+  restartNote.textContent = text || '';
+  restartNote.classList.toggle('err', Boolean(isErr));
+}
+
+async function loadSelfInfo() {
+  if (restarting) return;
+  try {
+    const info = await fetch('/api/settings/self', { cache: 'no-store' }).then((x) => x.json());
+    selfInfo = info;
+    if (!info.repo) { selfSection.hidden = true; return; }
+    selfSection.hidden = false;
+    selfBranchEl.textContent = info.branch || '(unknown)';
+    const branch = info.defaultBranch || 'main';
+    restartMainBtn.textContent = `🔄 Restart ${branch}`;
+    restartMainBtn.disabled = Boolean(info.busy);
+    if (info.busy) setRestartNote(`Blocked: ${info.busy}.`, true);
+    else if (info.dirty) setRestartNote('Uncommitted changes will be stashed first.');
+    else setRestartNote('');
+  } catch {
+    selfSection.hidden = true;
+  }
+}
+
+// Poll /api/health until a *different* process answers — i.e. the restart
+// finished — instead of hanging on the request that killed the old server.
+async function waitForRestart(prevStartedAt, timeoutMs = 120000) {
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await wait(1500);
+    try {
+      const r = await fetch('/api/health', { cache: 'no-store' });
+      if (r.ok) {
+        const h = await r.json();
+        if (h.ok && (!prevStartedAt || h.startedAt !== prevStartedAt)) return h;
+      }
+    } catch {
+      /* still down — keep polling */
+    }
+  }
+  throw new Error('Timed out waiting for the server to come back. Check server.log.');
+}
+
+restartMainBtn.addEventListener('click', async () => {
+  if (restarting) return;
+  const branch = (selfInfo && selfInfo.defaultBranch) || 'main';
+  const dirtyWarning = selfInfo && selfInfo.dirty
+    ? '\n\nUncommitted changes will be stashed (recoverable with `git stash pop`).'
+    : '';
+  if (!confirm(`Check out ${branch}, pull the latest code, and restart cloud-copilot?${dirtyWarning}`)) return;
+
+  const prevStartedAt = (selfInfo && selfInfo.startedAt) || null;
+  restarting = true;
+  restartMainBtn.disabled = true;
+  setRestartNote(`Switching to ${branch}…`);
+
+  let data = {};
+  try {
+    const r = await fetch('/api/settings/self/restart-main', { method: 'POST' });
+    data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  } catch (err) {
+    restarting = false;
+    restartMainBtn.disabled = false;
+    setRestartNote(err.message || 'Restart failed.', true);
+    return;
+  }
+
+  selfBranchEl.textContent = data.branch || branch;
+  setRestartNote(`${(data.steps || []).join(' · ')} · waiting for the server to come back…`);
+  try {
+    await waitForRestart(prevStartedAt);
+  } catch (err) {
+    restarting = false;
+    restartMainBtn.disabled = false;
+    setRestartNote(err.message, true);
+    return;
+  }
+  restarting = false;
+  const stashNote = data.stashed ? ` · stashed: "${data.stashed}"` : '';
+  setRestartNote(`Restarted ✓ on ${data.branch || branch}${data.head ? ` @ ${data.head}` : ''}${stashNote} · reloading…`);
+  // The server just swapped the code it serves — reload so the page matches.
+  setTimeout(() => location.reload(), 1500);
 });
 
 // ---- repos ----------------------------------------------------------------
@@ -2123,6 +2377,212 @@ function renderMsgImages(images) {
   return `<div class="msg-attach-images">${imgs}</div>`;
 }
 
+// ---- Shared chat composer behaviour ---------------------------------------
+// Three places host a Copilot conversation (the PR chat panel, the PreIssue
+// chat and the Admin Terminal) and all three want the same three things:
+//   * a non-blocking composer that queues messages typed while a turn streams,
+//   * a per-chat model picker whose choice is captured at enqueue time,
+//   * Enter-to-send with IME/mobile-safe guards.
+// They live here once instead of being copy-pasted into each panel.
+
+// Soft keyboards put Enter where "newline" is expected and there's no cheap
+// way to distinguish a deliberate send — so on touch devices Enter always
+// inserts a newline and sending goes through the button.
+const IS_TOUCH_DEVICE =
+  (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) || 'ontouchstart' in window;
+
+// Enter sends, Shift/Alt+Enter inserts a newline, ⌘/Ctrl+Enter always sends
+// (backwards compatible). Never fires mid-IME-composition, which is what makes
+// picking Chinese/Japanese candidates with Enter safe.
+function attachEnterToSend(inputEl, submit) {
+  inputEl.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    if (e.isComposing || e.keyCode === 229) return;
+    if (e.metaKey || e.ctrlKey) { e.preventDefault(); submit(); return; }
+    if (e.shiftKey || e.altKey) return;
+    if (IS_TOUCH_DEVICE) return;
+    e.preventDefault();
+    submit();
+  });
+}
+
+// The model list is identical for every picker, so fetch it once and share the
+// promise. Reset when the global default changes so new pickers pre-select it.
+let modelListPromise = null;
+function loadModelList() {
+  if (!modelListPromise) {
+    modelListPromise = fetch('/api/settings/model')
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null)
+      .then((d) => {
+        // Never cache a failure: one flaky request shouldn't leave every model
+        // picker on the page stuck at "(unavailable)" for the whole session.
+        if (!d || !Array.isArray(d.models) || !d.models.length) modelListPromise = null;
+        return d;
+      });
+  }
+  return modelListPromise;
+}
+function resetModelListCache() { modelListPromise = null; }
+
+// Populate a <select> with the available models, pre-selecting the currently
+// effective (global) one. Changing it only affects turns sent from this chat —
+// it never writes back to the global setting. If the list can't be loaded the
+// picker shows "(unavailable)" and stays disabled; value() then returns '' and
+// the backend falls back to the global model, so sending is never blocked.
+function createModelPicker(selectEl) {
+  if (!selectEl) return { value: () => '' };
+  selectEl.innerHTML = '<option value="">loading…</option>';
+  selectEl.disabled = true;
+  let chosen = '';
+  loadModelList().then((d) => {
+    const models = (d && Array.isArray(d.models) && d.models) || [];
+    if (!models.length) {
+      selectEl.innerHTML = '<option value="">(unavailable)</option>';
+      selectEl.disabled = true;
+      return;
+    }
+    selectEl.innerHTML = models.map((m) => `<option value="${escape(m)}">${escape(m)}</option>`).join('');
+    chosen = models.includes(d.model) ? d.model : models[0];
+    selectEl.value = chosen;
+    selectEl.disabled = false;
+  });
+  selectEl.addEventListener('change', () => { chosen = selectEl.value; });
+  return { value: () => chosen };
+}
+
+// A per-chat FIFO of turns waiting to be sent. The backend allows only one
+// Copilot process per chat (the job key is per PR / PreIssue / admin turn and
+// the conversation is chained with --resume), so this queues strictly serially:
+// "type ahead and auto-send in order", not parallel conversations.
+//
+// `runTurn(item)` must resolve only once that turn is completely finished.
+// Pending items are mirrored to localStorage so a refresh mid-stream doesn't
+// throw away what the user already typed.
+function createTurnQueue({ storageKey, runTurn, onChange, isAlive }) {
+  let items = [];
+  let running = false;
+  let started = false;
+  let stopped = false;
+  let everMounted = false;
+  let seq = 0;
+  const nextId = () => `q${Date.now()}${(seq += 1)}`;
+
+  // A panel can be thrown away mid-queue (navigating away, or the PR page
+  // reloading itself after an apply turn). Its closure — and this queue — would
+  // otherwise keep draining invisibly and POST alongside the replacement
+  // panel's queue, which the server answers by re-attaching to the running job
+  // and silently dropping the message. So a detached panel's queue neither
+  // sends nor writes to storage; whatever it still holds stays in localStorage
+  // for its successor to pick up. Before the panel is first mounted there's
+  // nothing to check yet, hence `everMounted`.
+  function alive() {
+    if (!isAlive) return true;
+    if (isAlive()) { everMounted = true; return true; }
+    return !everMounted;
+  }
+
+  function persist() {
+    if (!storageKey || !alive()) return;
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(items));
+    } catch {
+      // Almost always the quota, blown by base64 image payloads. Keep the text
+      // so the queue still survives a refresh, even if attachments can't.
+      try {
+        localStorage.setItem(storageKey, JSON.stringify(items.map((it) => ({ ...it, images: [] }))));
+      } catch { /* in-memory only */ }
+    }
+  }
+
+  function notify() {
+    persist();
+    if (onChange) onChange(items.slice(), running);
+  }
+
+  async function drain() {
+    if (running || !started || stopped || !alive()) return;
+    running = true;
+    notify();
+    try {
+      while (items.length && !stopped && alive()) {
+        const item = items.shift();
+        notify();
+        try {
+          await runTurn(item);
+        } catch (e) {
+          console.error('chat turn failed', e);
+        }
+      }
+    } finally {
+      running = false;
+      notify();
+    }
+  }
+
+  if (storageKey) {
+    try {
+      const saved = JSON.parse(localStorage.getItem(storageKey) || '[]');
+      if (Array.isArray(saved)) items = saved.filter((it) => it && typeof it === 'object');
+    } catch { /* corrupt entry — start empty */ }
+  }
+
+  return {
+    // Queue a turn. Everything the turn needs (text, images, mode, model) is
+    // captured here, at enqueue time — later dropdown changes don't retroactively
+    // rewrite what's already queued.
+    enqueue(item, opts) {
+      const entry = { id: nextId(), ...item };
+      if (opts && opts.front) items.unshift(entry);
+      else items.push(entry);
+      notify();
+      drain();
+      return entry.id;
+    },
+    cancel(id) {
+      const i = items.findIndex((x) => x.id === id);
+      if (i < 0) return false;
+      items.splice(i, 1);
+      notify();
+      return true;
+    },
+    // Jump a queued message to the front — paired with aborting the running
+    // turn, this is the "send this one now" action.
+    promote(id) {
+      const i = items.findIndex((x) => x.id === id);
+      if (i <= 0) return false;
+      const [it] = items.splice(i, 1);
+      items.unshift(it);
+      notify();
+      return true;
+    },
+    clear() { items = []; notify(); },
+    pending: () => items.slice(),
+    isRunning: () => running,
+    // Deferred so a panel can enqueue its reconnect turn first (it must run
+    // before any restored messages, which would otherwise attach to the wrong
+    // job) and only then let the queue go.
+    start() {
+      started = true;
+      notify();
+      drain();
+    },
+    // Hand the queue over to a replacement panel: stop dispatching, but keep
+    // mirroring to storage so anything typed in the meantime is picked up
+    // there instead of being dropped.
+    stop() { stopped = true; },
+  };
+}
+
+// Small "which model answered this" badge shown on assistant bubbles.
+function modelBadge(model) {
+  if (!model) return null;
+  const el = document.createElement('span');
+  el.className = 'model-badge';
+  el.textContent = model;
+  return el;
+}
+
 // ---- PR detail page: hash route #/pr/<repo>/<issue>/<pr> -------------------
 const mainView = document.getElementById('mainView');
 const prDetailView = document.getElementById('prDetailView');
@@ -2439,10 +2899,12 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
     <div class="chat-messages"></div>
     <div class="chat-inputrow">
       <div class="attach-previews chat-attach-previews"></div>
-      <textarea class="chat-input attach-dropzone" rows="3" placeholder="Describe a change… e.g. &quot;add a dark mode toggle&quot;"></textarea>
+      <textarea class="chat-input attach-dropzone" rows="3" placeholder="Describe a change… e.g. &quot;add a dark mode toggle&quot;  (Enter to send, Shift+Enter for a new line)"></textarea>
       <input type="file" class="chat-attach-input" accept="image/*" multiple hidden>
       <div class="chat-actions">
+        <select class="chat-model" title="Model used for this chat" aria-label="Model used for this chat"></select>
         <button class="attach-btn chat-attach-btn" type="button" title="Attach image" aria-label="Attach image">📎</button>
+        <span class="spacer"></span>
         <button class="chat-send">Send (plan)</button>
         <button class="iconbtn abortbtn chat-abort" hidden>⨯ Abort</button>
       </div>
@@ -2458,6 +2920,7 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
   const attachBtn = wrap.querySelector('.chat-attach-btn');
   const attachInput = wrap.querySelector('.chat-attach-input');
   const attachPreviewsEl = wrap.querySelector('.chat-attach-previews');
+  const modelPicker = createModelPicker(wrap.querySelector('.chat-model'));
   const attachments = createAttachmentPicker({
     dropTarget: inputEl,
     fileInput: attachInput,
@@ -2469,20 +2932,48 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
   let awaitingApply = false;
   // Gives each chat turn its own notification key so two quick turns both alert.
   let chatTurnSeq = 0;
+  // An "apply" turn landed new commits, so the pipeline above is stale — but
+  // reloading the page mid-queue would rip the panel (and the queue driving it)
+  // out from under the remaining messages, so defer until the queue drains.
+  let needsReload = false;
+
+  // Queued messages live at the tail of the message list, in their own
+  // container so streaming turns can keep appending above them.
+  const pendingEl = document.createElement('div');
+  pendingEl.className = 'chat-pending-list';
+
+  const queue = createTurnQueue({
+    storageKey: `cc.chatQueue.${repoName}#${issueNumber}:${prNumber}`,
+    isAlive: () => wrap.isConnected,
+    runTurn: (item) => sendTurn(item),
+    onChange: (pending, running) => {
+      renderPending(pending);
+      setSending(running);
+      if (!running && !pending.length && needsReload) {
+        needsReload = false;
+        // The reload replaces this whole panel, so hand the queue over first.
+        queue.stop();
+        renderPrDetail(repoName, issueNumber, prNumber);
+      }
+    },
+  });
 
   function renderMessages() {
-    if (!messages.length) {
-      messagesEl.innerHTML = '<div class="chat-empty">No messages yet — describe a change below to get a plan.</div>';
-      return;
-    }
     messagesEl.innerHTML = '';
+    if (!messages.length) {
+      const empty = document.createElement('div');
+      empty.className = 'chat-empty';
+      empty.textContent = 'No messages yet — describe a change below to get a plan.';
+      messagesEl.appendChild(empty);
+    }
     for (const m of messages) {
       const bubble = document.createElement('div');
       bubble.className = `chat-bubble chat-${m.role === 'user' ? 'user' : 'assistant'}`;
       const roleLabel = m.role === 'user' ? 'You' : 'Copilot';
       const metaEl = document.createElement('div');
       metaEl.className = 'chat-meta';
-      metaEl.textContent = `${roleLabel} · ${m.mode || ''}`;
+      metaEl.appendChild(document.createTextNode(`${roleLabel} · ${m.mode || ''}`));
+      if (m.role !== 'user' && m.model) metaEl.appendChild(modelBadge(m.model));
       const textEl = document.createElement('div');
       textEl.className = 'chat-text';
       // User turns are prompts, not markdown, so they stay verbatim. Assistant
@@ -2496,69 +2987,127 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
       if (m.images && m.images.length) bubble.insertAdjacentHTML('beforeend', renderMsgImages(m.images));
       messagesEl.appendChild(bubble);
     }
+    messagesEl.appendChild(pendingEl);
     chatSticky.pin();
   }
   renderMessages();
+
+  // Grey "waiting to be sent" bubbles for everything typed while a turn is
+  // still streaming, each cancellable (✕) or promotable to the front (⚡,
+  // which also aborts the running turn so it goes out immediately).
+  function renderPending(pending) {
+    pendingEl.innerHTML = '';
+    for (const item of pending) {
+      if (item.reconnect) continue; // internal re-attach turn, nothing to show
+      const bubble = document.createElement('div');
+      bubble.className = 'chat-bubble chat-user chat-pending';
+      const metaEl = document.createElement('div');
+      metaEl.className = 'chat-meta';
+      metaEl.appendChild(document.createTextNode(`Queued · ${item.mode || 'plan'}`));
+      if (item.model) metaEl.appendChild(modelBadge(item.model));
+      const actions = document.createElement('div');
+      actions.className = 'chat-pending-actions';
+      const nowBtn = document.createElement('button');
+      nowBtn.type = 'button';
+      nowBtn.title = 'Send now (aborts the running turn)';
+      nowBtn.textContent = '⚡';
+      nowBtn.addEventListener('click', () => sendNow(item.id));
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.title = 'Remove from the queue';
+      delBtn.textContent = '✕';
+      delBtn.addEventListener('click', () => queue.cancel(item.id));
+      actions.append(nowBtn, delBtn);
+      metaEl.appendChild(actions);
+      const textEl = document.createElement('div');
+      textEl.className = 'chat-text';
+      textEl.textContent = item.text || '';
+      bubble.append(metaEl, textEl);
+      if (item.images && item.images.length) bubble.insertAdjacentHTML('beforeend', renderMsgImages(item.images));
+      pendingEl.appendChild(bubble);
+    }
+    chatSticky.pin();
+  }
 
   // Append a live assistant bubble and return a CCChat stream sink for it. The
   // sink re-parses the accumulated buffer as markdown on a throttled cadence
   // and patches only the blocks that changed, so the reply is readable *while*
   // it streams instead of flipping from raw monospace to HTML at the end — and
   // a long turn no longer costs one DOM node (and one reflow) per SSE chunk.
-  function appendLiveAssistant(mode) {
+  function appendLiveAssistant(mode, model) {
     const empty = messagesEl.querySelector('.chat-empty');
     if (empty) empty.remove();
     const bubble = document.createElement('div');
     bubble.className = 'chat-bubble chat-assistant';
     const metaEl = document.createElement('div');
     metaEl.className = 'chat-meta';
-    metaEl.textContent = `Copilot · ${mode}`;
+    metaEl.appendChild(document.createTextNode(`Copilot · ${mode}`));
+    if (model) metaEl.appendChild(modelBadge(model));
     const textEl = document.createElement('div');
     textEl.className = 'chat-text';
     bubble.append(metaEl, textEl);
-    messagesEl.appendChild(bubble);
+    messagesEl.insertBefore(bubble, pendingEl);
     chatSticky.pin();
     return CCChat.createStream(textEl, { scrollEl: messagesEl });
   }
 
+  // Non-blocking composer: the textarea stays editable while a turn streams so
+  // follow-ups can be typed (and queued) instead of held in the user's head.
   function setSending(sending) {
-    sendBtn.disabled = sending;
-    inputEl.disabled = sending;
     abortBtn.hidden = !sending;
+    updateSendLabel();
   }
 
-  async function sendTurn(mode, text, images) {
-    setSending(true);
+  function updateSendLabel() {
+    if (queue.isRunning()) { sendBtn.textContent = 'Queue'; return; }
+    sendBtn.textContent = awaitingApply && !inputEl.value.trim() ? 'Execute this plan' : 'Send (plan)';
+  }
+
+  async function sendNow(id) {
+    queue.promote(id);
+    if (!queue.isRunning()) return;
+    try {
+      await fetch(`/api/repos/${enc(repoName)}/issues/${issueNumber}/prs/${prNumber}/chat/cancel`, { method: 'POST' });
+    } catch { /* ignore — the queue drains once the turn ends either way */ }
+  }
+
+  async function sendTurn(item) {
+    const mode = item.mode === 'apply' ? 'apply' : 'plan';
+    const text = item.text || null;
+    const images = item.images || [];
+    const model = item.model || '';
     if (text) {
       const userMsg = {
         role: 'user',
         text: mode === 'apply' ? `[execute plan] ${text}` : text,
         mode,
-        images: images || [],
+        images,
+        model,
         at: new Date().toISOString(),
       };
       messages.push(userMsg);
       renderMessages();
     }
     // Live streaming bubble — markdown is rendered incrementally as chunks land.
-    const stream = appendLiveAssistant(mode);
+    const stream = appendLiveAssistant(mode, model);
     let raw = '';
     let finalStatus = null;
+    let usedModel = model;
     try {
       const resp = await fetch(`/api/repos/${enc(repoName)}/issues/${issueNumber}/prs/${prNumber}/chat`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(text ? { message: text, mode, images: images || [] } : { mode }),
+        body: JSON.stringify(item.reconnect ? { mode, model } : { message: text, mode, images, model }),
       });
       if (!resp.ok || !resp.body) {
         raw = `[error] ${await friendlyHttpError(resp)}`;
         stream.finish({ body: raw });
-        messages.push({ role: 'assistant', text: raw, mode, at: new Date().toISOString() });
-        setSending(false); return;
+        messages.push({ role: 'assistant', text: raw, mode, model, at: new Date().toISOString() });
+        return;
       }
       await pumpSSE(resp, {
         onChunk: (t) => { raw += t; stream.push(t); },
         onError: (m) => { const s = `\n[error] ${m}`; raw += s; stream.push(s); },
-        onResult: (d) => { finalStatus = d.status; },
+        onResult: (d) => { finalStatus = d.status; if (d.model) usedModel = d.model; },
         notify: {
           action: 'chat',
           repo: repoName,
@@ -2574,36 +3123,49 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
     }
     const { body: finalBody, footer } = renderAssistant(raw);
     stream.finish({ body: finalBody, trailingHtml: footer, emptyHtml: '<p class="cc-noout">(no output)</p>' });
-    messages.push({ role: 'assistant', text: raw, mode, at: new Date().toISOString() });
-    setSending(false);
+    messages.push({ role: 'assistant', text: raw, mode, model: usedModel, at: new Date().toISOString() });
 
     if (mode === 'plan' && finalStatus === 'success') {
       awaitingApply = true;
-      sendBtn.textContent = 'Execute this plan';
     } else if (mode === 'apply' && finalStatus === 'success') {
-      // New commits landed — Deploy/Merge reset; reload the whole detail page
-      // so the pipeline above reflects that instead of showing stale state.
-      renderPrDetail(repoName, issueNumber, prNumber);
-      return;
+      // New commits landed — Deploy/Merge reset; the whole detail page reloads
+      // (once the queue is empty) so the pipeline above isn't left stale.
+      awaitingApply = false;
+      needsReload = true;
     } else {
       awaitingApply = false;
-      sendBtn.textContent = 'Send (plan)';
     }
+    updateSendLabel();
   }
 
-  sendBtn.addEventListener('click', () => {
-    if (awaitingApply) {
-      const lastUser = [...messages].reverse().find((m) => m.role === 'user' && m.mode === 'plan');
-      sendTurn('apply', (lastUser && lastUser.text) || 'the plan above');
+  // Send (or, while a turn is streaming, queue) whatever is in the composer.
+  // Everything the turn needs — text, images, mode and the model selected right
+  // now — is captured here so a later dropdown change can't rewrite it.
+  function submit(opts) {
+    const text = inputEl.value.trim();
+    const images = attachments.getImages();
+    if (!text) {
+      // Images alone can't be sent: every turn needs a message for the CLI
+      // prompt. Keep the attachments staged so nothing the user picked is lost.
+      if (images.length) return;
+      // Empty composer with a finished plan waiting = "execute that plan" — but
+      // only from the button. Enter on an empty composer must do nothing, or a
+      // stray keypress would kick off a code-changing apply turn.
+      if (awaitingApply && !queue.isRunning() && !(opts && opts.fromKey)) {
+        const lastUser = [...messages].reverse().find((m) => m.role === 'user' && m.mode === 'plan');
+        queue.enqueue({ mode: 'apply', text: (lastUser && lastUser.text) || 'the plan above', images: [], model: modelPicker.value() });
+      }
       return;
     }
-    const text = inputEl.value.trim();
-    if (!text) return;
-    const images = attachments.getImages();
     inputEl.value = '';
     attachments.clear();
-    sendTurn('plan', text, images);
-  });
+    queue.enqueue({ mode: 'plan', text, images, model: modelPicker.value() });
+    updateSendLabel();
+  }
+
+  sendBtn.addEventListener('click', () => submit());
+  inputEl.addEventListener('input', updateSendLabel);
+  attachEnterToSend(inputEl, () => submit({ fromKey: true }));
 
   abortBtn.addEventListener('click', async () => {
     try {
@@ -2613,11 +3175,18 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
 
   // Re-attach to a chat job still running server-side (e.g. after navigating
   // away mid-turn and coming back) — mirrors the Create-PR/Deploy reconnect
-  // pattern instead of leaving the turn stuck with no way to resume.
+  // pattern instead of leaving the turn stuck with no way to resume. It goes to
+  // the FRONT of the queue: any messages restored from a previous visit must
+  // wait for the live turn, otherwise their POST would just re-attach to the
+  // running job and their text would be dropped.
   if (chatLive) {
     const lastUser = [...messages].reverse().find((m) => m.role === 'user');
-    sendTurn((lastUser && lastUser.mode) || 'plan', null);
+    queue.enqueue(
+      { mode: (lastUser && lastUser.mode) || 'plan', text: null, reconnect: true, model: (lastUser && lastUser.model) || '' },
+      { front: true },
+    );
   }
+  queue.start();
 
   return wrap;
 }
@@ -2823,8 +3392,10 @@ async function renderPreIssueDetail(repoName, id) {
     <h3>Iterate this into an issue</h3>
     <div class="chat-messages"></div>
     <div class="chat-inputrow">
-      <textarea class="chat-input" rows="3" placeholder="Add more context…"></textarea>
+      <textarea class="chat-input" rows="3" placeholder="Add more context…  (Enter to send, Shift+Enter for a new line)"></textarea>
       <div class="chat-actions">
+        <select class="chat-model" title="Model used for this chat" aria-label="Model used for this chat"></select>
+        <span class="spacer"></span>
         <button class="chat-send">Send</button>
         <button class="iconbtn abortbtn chat-abort" hidden>⨯ Abort</button>
       </div>
@@ -2839,22 +3410,39 @@ async function renderPreIssueDetail(repoName, id) {
   const inputEl = chatWrap.querySelector('.chat-input');
   const sendBtn = chatWrap.querySelector('.chat-send');
   const abortBtn = chatWrap.querySelector('.chat-abort');
+  const modelPicker = createModelPicker(chatWrap.querySelector('.chat-model'));
   const messages = ((pre.chat && pre.chat.messages) || []).slice();
   // Gives each chat turn its own notification key so two quick turns both alert.
   let preTurnSeq = 0;
 
+  const pendingEl = document.createElement('div');
+  pendingEl.className = 'chat-pending-list';
+
+  const queue = createTurnQueue({
+    storageKey: `cc.preissueQueue.${repoName}:${id}`,
+    isAlive: () => chatWrap.isConnected,
+    runTurn: (item) => sendTurn(item),
+    onChange: (pending, running) => {
+      renderPending(pending);
+      setSending(running);
+    },
+  });
+
   function renderMessages() {
-    if (!messages.length) {
-      messagesEl.innerHTML = '<div class="chat-empty">No messages yet — say more about the idea below.</div>';
-      return;
-    }
     messagesEl.innerHTML = '';
+    if (!messages.length) {
+      const empty = document.createElement('div');
+      empty.className = 'chat-empty';
+      empty.textContent = 'No messages yet — say more about the idea below.';
+      messagesEl.appendChild(empty);
+    }
     for (const m of messages) {
       const bubble = document.createElement('div');
       bubble.className = `chat-bubble chat-${m.role === 'user' ? 'user' : 'assistant'}`;
       const metaEl = document.createElement('div');
       metaEl.className = 'chat-meta';
-      metaEl.textContent = m.role === 'user' ? 'You' : 'Copilot';
+      metaEl.appendChild(document.createTextNode(m.role === 'user' ? 'You' : 'Copilot'));
+      if (m.role !== 'user' && m.model) metaEl.appendChild(modelBadge(m.model));
       const textEl = document.createElement('div');
       textEl.className = 'chat-text';
       if (m.role === 'user') textEl.textContent = m.text;
@@ -2865,56 +3453,105 @@ async function renderPreIssueDetail(repoName, id) {
       bubble.append(metaEl, textEl);
       messagesEl.appendChild(bubble);
     }
+    messagesEl.appendChild(pendingEl);
     chatSticky.pin();
   }
   renderMessages();
 
-  function appendLiveAssistant() {
+  function renderPending(pending) {
+    pendingEl.innerHTML = '';
+    for (const item of pending) {
+      if (item.reconnect) continue;
+      const bubble = document.createElement('div');
+      bubble.className = 'chat-bubble chat-user chat-pending';
+      const metaEl = document.createElement('div');
+      metaEl.className = 'chat-meta';
+      metaEl.appendChild(document.createTextNode('Queued'));
+      if (item.model) metaEl.appendChild(modelBadge(item.model));
+      const actions = document.createElement('div');
+      actions.className = 'chat-pending-actions';
+      const nowBtn = document.createElement('button');
+      nowBtn.type = 'button';
+      nowBtn.title = 'Send now (aborts the running turn)';
+      nowBtn.textContent = '⚡';
+      nowBtn.addEventListener('click', () => sendNow(item.id));
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.title = 'Remove from the queue';
+      delBtn.textContent = '✕';
+      delBtn.addEventListener('click', () => queue.cancel(item.id));
+      actions.append(nowBtn, delBtn);
+      metaEl.appendChild(actions);
+      const textEl = document.createElement('div');
+      textEl.className = 'chat-text';
+      textEl.textContent = item.text || '';
+      bubble.append(metaEl, textEl);
+      pendingEl.appendChild(bubble);
+    }
+    chatSticky.pin();
+  }
+
+  function appendLiveAssistant(model) {
     const empty = messagesEl.querySelector('.chat-empty');
     if (empty) empty.remove();
     const bubble = document.createElement('div');
     bubble.className = 'chat-bubble chat-assistant';
     const metaEl = document.createElement('div');
     metaEl.className = 'chat-meta';
-    metaEl.textContent = 'Copilot';
+    metaEl.appendChild(document.createTextNode('Copilot'));
+    if (model) metaEl.appendChild(modelBadge(model));
     const textEl = document.createElement('div');
     textEl.className = 'chat-text';
     bubble.append(metaEl, textEl);
-    messagesEl.appendChild(bubble);
+    messagesEl.insertBefore(bubble, pendingEl);
     chatSticky.pin();
     return CCChat.createStream(textEl, { scrollEl: messagesEl });
   }
 
+  // Non-blocking: the composer stays editable while a turn streams, and what
+  // gets typed is queued instead of blocked.
   function setSending(sending) {
-    sendBtn.disabled = sending;
-    inputEl.disabled = sending;
     abortBtn.hidden = !sending;
+    sendBtn.textContent = sending ? 'Queue' : 'Send';
   }
 
-  async function sendTurn(text) {
-    setSending(true);
+  async function cancelRunning() {
+    try {
+      await fetch(`/api/repos/${enc(repoName)}/preissues/${enc(id)}/chat/cancel`, { method: 'POST' });
+    } catch { /* ignore */ }
+  }
+
+  async function sendNow(itemId) {
+    queue.promote(itemId);
+    if (queue.isRunning()) await cancelRunning();
+  }
+
+  async function sendTurn(item) {
+    const text = item.text || null;
+    const model = item.model || '';
     if (text) {
-      messages.push({ role: 'user', text, at: new Date().toISOString() });
+      messages.push({ role: 'user', text, model, at: new Date().toISOString() });
       renderMessages();
     }
-    const stream = appendLiveAssistant();
+    const stream = appendLiveAssistant(model);
     let raw = '';
     let finalDraft = null;
+    let usedModel = model;
     try {
       const resp = await fetch(`/api/repos/${enc(repoName)}/preissues/${enc(id)}/chat`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(text ? { message: text } : {}),
+        body: JSON.stringify(item.reconnect ? { model } : { message: text, model }),
       });
       if (!resp.ok || !resp.body) {
         raw = `[error] HTTP ${resp.status}`;
         stream.finish({ body: raw });
-        messages.push({ role: 'assistant', text: raw, at: new Date().toISOString() });
-        setSending(false); return;
+        messages.push({ role: 'assistant', text: raw, model, at: new Date().toISOString() });
+        return;
       }
       await pumpSSE(resp, {
         onChunk: (t) => { raw += t; stream.push(t); },
         onError: (m) => { const s = `\n[error] ${m}`; raw += s; stream.push(s); },
-        onResult: (d) => { finalDraft = d.draft || null; },
+        onResult: (d) => { finalDraft = d.draft || null; if (d.model) usedModel = d.model; },
         notify: {
           action: 'preissue-chat',
           repo: repoName,
@@ -2928,33 +3565,33 @@ async function renderPreIssueDetail(repoName, id) {
     }
     const { body: finalBody, footer } = renderAssistant(raw);
     stream.finish({ body: finalBody, trailingHtml: footer, emptyHtml: '<p class="cc-noout">(no output)</p>' });
-    messages.push({ role: 'assistant', text: raw, at: new Date().toISOString() });
-    setSending(false);
+    messages.push({ role: 'assistant', text: raw, model: usedModel, at: new Date().toISOString() });
     if (finalDraft) {
       pre.draft = finalDraft;
       renderDraft();
     }
   }
 
-  sendBtn.addEventListener('click', () => {
+  function submit() {
     const text = inputEl.value.trim();
     if (!text) return;
     inputEl.value = '';
-    sendTurn(text);
-  });
+    queue.enqueue({ text, model: modelPicker.value() });
+  }
 
-  abortBtn.addEventListener('click', async () => {
-    try {
-      await fetch(`/api/repos/${enc(repoName)}/preissues/${enc(id)}/chat/cancel`, { method: 'POST' });
-    } catch { /* ignore */ }
-  });
+  sendBtn.addEventListener('click', () => submit());
+  attachEnterToSend(inputEl, () => submit());
+
+  abortBtn.addEventListener('click', cancelRunning);
 
   // Re-attach to a chat job still running server-side (e.g. after navigating
   // away mid-turn and coming back) — mirrors the Create-PR/Deploy reconnect
-  // pattern instead of leaving the turn stuck with no way to resume.
+  // pattern instead of leaving the turn stuck with no way to resume. Queued
+  // messages restored from a previous visit must wait behind it.
   if (pre.live) {
-    sendTurn(null);
+    queue.enqueue({ text: null, reconnect: true }, { front: true });
   }
+  queue.start();
 }
 
 // ---- Admin terminal: free-form Copilot CLI chat rooted at REPOS_ROOT -------
@@ -3040,11 +3677,27 @@ function initAdminTerminal() {
   const attachBtn = document.getElementById('termAttachBtn');
   const attachInput = document.getElementById('termAttachInput');
   const attachPreviewsEl = document.getElementById('termAttachPreviews');
+  const modelSelEl = document.getElementById('termModel');
+  const modelPicker = createModelPicker(modelSelEl);
   const attachments = createAttachmentPicker({
     dropTarget: inputEl,
     fileInput: attachInput,
     attachBtn,
     previewsEl: attachPreviewsEl,
+  });
+
+  // Queued messages live at the tail of the log so a streaming turn keeps
+  // appending above them.
+  const pendingEl = document.createElement('div');
+  pendingEl.className = 'tmsg-pending-list';
+
+  const queue = createTurnQueue({
+    storageKey: 'cc.adminQueue',
+    runTurn: (item) => (item.reconnect ? resumeSavedTurn() : runTurn(item)),
+    onChange: (pending, running) => {
+      renderPending(pending);
+      setSending(running);
+    },
   });
 
   let sessionId = null;
@@ -3151,6 +3804,8 @@ function initAdminTerminal() {
         item.querySelector('.ahi-title').textContent = c.title || '(untitled)';
         item.addEventListener('click', (e) => {
           if (e.target.closest('.ahi-del')) return;
+          // Anything still queued was meant for the conversation being left.
+          queue.clear();
           loadConversation(c.id);
         });
         item.querySelector('.ahi-del').addEventListener('click', async (e) => {
@@ -3190,7 +3845,7 @@ function initAdminTerminal() {
       setSelectedRepo(chat.repo || '');
       logEl.innerHTML = '';
       (chat.messages || []).forEach((m) => {
-        const bodyEl = addMessage(m.role === 'user' ? 'user' : 'assistant');
+        const bodyEl = addMessage(m.role === 'user' ? 'user' : 'assistant', m.model);
         if (m.role === 'user') bodyEl.textContent = m.text || '';
         else {
           const { body, footer } = renderAssistant(m.text || '');
@@ -3215,6 +3870,7 @@ function initAdminTerminal() {
   }
 
   function startNewConversation() {
+    queue.clear();
     cancelActiveTurn();
     sessionId = null;
     currentChatId = null;
@@ -3231,27 +3887,73 @@ function initAdminTerminal() {
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeHistory(); });
 
-  function addMessage(role) {
+  function addMessage(role, model) {
     clearEmpty();
     const wrap = document.createElement('div');
     wrap.className = `tmsg ${role}`;
     const roleEl = document.createElement('div');
     roleEl.className = 'tmsg-role';
-    roleEl.textContent = role === 'user' ? 'You' : 'Copilot';
+    roleEl.appendChild(document.createTextNode(role === 'user' ? 'You' : 'Copilot'));
+    // Which model answered this turn — chats can mix models now.
+    if (role !== 'user' && model) roleEl.appendChild(modelBadge(model));
     const body = document.createElement('div');
     body.className = 'tmsg-body';
     wrap.append(roleEl, body);
-    logEl.appendChild(wrap);
+    if (!pendingEl.isConnected) logEl.appendChild(pendingEl);
+    logEl.insertBefore(wrap, pendingEl);
     termSticky.pin();
     return body;
   }
 
+  // Grey "waiting to be sent" bubbles, each cancellable (✕) or promotable to
+  // the front of the queue (⚡, which also aborts the running turn).
+  function renderPending(pending) {
+    pendingEl.innerHTML = '';
+    if (!pendingEl.isConnected) logEl.appendChild(pendingEl);
+    for (const item of pending) {
+      if (item.reconnect) continue;
+      const wrapEl = document.createElement('div');
+      wrapEl.className = 'tmsg user tmsg-pending';
+      const roleEl = document.createElement('div');
+      roleEl.className = 'tmsg-role';
+      roleEl.appendChild(document.createTextNode('Queued'));
+      if (item.model) roleEl.appendChild(modelBadge(item.model));
+      const actions = document.createElement('div');
+      actions.className = 'chat-pending-actions';
+      const nowBtn = document.createElement('button');
+      nowBtn.type = 'button';
+      nowBtn.title = 'Send now (aborts the running turn)';
+      nowBtn.textContent = '⚡';
+      nowBtn.addEventListener('click', () => sendNow(item.id));
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.title = 'Remove from the queue';
+      delBtn.textContent = '✕';
+      delBtn.addEventListener('click', () => queue.cancel(item.id));
+      actions.append(nowBtn, delBtn);
+      roleEl.appendChild(actions);
+      const body = document.createElement('div');
+      body.className = 'tmsg-body';
+      body.textContent = item.text || '';
+      wrapEl.append(roleEl, body);
+      if (item.images && item.images.length) body.insertAdjacentHTML('beforeend', renderMsgImages(item.images));
+      pendingEl.appendChild(wrapEl);
+    }
+    termSticky.pin();
+  }
+
+  async function sendNow(id) {
+    queue.promote(id);
+    if (!activeTurn) return;
+    try { await fetch(`/api/admin/chat/${encodeURIComponent(activeTurn.turnId)}/cancel`, { method: 'POST' }); } catch { /* ignore */ }
+  }
+
+  // Non-blocking composer: the textarea (and the mode/repo/model pickers) stay
+  // usable while a turn streams — what's typed meanwhile is queued, and each
+  // queued turn captured the settings that were selected when it was queued.
   function setSending(sending) {
-    sendBtn.disabled = sending;
-    inputEl.disabled = sending;
-    modeSel.disabled = sending;
-    repoSel.disabled = sending;
     abortBtn.hidden = !sending;
+    sendBtn.textContent = sending ? 'Queue' : 'Send';
     statusEl.textContent = sending ? 'Copilot is thinking…' : '';
   }
 
@@ -3363,21 +4065,34 @@ function initAdminTerminal() {
     }
   }
 
-  async function send() {
+  // Send (or, while a turn streams, queue) the composer's contents. Mode, repo
+  // and model are captured here at enqueue time, not read when the turn finally
+  // runs, so changing a dropdown never rewrites what's already queued.
+  function submit() {
     const text = inputEl.value.trim();
-    if (!text || activeTurn) return;
     const images = attachments.getImages();
+    if (!text) return;
     inputEl.value = '';
     attachments.clear();
+    queue.enqueue({ text, images, mode: modeSel.value, repo: repoSel.value, model: modelPicker.value() });
+  }
+
+  async function runTurn(item) {
+    const text = item.text;
+    const images = item.images || [];
+    const mode = item.mode || modeSel.value;
+    const repo = typeof item.repo === 'string' ? item.repo : repoSel.value;
+    const model = item.model || '';
+    if (!text) return;
 
     const userBody = addMessage('user');
     userBody.textContent = text;
     if (images.length) userBody.insertAdjacentHTML('beforeend', renderMsgImages(images));
-    const asstBody = addMessage('assistant');
+    const asstBody = addMessage('assistant', model);
 
     const turnId = makeTurnId();
     activeTurn = { turnId, asstBody, stream: CCChat.createStream(asstBody, { scrollEl: logEl }) };
-    localStorage.setItem(LS_ADMIN_TURN, JSON.stringify({ turnId, sessionId, text }));
+    localStorage.setItem(LS_ADMIN_TURN, JSON.stringify({ turnId, sessionId, text, model }));
     setSending(true);
 
     let resp;
@@ -3385,7 +4100,7 @@ function initAdminTerminal() {
       resp = await fetch('/api/admin/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, mode: modeSel.value, sessionId, turnId, repo: repoSel.value, images }),
+        body: JSON.stringify({ message: text, mode, sessionId, turnId, repo, images, model }),
       });
     } catch {
       // Couldn't reach the server to start — the job may still have launched,
@@ -3400,16 +4115,23 @@ function initAdminTerminal() {
     }
   }
 
+  function hasSavedTurn() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(LS_ADMIN_TURN) || 'null');
+      return !!(saved && saved.turnId);
+    } catch { return false; }
+  }
+
   // On (re)entering the Admin tab, resume any turn that was still streaming when
   // the page was last closed/reloaded.
-  async function maybeReconnect() {
+  async function resumeSavedTurn() {
     let saved;
     try { saved = JSON.parse(localStorage.getItem(LS_ADMIN_TURN) || 'null'); } catch { saved = null; }
     if (!saved || !saved.turnId) return;
     if (saved.sessionId) sessionId = saved.sessionId;
     clearEmpty();
     if (saved.text) { const ub = addMessage('user'); ub.textContent = saved.text; }
-    const asstBody = addMessage('assistant');
+    const asstBody = addMessage('assistant', saved.model);
     activeTurn = { turnId: saved.turnId, asstBody, stream: CCChat.createStream(asstBody, { scrollEl: logEl }) };
     setSending(true);
     let resp;
@@ -3419,10 +4141,8 @@ function initAdminTerminal() {
     if (!(await consumeStream(resp))) await reconnectLoop();
   }
 
-  sendBtn.addEventListener('click', send);
-  inputEl.addEventListener('keydown', (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); send(); }
-  });
+  sendBtn.addEventListener('click', () => submit());
+  attachEnterToSend(inputEl, () => submit());
   abortBtn.addEventListener('click', async () => {
     if (!activeTurn) return;
     appendActiveChunk('\n[abort requested…]');
@@ -3432,11 +4152,15 @@ function initAdminTerminal() {
   });
   newBtn.addEventListener('click', startNewConversation);
 
-  maybeReconnect();
+  // A turn still streaming when the page was closed must be re-attached BEFORE
+  // any messages restored from the queue, which would otherwise race it.
+  if (hasSavedTurn()) queue.enqueue({ reconnect: true }, { front: true });
+  queue.start();
 }
 
 loadRepos().then(route);
 loadModelSetting();
+loadSelfInfo();
 </script>
 </body>
 </html>

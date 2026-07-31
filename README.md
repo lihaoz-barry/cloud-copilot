@@ -77,9 +77,13 @@ the line:
 
 ```
 #42  Deploy dies on a dirty working tree: salvage local changes…   📌 ↗ ↻ 🗑
-  —  [   Create PR   ▸     Deploy     ▸     Merge     ]              ⋯
- #43 [  PR created   ▸     Deploy     ▸  🔒 Merge     ]           ↗  ⋯
+  —  [   Create PR   ▸     Deploy     ▸     Merge     ]                 ⋯
+#43↗ [  PR created   ▸     Deploy     ▸  🔒 Merge     ]                 ⋯
+     ⎇ claude/app-bug-fixes  62cf6ca  50m  Deploy: salvage a dirty…
 ```
+
+The PR number and its `↗` GitHub link are packed together on the **left**, so
+every workflow bar starts at the same x whichever icons a line has.
 
 - **The first line always has an empty PR number** (`—`) and its first segment is
   the live **Create PR** button. It stays there after a PR exists, because one
@@ -89,6 +93,12 @@ the line:
 - **Per-line logs are hidden behind `⋯`**, along with that line's abort button and
   run timing. The toggle only appears when there is something to show, and opens
   itself while a stage is running so Abort is always one tap away.
+- **Each PR line carries its branch and tip commit** — `⎇ branch`, the short SHA,
+  how long ago it landed, and the commit subject — so you can tell at a glance
+  what code a given Deploy actually shipped. The SHA links straight to that
+  commit on GitHub. The repo header does the same for the **local checkout**, so
+  you can see what this machine would deploy right now. (On phones the branch is
+  dropped in favour of the commit subject, which says more in less space.)
 - **Abort**: while running, Create PR / Deploy / Merge each show a red `⨯` button.
   Confirming signals the whole process group (copilot + fastlane/xcodebuild/gh), so
   subprocesses die too; the run ends in an `aborted` state you can re-run.
@@ -124,6 +134,12 @@ Issue and PR data is read through three tiers, so the dashboard is instant and
 | **L1** | browser `localStorage` | 15 min | 0 ms | page reloads |
 | **L2** | `data/gh-cache.json` + memory | 15 min | ~5 ms | server restarts |
 | **L3** | the `gh` CLI (real GitHub) | — | ~800 ms+ | — |
+
+Three things fill L2 per repo: `gh issue list`, `gh pr list`, and one GraphQL
+query for each PR's tip commit. (`gh pr list --json commits` can't be used for
+that last one — it returns every commit of every PR and blows past GitHub's
+GraphQL node limit at 100 PRs.) The commit query is decorative: if it fails, the
+rows simply render without their branch/commit annotations.
 
 - **Expanding a repo** renders from L1 immediately — if that copy is under 15
   minutes old, **no request leaves the browser at all**. A reload of a page with

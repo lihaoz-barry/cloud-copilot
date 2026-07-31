@@ -221,6 +221,9 @@ app.get('/api/repos', (req, res) => {
   const repos = gh.listRepos(REPOS_ROOT).map((r) => ({
     name: r.name,
     branch: r.branch,
+    // Tip commit of the local checkout, so the repo header can say which code
+    // this machine would actually deploy right now.
+    headCommit: r.headCommit,
     ownerRepo: r.ownerRepo,
     github: r.github,
   }));
@@ -480,15 +483,23 @@ async function syncRepoFromGitHub(repo, { force = false } = {}) {
   // call for the whole repo, matched in-process — so the pipeline is
   // populated on every expand without needing the manual "↻ PRs" click.
   const { prs: allPrs } = await gh.listAllPrs(repo.ownerRepo, { force });
+  // Best-effort branch + tip-commit annotations; an empty map just means the
+  // rows render without them.
+  const headCommits = await gh.listPrHeadCommits(repo.ownerRepo, { force });
   for (const issue of visible) {
     const matched = gh.matchPrsForIssue(allPrs, issue.number);
     for (const p of matched) {
+      const head = headCommits[String(p.number)] || null;
       store.upsertPr(repo.name, issue.number, {
         prNumber: p.number,
         prUrl: p.url,
         title: p.title,
         createdAt: p.createdAt,
         source: 'gh',
+        headRefName: p.headRefName || (head && head.headRefName) || null,
+        headCommit: head
+          ? { sha: head.sha, abbrev: head.abbrev, committedDate: head.committedDate, headline: head.headline, url: head.url }
+          : undefined,
       });
     }
     // Drop previously auto-discovered PRs that no longer match (e.g. the
@@ -580,13 +591,19 @@ app.get('/api/repos/:name/issues/:n/prs', async (req, res) => {
     // Manual refresh always bypasses the whole-repo PR cache — unlike the
     // automatic discovery on repo expand, this is an explicit "check again now".
     const prs = await gh.findPrsForIssue(repo.ownerRepo, n, { force: true });
+    const headCommits = await gh.listPrHeadCommits(repo.ownerRepo, { force: true });
     for (const p of prs) {
+      const head = headCommits[String(p.number)] || null;
       store.upsertPr(repo.name, n, {
         prNumber: p.number,
         prUrl: p.url,
         title: p.title,
         createdAt: p.createdAt,
         source: 'gh',
+        headRefName: p.headRefName || (head && head.headRefName) || null,
+        headCommit: head
+          ? { sha: head.sha, abbrev: head.abbrev, committedDate: head.committedDate, headline: head.headline, url: head.url }
+          : undefined,
       });
     }
     const record = store.getRecord(repo.name, n);

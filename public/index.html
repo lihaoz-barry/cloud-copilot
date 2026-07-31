@@ -121,8 +121,12 @@
        always the "no PR yet" line whose Create PR segment starts a new one. */
     .pritem { margin-top: 0; }
     .wfrow { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    /* PR number + its GitHub link are packed together on the LEFT at a fixed
+       width, so every chevron bar — Create PR line included — starts at the
+       same x no matter which icons that row has. */
+    .wflead { flex: none; display: flex; align-items: center; gap: 1px; }
     .wfnum {
-      flex: none; width: 54px; text-align: right; font-size: .76rem;
+      flex: none; width: 42px; text-align: right; font-size: .76rem;
       font-variant-numeric: tabular-nums; color: #888; text-decoration: none;
     }
     a.wfnum { font-weight: 700; color: inherit; }
@@ -137,11 +141,47 @@
     }
     .wfmore:hover { opacity: 1; background: #8883; }
     .wfmore[hidden] { display: none; }
-    a.wfgh {
+    .wfgh {
       flex: none; text-decoration: none; opacity: .45; padding: 2px 4px; border-radius: 6px;
       color: inherit; font-size: .8rem; line-height: 1;
     }
     a.wfgh:hover { opacity: 1; background: #8883; }
+
+    /* Branch + tip commit under each workflow line: which code this row is
+       about, linked to that exact commit on GitHub. Indented to line up with
+       the chevron bar above it. */
+    .wfcommit {
+      display: flex; align-items: baseline; gap: 6px; min-width: 0;
+      margin: 1px 0 2px 62px; font-size: .68rem; color: #888;
+    }
+    .wfcommit[hidden] { display: none; }
+    .wfbranch {
+      flex: none; max-width: 34%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-family: ui-monospace, Menlo, monospace; opacity: .75;
+    }
+    .wfbranch::before { content: '⎇ '; opacity: .6; }
+    .wfcommitlink {
+      display: flex; align-items: baseline; gap: 6px; min-width: 0; flex: 1;
+      color: inherit; text-decoration: none; border-radius: 5px; padding: 1px 3px;
+    }
+    .wfcommitlink:hover { background: #8882; color: inherit; }
+    .wfcommitlink:hover .wfsha { text-decoration: underline; }
+    .wfsha {
+      flex: none; font-family: ui-monospace, Menlo, monospace; font-weight: 600;
+      color: #2563eb; opacity: .9;
+    }
+    .wfwhen { flex: none; opacity: .7; font-variant-numeric: tabular-nums; }
+    .wfheadline { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .85; }
+    /* Same commit chip, reused in the repo header for the local checkout. */
+    .repo-branch { font-family: ui-monospace, Menlo, monospace; }
+    a.repo-commit {
+      display: inline-flex; align-items: baseline; gap: 5px; max-width: 46ch;
+      color: inherit; text-decoration: none; border-radius: 5px; padding: 0 3px; vertical-align: bottom;
+    }
+    a.repo-commit::before { content: '·'; opacity: .5; margin-right: 4px; }
+    a.repo-commit:hover { background: #8882; }
+    a.repo-commit:hover .wfsha { text-decoration: underline; }
+    a.repo-commit .wfheadline { display: inline-block; max-width: 28ch; }
     .pritem .chevtools { display: none; }
     .pritem.tools-open .chevtools { display: flex; }
     .chevbar { display: flex; flex: 1; min-width: 0; }
@@ -446,8 +486,15 @@
         display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
       }
       .labels { order: 4; max-width: 100%; }
-      .wfnum { width: 42px; }
+      .wfnum { width: 34px; }
       .chevtools { margin-left: 50px; }
+      /* On a phone the commit headline says more than the branch name, and
+         there is only room for one — the branch is still in the ↗ target. */
+      .wfcommit { margin-left: 52px; }
+      .wfbranch { display: none; }
+      /* The header line already wraps on a phone; a commit chip there would
+         push the repo name onto a third row. */
+      a.repo-commit { display: none; }
       /* A phone-width workflow bar has ~300px for three labels, so shrink the
          type and the arrow notch — otherwise the segments overlap their own
          text ("PR createdDeployed Merge"). */
@@ -1432,11 +1479,24 @@ function renderRepo(repo) {
   const el = document.createElement('div');
   el.className = 'repo';
   el.dataset.repo = repo.name;
+  // Tip commit of the local checkout — what this machine would deploy right
+  // now. The link opens that exact commit on GitHub.
+  const c = repo.headCommit;
+  const commitUrl = c && repo.ownerRepo ? `https://github.com/${repo.ownerRepo}/commit/${c.sha}` : null;
+  // The separator lives inside the anchor (via CSS ::before) so hiding the
+  // chip on narrow screens doesn't strand a dangling "·".
+  const headBit = c
+    ? `<a class="repo-commit" href="${escape(commitUrl || '#')}" target="_blank" rel="noopener"` +
+      ` title="${escape(`${c.sha}\n${c.committedDate ? new Date(c.committedDate).toLocaleString() : ''}\n${c.headline || ''}`)}">` +
+      `<span class="wfsha">${escape(c.abbrev || '')}</span>` +
+      `<span class="wfwhen">${escape(fmtAgo(c.committedDate ? Date.now() - new Date(c.committedDate).getTime() : null))}</span>` +
+      `<span class="wfheadline">${escape(c.headline || '')}</span></a>`
+    : '';
   el.innerHTML = `
     <div class="repo-head">
       <span class="caret">▶</span>
       <span class="repo-name">${escape(repo.name)}</span>
-      <span class="repo-meta">${repo.ownerRepo ? escape(repo.ownerRepo) : 'no github remote'} · ${escape(repo.branch || '')}</span>
+      <span class="repo-meta">${repo.ownerRepo ? escape(repo.ownerRepo) : 'no github remote'} · <span class="repo-branch">${escape(repo.branch || '')}</span>${headBit}</span>
     </div>
     <div class="repo-body"><div class="muted" style="padding:8px 4px">Click to load issues…</div></div>`;
   const head = el.querySelector('.repo-head');
@@ -1784,6 +1844,39 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     updateMoreBtn(item);
   }
 
+  // Branch + tip commit under a PR's workflow line: what code this row is
+  // actually about, and a link straight to that commit on GitHub so you can
+  // see what a given deploy shipped.
+  function makeCommitLine(pr) {
+    const line = document.createElement('div');
+    line.className = 'wfcommit';
+    const c = pr.headCommit;
+    if (!pr.headRefName && !c) { line.hidden = true; return line; }
+
+    if (pr.headRefName) {
+      const branch = document.createElement('span');
+      branch.className = 'wfbranch';
+      branch.textContent = pr.headRefName;
+      branch.title = `Branch ${pr.headRefName}`;
+      line.appendChild(branch);
+    }
+    if (!c) return line;
+
+    const when = c.committedDate ? Date.now() - new Date(c.committedDate).getTime() : null;
+    const link = document.createElement('a');
+    link.className = 'wfcommitlink';
+    link.href = c.url || '#';
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.title = `${c.sha || ''}\n${c.committedDate ? new Date(c.committedDate).toLocaleString() : ''}\n${c.headline || ''}`;
+    link.innerHTML =
+      `<span class="wfsha">${escape(c.abbrev || '')}</span>` +
+      (when != null ? `<span class="wfwhen">${escape(fmtAgo(when))}</span>` : '') +
+      `<span class="wfheadline">${escape(c.headline || '')}</span>`;
+    line.appendChild(link);
+    return line;
+  }
+
   // A row that has never run anything has nothing behind "⋯" — hide the
   // toggle rather than letting it open an empty line.
   function updateMoreBtn(item) {
@@ -1828,6 +1921,15 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     num.className = 'wfnum empty';
     num.textContent = '—';
     num.title = 'No PR yet';
+    // Invisible stand-in for a PR row's ↗, so both kinds of line start their
+    // chevron bar at exactly the same x.
+    const ghSlot = document.createElement('span');
+    ghSlot.className = 'wfgh';
+    ghSlot.style.visibility = 'hidden';
+    ghSlot.textContent = '↗';
+    const lead = document.createElement('span');
+    lead.className = 'wflead';
+    lead.append(num, ghSlot);
 
     const chevbar = document.createElement('div');
     chevbar.className = 'chevbar';
@@ -1847,7 +1949,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     more.title = 'Show PR-creation log / abort';
     more.addEventListener('click', () => item.classList.toggle('tools-open'));
 
-    row.append(num, chevbar, more);
+    row.append(lead, chevbar, more);
 
     const tools = document.createElement('div');
     tools.className = 'chevtools';
@@ -1981,15 +2083,21 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     more.title = 'Show logs / abort / timing';
     more.addEventListener('click', () => item.classList.toggle('tools-open'));
 
+    // GitHub link sits on the LEFT, packed against the PR number, so every
+    // workflow bar starts at the same x regardless of which icons a row has.
     const ghIcon = document.createElement('a');
     ghIcon.className = 'wfgh';
     ghIcon.href = pr.prUrl || '#';
     ghIcon.target = '_blank'; ghIcon.rel = 'noopener';
     ghIcon.textContent = '↗';
-    ghIcon.title = 'Open on GitHub';
+    ghIcon.title = 'Open PR on GitHub';
 
-    row.append(link, chevbar, ghIcon, more);
-    item.append(row, tools, prlog, mergelog);
+    const lead = document.createElement('span');
+    lead.className = 'wflead';
+    lead.append(link, ghIcon);
+
+    row.append(lead, chevbar, more);
+    item.append(row, makeCommitLine(pr), tools, prlog, mergelog);
 
     // Initial paint. The "Create PR" cell always reads success: this row only
     // exists because a PR was found, so its own creation is a done deal —
@@ -2109,6 +2217,8 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       const ex = st.prs.find((x) => x.prNumber === p.prNumber);
       return {
         prNumber: p.prNumber, prUrl: p.prUrl, title: p.title, createdAt: p.createdAt,
+        headRefName: p.headRefName || (ex && ex.headRefName) || null,
+        headCommit: p.headCommit || (ex && ex.headCommit) || null,
         deploy: ex ? ex.deploy : (p.deploy || { status: 'idle' }),
         merge: ex ? ex.merge : (p.merge || { status: 'idle' }),
       };

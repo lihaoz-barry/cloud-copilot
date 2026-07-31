@@ -17,7 +17,9 @@ your LAN/VPN. From your phone you can:
   a shell command you define (e.g. restart the local service) — see
   [`.cloud-copilot.json`](#per-repo-deploy-config-cloud-copilotjson) below
 - **Merge** (`gh pr merge --merge --delete-branch`) unlocks once Deploy succeeds;
-  you can still force it early behind a confirm if you're confident
+  you can still force it early behind a confirm if you're confident. If the
+  command fails, cloud-copilot automatically starts a repo-scoped Copilot session
+  to investigate, resolve branch conflicts, push, retry, and verify the merge
 - **click a PR** to open its own **detail page** (`#/pr/<repo>/<issue>/<pr>`,
   bookmarkable/shareable) — same pipeline, plus a **Deploy History** list (every
   build number/version/status the PR has ever shipped, not just the latest) and
@@ -76,6 +78,10 @@ running, green = done, red = failed.
 - **Merge is gated on Deploy succeeding** — the Merge cell stays a dimmed, locked
   `🔒 Merge` until then. You can still click it early; it asks you to confirm a
   **force-merge** that skips the gate.
+- **Failed merges recover automatically** — Copilot investigates the original
+  failure, resolves and pushes conflicts against the PR's actual base branch,
+  retries the merge, and verifies GitHub reports `MERGED`. The Merge cell says
+  `Merged · conflict resolved` when that recovery resolved a reported conflict.
 - Success/failure is decided by the CLI/command **exit code** plus detection: a PR
   URL in the transcript (fallback: `gh pr list` referencing the issue) for Create
   PR; a fastlane/TestFlight success marker for an `ios-testflight` Deploy (plain
@@ -296,7 +302,7 @@ behaviour:
 | POST | `/api/repos/:name/issues/:n/work/cancel` | Abort the running PR creation. |
 | POST | `/api/repos/:name/issues/:n/deploy/:pr` | **Deploy a specific PR** — SSE stream. Dispatched per the repo's `.cloud-copilot.json`. |
 | POST | `/api/repos/:name/issues/:n/deploy/:pr/cancel` | Abort the running deploy for that PR. |
-| POST | `/api/repos/:name/issues/:n/merge/:pr` | **Merge a specific PR** — SSE stream. Body: `{ "force": false }`. Blocked unless Deploy succeeded, unless `force: true`. |
+| POST | `/api/repos/:name/issues/:n/merge/:pr` | **Merge a specific PR** — SSE stream. Body: `{ "force": false }`. Blocked unless Deploy succeeded, unless `force: true`. A failed `gh pr merge` automatically starts Copilot to investigate, resolve conflicts, retry, and verify the merge. |
 | POST | `/api/repos/:name/issues/:n/merge/:pr/cancel` | Abort the running merge for that PR. |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat` | **Chat with a PR** — SSE stream. Body: `{ "message": "...", "mode": "plan"\|"apply", "model": "..." }`. `plan` is read-only (default approval flags); `apply` implements + pushes to the existing branch and resets Deploy/Merge on success. The optional `model` overrides the global setting for that turn only (unknown values fall back to it). |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat/cancel` | Abort the running chat turn for that PR. |

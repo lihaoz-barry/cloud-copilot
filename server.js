@@ -123,11 +123,11 @@ function resolveRepo(name) {
 }
 
 // Actions that check out a branch on a repo's single shared working tree —
-// Create PR, Deploy, and Chat (even "plan" mode checks out the PR's branch) —
+// Create PR, Deploy, Chat (even "plan" mode checks out the PR's branch), and
+// Merge (when its automatic Copilot recovery is needed) —
 // must be mutually exclusive per repo, or concurrent runs collide on the same
-// checkout. Merge is excluded: it only calls `gh pr merge` via the API, no
-// local checkout involved.
-const WORKING_TREE_ACTION_RE = /^(\d+):(work|deploy|chat|restart)(?::(\d+))?$/;
+// checkout.
+const WORKING_TREE_ACTION_RE = /^(\d+):(work|deploy|chat|merge|restart)(?::(\d+))?$/;
 
 // Working-tree locks held by actions that are NOT backed by a `jobs` child
 // process — currently just "Restart main", which runs a few short git commands
@@ -166,6 +166,7 @@ const BUSY_ACTION_LABEL = {
   work: 'a Create PR run',
   deploy: 'a Deploy',
   chat: 'a chat turn',
+  merge: 'a Merge',
   restart: 'a Restart main',
 };
 
@@ -573,7 +574,7 @@ app.get('/api/repos/:name/issues/:n/prs', async (req, res) => {
 });
 
 // Dismiss/hide an issue from the dashboard. Cancels any in-flight jobs tied to
-// it (work + every PR's deploy), then clears its tracked state and remembers
+// it (work + every PR's deploy/merge), then clears its tracked state and remembers
 // the dismissal so it doesn't reappear on the next issue-list refresh/poll.
 // This never touches the issue on GitHub itself.
 app.post('/api/repos/:name/issues/:n/hide', (req, res) => {
@@ -587,6 +588,7 @@ app.post('/api/repos/:name/issues/:n/hide', (req, res) => {
   if (jobs.cancelJob(`${repo.name}#${n}:work`)) cancelledJobs.push('work');
   for (const pr of Object.values(record.prs || {})) {
     if (jobs.cancelJob(`${repo.name}#${n}:deploy:${pr.prNumber}`)) cancelledJobs.push(`deploy:${pr.prNumber}`);
+    if (jobs.cancelJob(`${repo.name}#${n}:merge:${pr.prNumber}`)) cancelledJobs.push(`merge:${pr.prNumber}`);
   }
 
   store.dismissIssue(repo.name, n);
@@ -1148,7 +1150,8 @@ app.post('/api/repos/:name/issues/:n/deploy/:pr/cancel', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Action: Merge a specific PR (gh pr merge --merge --delete-branch)
+// Action: Merge a specific PR. A failed gh merge automatically starts Copilot
+// to investigate, resolve branch conflicts, push, and retry the merge.
 // ---------------------------------------------------------------------------
 
 app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
@@ -1182,28 +1185,83 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
     }
   }
 
+  const busyKey = findOtherRepoBusyKey(repo.name, key);
+  if (busyKey) {
+    const message = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`;
+    return sendSseBlocked(res, { action: 'merge', prNumber, status: 'blocked', message });
+  }
+
   store.updateMerge(repo.name, n, prNumber, (m) => {
     m.status = 'merging';
     m.forced = force;
     m.startedAt = new Date().toISOString();
     m.finishedAt = null;
     m.conversation = '';
+    m.sessionId = null;
+    m.recoveryAttempted = false;
+    m.conflictResolved = false;
+    m.recoveryMessage = null;
   });
 
-  const baseRefName = await gh.getPr(repo.ownerRepo, prNumber).then((pr) => pr?.baseRefName || null);
-
   const job = jobs.startJob(key, {
-    bin: gh.GH_BIN,
-    args: ['pr', 'merge', String(prNumber), '--repo', repo.ownerRepo, '--merge', '--delete-branch'],
+    bin: process.execPath,
+    args: [
+      path.join(__dirname, 'lib', 'mergeRunner.js'),
+      gh.GH_BIN,
+      COPILOT_BIN,
+      repo.ownerRepo,
+      String(prNumber),
+      resolveModel(),
+    ],
     cwd: repo.path,
     meta: { action: 'merge', prNumber },
+    onSession: (id) =>
+      store.updateMerge(repo.name, n, prNumber, (m) => {
+        m.sessionId = id;
+      }),
+    onProgress: (j) =>
+      store.updateMerge(repo.name, n, prNumber, (m) => {
+        m.conversation = j.conversation;
+        if (j.sessionId) m.sessionId = j.sessionId;
+      }),
     onDone: async (j) => {
-      const success = j.exitCode === 0;
-      const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
+      const mergedAfterCancellation = j.cancelled
+        ? await gh.getPr(repo.ownerRepo, prNumber).then((pr) => pr?.state === 'MERGED')
+        : false;
+      const success = j.exitCode === 0 || mergedAfterCancellation;
+      const status = success ? 'success' : j.cancelled ? 'aborted' : 'failed';
+      const markerMatches = [
+        ...j.conversation.matchAll(/\[cloud-copilot merge recovery\] (\{[^\n]+\})/g),
+      ];
+      let recovery = {};
+      if (markerMatches.length) {
+        try {
+          recovery = JSON.parse(markerMatches.at(-1)[1]);
+        } catch {
+          recovery = {};
+        }
+      }
+      const recoveryAttempted = Boolean(recovery.attempted);
+      const conflictResolved = Boolean(
+        success && (recovery.conflictResolved || (mergedAfterCancellation && recovery.conflictDetected)),
+      );
+      const baseRefName =
+        typeof recovery.baseRefName === 'string' && recovery.baseRefName ? recovery.baseRefName : null;
+      const recoveryMessage = conflictResolved
+        ? 'Merged after Copilot resolved conflicts'
+        : recoveryAttempted && success
+          ? 'Merged after Copilot recovery'
+          : recoveryAttempted
+            ? 'Copilot recovery did not complete the merge'
+            : null;
       store.updateMerge(repo.name, n, prNumber, (m) => {
         m.status = status;
         m.exitCode = j.exitCode;
         m.conversation = j.conversation;
+        m.sessionId = j.sessionId;
+        m.recoveryAttempted = recoveryAttempted;
+        m.conflictResolved = conflictResolved;
+        m.recoveryMessage = recoveryMessage;
         m.finishedAt = new Date().toISOString();
       });
       if (success && baseRefName) {
@@ -1220,7 +1278,14 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
           /* best-effort only — merge itself already succeeded */
         }
       }
-      return { action: 'merge', prNumber, status };
+      return {
+        action: 'merge',
+        prNumber,
+        status,
+        recoveryAttempted,
+        conflictResolved,
+        recoveryMessage,
+      };
     },
   });
 

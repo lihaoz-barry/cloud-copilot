@@ -1697,6 +1697,13 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       el.title = 'Deploy has not succeeded yet — click to force-merge anyway';
     } else {
       paintChev(el, 'chev-col-merge', 'merge', ms, pr.merge);
+      if (ms === 'success' && pr.merge && pr.merge.conflictResolved) {
+        el.textContent = 'Merged · conflict resolved';
+        el.title = pr.merge.recoveryMessage || el.title;
+      } else if (ms === 'success' && pr.merge && pr.merge.recoveryAttempted) {
+        el.textContent = 'Merged · recovered by Copilot';
+        el.title = pr.merge.recoveryMessage || el.title;
+      }
     }
   }
 
@@ -2032,6 +2039,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       });
       if (!resp.ok || !resp.body) { appendMerge(prNumber, `\n[error] HTTP ${resp.status}\n`, 'err'); return reconcileMerge(prNumber); }
       await pumpSSE(resp, {
+        onMeta: () => repoCtx.setActive(issue.number),
         onChunk: (t, s) => appendMerge(prNumber, t, s === 'stderr' ? 'stderr' : null),
         onError: (m) => appendMerge(prNumber, `\n[error] ${m}\n`, 'err'),
         onResult: (d) => { finalStatus = d.status; resultData = d; },
@@ -2051,9 +2059,18 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     if (finalStatus) {
       pr.merge.status = finalStatus;
       pr.merge.hasConversation = true;
+      if (resultData) {
+        pr.merge.recoveryAttempted = Boolean(resultData.recoveryAttempted);
+        pr.merge.conflictResolved = Boolean(resultData.conflictResolved);
+        pr.merge.recoveryMessage = resultData.recoveryMessage || null;
+      }
       paintMerge(prNumber);
       appendMerge(prNumber, `\n[merge #${prNumber}] finished: ${finalStatus}\n`, finalStatus === 'success' ? 'ok' : 'err');
+      if (resultData && resultData.recoveryMessage) {
+        appendMerge(prNumber, `[merge #${prNumber}] ${resultData.recoveryMessage}\n`, finalStatus === 'success' ? 'ok' : 'err');
+      }
       refreshMergeTiming(prNumber);
+      repoCtx.clearActive(issue.number);
     } else {
       return reconcileMerge(prNumber);
     }
@@ -2070,10 +2087,14 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         if (pr) pr.merge = { ...prRec.merge };
         paintMerge(prNumber);
         appendMerge(prNumber, `\n[merge #${prNumber}] finished: ${s}\n`, s === 'success' ? 'ok' : 'err');
+        repoCtx.clearActive(issue.number);
         if (window.CCNotify) CCNotify.jobFinished(notifyPr('merge', prNumber, { status: s, replayed: true }));
         return;
       }
-      if (rec.live && rec.live.merge && rec.live.merge[prNumber]) return streamMerge(prNumber, true);
+      if (rec.live && rec.live.merge && rec.live.merge[prNumber]) {
+        repoCtx.setActive(issue.number);
+        return streamMerge(prNumber, true);
+      }
       await sleep(3000);
     }
     appendMerge(prNumber, `\n[merge #${prNumber}] status check timed out — tap Merge again.\n`, 'stderr');
@@ -2700,7 +2721,8 @@ function renderTfCard(b) {
     if (ms === 'success') {
       const pill = document.createElement('span');
       pill.className = `stbtn ${STATE_CLASS.success}`;
-      pill.innerHTML = `<span class="dot"></span>Merged${b.merge.forced ? ' (forced)' : ''}`;
+      const recovery = b.merge.conflictResolved ? ' · conflict resolved' : '';
+      pill.innerHTML = `<span class="dot"></span>Merged${b.merge.forced ? ' (forced)' : ''}${recovery}`;
       row.appendChild(pill);
     } else if (ms === 'merging') {
       const pill = document.createElement('span');

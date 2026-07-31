@@ -10,3 +10,6 @@ server.log
 *.p8
 setup/deploy.env
 
+
+# playwright-mcp scratch output
+.playwright-mcp/

@@ -379,6 +379,32 @@ committed. Fill `deploy.env`, then re-run the script to install the key.
   client can continue the same conversation.
 - **Transport**: SSE — simple, one-directional (server → browser), perfect for streaming.
 
+### Streaming markdown (`public/chat-render.js`)
+
+Every surface that streams Copilot output — the PR chat panel, the pre-issue chat panel,
+the Admin Terminal and the pipeline log panels — goes through one renderer, `CCChat`:
+
+- **Markdown while it streams, not after.** Chunks accumulate into a buffer that is
+  re-parsed on a ~60ms cadence; only the markdown *blocks* whose source text actually
+  changed are rebuilt, so a 5k-token answer costs one small parse per frame instead of one
+  DOM text node (and one forced reflow) per SSE chunk. An unterminated ``` fence is closed
+  before parsing so code reads as code from its first line.
+- **Sanitized, always.** Model output is untrusted: everything passes through DOMPurify —
+  no scripts, inline styles, event handlers, frames or `javascript:` URLs survive. Links
+  are forced to `target="_blank" rel="noopener noreferrer nofollow"`; GFM task-list
+  checkboxes are the one `<input>` allowed through, stripped down to an inert checkbox.
+- **Syntax highlighting + copy buttons** on every code fence, a copy button on every
+  assistant message, and dumps longer than 40 lines folded behind a "Show all N lines".
+- **Sticky-bottom autoscroll.** The view only pins to the bottom while you are already
+  within 40px of it; scroll up during a live turn and it stays put, with a
+  "↓ Jump to latest" pill to come back.
+- Pipeline logs stay verbatim (they're raw interleaved stdout/stderr, not markdown) but
+  share the sticky scrolling and node coalescing.
+
+The libraries behind it (marked, DOMPurify, highlight.js) are **vendored** into
+`public/vendor/` — see the README there. The app is used over LAN and must work with no
+internet, so nothing is loaded from a CDN.
+
 ### Durable jobs (survives phone disconnects)
 
 Issue actions (**Create PR**, **Deploy**) can run for many minutes. A phone locking its
@@ -528,6 +554,8 @@ cloud-copilot/
 │   └── repoConfig.js   # loads a repo's .cloud-copilot.json (or auto-detects iOS)
 ├── public/
 │   ├── index.html      # repos → issues → Create PR / Deploy / Merge pipeline console
+│   ├── chat-render.js  # CCChat: streamed markdown renderer shared by every chat surface
+│   ├── vendor/         # marked + DOMPurify + highlight.js, committed (never a CDN)
 │   ├── notify.js       # CCNotify: completion chime + system notification + toast
 │   ├── sw.js           # service worker (required for notifications on iOS)
 │   ├── manifest.webmanifest  # PWA manifest — makes "Add to Home Screen" a real app

@@ -1737,6 +1737,11 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   if (!st.prs) st.prs = [];
   if (!st.work) st.work = { status: 'idle' };
 
+  // Re-entrancy guard for paintWork → renderPrs → paintWork. Declared up here
+  // because the first renderPrs() runs during setup below, before the point
+  // where paintWork itself is defined.
+  let repaintingPrs = false;
+
   // --- Create PR: the first segment of the "no PR yet" workflow line --------
   // These three live for the lifetime of the issue card and get *moved* into
   // that line on every renderPrs(), so paintWork/setBlocked can keep holding
@@ -1816,10 +1821,22 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     el.classList.toggle('blocked', blocked);
     workBtn.disabled = blocked;
     refreshPrsBtn.disabled = blocked;
+    // The green "PR created" segments double as "create another PR" triggers.
+    prlist.querySelectorAll('.pritem[data-pr]:not([data-pr="new"]) .chev-col-pr')
+      .forEach((b) => { b.disabled = blocked; });
   }
 
   // --- Create PR visuals: success/fail shown ON THE ISSUE, not the button ---
   function paintWork(status) {
+    // Whether the "—" line belongs on screen depends on this status, so a
+    // transition into/out of working|failed|aborted has to rebuild the list.
+    // The guard stops the renderPrs → paintWork → renderPrs cycle.
+    const rowPresent = Boolean(prlist.querySelector('.pritem[data-pr="new"]'));
+    if (!repaintingPrs && rowPresent !== showCreateRow()) {
+      repaintingPrs = true;
+      try { renderPrs(); } finally { repaintingPrs = false; }
+      return;
+    }
     // The Create PR segment reports "working" and failures, but falls back to
     // plain "Create PR" on success — by then the outcome lives on the PR row
     // below, and this line is ready to start a second PR.
@@ -1897,11 +1914,19 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   function chevEl(n, col) { return prlist.querySelector(`.pritem[data-pr="${n}"] .chev-col-${col}`); }
   function toolEl(n, col) { return prlist.querySelector(`.pritem[data-pr="${n}"] .chevtool-${col}`); }
 
-  // Every issue always leads with the "no PR yet" workflow line, even once it
-  // has PRs — a single issue can legitimately get a second one.
+  // The "no PR yet" line is only worth a row while it is the only way to act
+  // on the issue. Once a PR exists you start another one from that PR's green
+  // "PR created" segment instead, which saves a row per issue. It comes back
+  // whenever a Create PR run is live or ended badly, so progress and failures
+  // stay reachable.
+  function showCreateRow() {
+    const s = st.work.status;
+    return st.prs.length === 0 || s === 'working' || s === 'failed' || s === 'aborted';
+  }
+
   function renderPrs() {
     prlist.innerHTML = '';
-    prlist.appendChild(renderCreateRow());
+    if (showCreateRow()) prlist.appendChild(renderCreateRow());
     for (const pr of st.prs) prlist.appendChild(renderPrRow(pr));
     paintWork(st.work.status);
   }
@@ -1989,11 +2014,19 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     const chevbar = document.createElement('div');
     chevbar.className = 'chevbar';
 
-    // --- Segment 1: Create PR (read-only reflection of the issue-level work
-    // status — the actual trigger is the Create PR button above) -----------
+    // An issue has exactly ONE work record, but can have several PRs — most of
+    // them discovered on GitHub rather than created here. Only the PR that run
+    // actually produced may claim its log and duration; showing them on every
+    // row attributed e.g. a 45h aborted run to a PR that predated it.
+    const ownsWorkRun = st.work.prNumber != null && st.work.prNumber === pr.prNumber;
+    item.dataset.workOwner = ownsWorkRun ? '1' : '0';
+
+    // --- Segment 1: Create PR — done by definition on a row that exists.
+    // Clicking starts ANOTHER PR for this issue, which is how you get a second
+    // one now that the empty "—" line is gone. ------------------------------
     const prSeg = document.createElement('button');
-    prSeg.title = 'Toggle Create PR logs';
-    prSeg.addEventListener('click', () => worklog.classList.toggle('show'));
+    prSeg.title = 'Create another PR for this issue';
+    prSeg.addEventListener('click', onCreateAnother);
 
     // --- Segment 2: Deploy ---------------------------------------------------
     const deploySeg = document.createElement('button');
@@ -2014,11 +2047,11 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     const prLogBtn = document.createElement('button');
     prLogBtn.className = 'iconbtn prlog-toggle-shared';
     prLogBtn.textContent = '▤';
-    prLogBtn.title = 'Show PR-creation logs';
+    prLogBtn.title = 'Show the Create PR log that produced this PR';
     prLogBtn.addEventListener('click', () => worklog.classList.toggle('show'));
     const prTiming = document.createElement('span');
     prTiming.className = 'timing';
-    if (st.work.durationMs != null) prTiming.textContent = `ran ${fmtDur(st.work.durationMs)}`;
+    if (ownsWorkRun && st.work.durationMs != null) prTiming.textContent = `ran ${fmtDur(st.work.durationMs)}`;
     prTool.append(prLogBtn, prTiming);
 
     const deployTool = document.createElement('span');
@@ -2104,11 +2137,15 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     // regardless of the issue's shared work.status, which may currently be
     // "working" for an unrelated, still-running Create PR run (or reflect an
     // older/different PR entirely, e.g. one merely referencing this issue).
-    paintChev(prSeg, 'chev-col-pr', 'work', 'success', st.work);
+    paintChev(prSeg, 'chev-col-pr', 'work', 'success', ownsWorkRun ? st.work : null);
     paintChev(deploySeg, 'chev-col-deploy', 'deploy', (pr.deploy && pr.deploy.status) || 'idle', pr.deploy);
     paintChevMerge(mergeSeg, pr);
+    // paintChev overwrites the title with timing; restore the action hint.
+    prSeg.title = ownsWorkRun && st.work.durationMs != null
+      ? `Created by a ${fmtDur(st.work.durationMs)} Create PR run — click to start another PR`
+      : 'Create another PR for this issue';
 
-    const hasWorkLog = st.work.status === 'working' || st.work.status === 'success' || st.work.status === 'failed' || st.work.status === 'aborted' || st.work.hasConversation;
+    const hasWorkLog = ownsWorkRun && (st.work.status === 'success' || st.work.status === 'failed' || st.work.status === 'aborted' || st.work.hasConversation);
     prLogBtn.hidden = !hasWorkLog;
     const s0 = (pr.deploy && pr.deploy.status) || 'idle';
     const showDeployLog0 = s0 === 'deploying' || (pr.deploy && pr.deploy.hasConversation) || s0 === 'success' || s0 === 'failed' || s0 === 'aborted';
@@ -2199,12 +2236,14 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     if (t && durationMs != null) t.textContent = `ran ${fmtDur(durationMs)}`;
   }
 
-  // Create PR's duration is shared across every PR row for this issue (one
-  // work record, not per-PR) — update all of them in one pass.
+  // The issue has one work record; only the rows that record actually produced
+  // (plus the live "new" line) may display its duration.
   function updateAllPrWorkTimings() {
     if (st.work.durationMs == null) return;
     const text = `ran ${fmtDur(st.work.durationMs)}`;
-    prlist.querySelectorAll('.chevtool-pr .timing').forEach((t) => { t.textContent = text; });
+    prlist
+      .querySelectorAll('.pritem[data-pr="new"] .chevtool-pr .timing, .pritem[data-work-owner="1"] .chevtool-pr .timing')
+      .forEach((t) => { t.textContent = text; });
   }
 
   function setMergeTiming(prNumber, durationMs) {
@@ -2259,6 +2298,20 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     st.work.status = 'working';
     paintWork('working');
     await streamWork(false);
+  }
+
+  // Starting a SECOND PR from an existing PR's green segment. Behind a confirm
+  // because that segment otherwise reads as a status, not a button — an
+  // accidental click would kick off a real Copilot run.
+  async function onCreateAnother() {
+    if (st.work.status === 'working') return void worklog.classList.toggle('show');
+    if (repoCtx.activeWorkIssue != null && repoCtx.activeWorkIssue !== issue.number) return;
+    const n = st.prs.length;
+    if (!window.confirm(
+      `Create another PR for issue #${issue.number}?\n\n` +
+      `This issue already has ${n} PR${n === 1 ? '' : 's'}. A new Copilot run will start and open an additional PR.`,
+    )) return;
+    await onWork();
   }
 
   async function onWorkAbort() {

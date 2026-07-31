@@ -77,7 +77,6 @@ the line:
 
 ```
 #42  Deploy dies on a dirty working tree: salvage local changes…   📌 ↗ ↻ 🗑
-  —  [   Create PR   ▸     Deploy     ▸     Merge     ]                 ⋯
 #43↗ [  PR created   ▸     Deploy     ▸  🔒 Merge     ]                 ⋯
      ⎇ claude/app-bug-fixes  62cf6ca  50m  Deploy: salvage a dirty…
 ```
@@ -85,11 +84,20 @@ the line:
 The PR number and its `↗` GitHub link are packed together on the **left**, so
 every workflow bar starts at the same x whichever icons a line has.
 
-- **The first line always has an empty PR number** (`—`) and its first segment is
-  the live **Create PR** button. It stays there after a PR exists, because one
-  issue can legitimately get a second PR.
+- **An issue with no PRs** leads with a `—` line whose first segment is the live
+  **Create PR** button.
+- **Once a PR exists that line disappears**, saving a row per issue. To open a
+  *second* PR, click the green **PR created** segment on any existing line — it
+  asks to confirm before starting a new Copilot run.
+- The `—` line **comes back** while a Create PR run is working, failed, or
+  aborted, so progress and failures stay visible and their log stays reachable.
+
 - **Success shows on the issue**, not the button: on a created PR the issue gets a
   green border + green `#number`, and the Create PR segment resets to "Create PR".
+- **An issue has one Create PR record but can have many PRs**, most of them
+  discovered on GitHub rather than created here. Only the PR that run actually
+  produced (`work.prNumber`) shows its duration and log — otherwise an unrelated
+  run gets attributed to a PR that predates it.
 - **Per-line logs are hidden behind `⋯`**, along with that line's abort button and
   run timing. The toggle only appears when there is something to show, and opens
   itself while a stage is running so Abort is always one tap away.

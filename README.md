@@ -5,13 +5,21 @@ your LAN/VPN. From your phone you can:
 
 - browse the git repos under an **authorized root** (`REPOS_ROOT`), with a
   per-device **repo filter** (checkbox show/hide, persisted in `localStorage`)
-- expand a repo to see its **GitHub issues** (fetched via `gh`, cached, refreshable);
-  every expand also **auto-discovers PRs** referencing those issues (one `gh pr
-  list` call, matched in-process) so the pipeline is populated without a manual
-  step — a per-issue **↻ PRs** button remains for an explicit, always-live re-check
-- run every PR through a **3-stage pipeline — Create PR → Deploy → Merge** — shown
-  as one row per PR with a colored pill per stage (blue = planned, yellow =
-  running, green = done, red = failed), each with its own collapsible log
+- expand a repo to see its **GitHub issues**, served through a **three-tier cache**
+  (browser → server → `gh`) so an expand is instant and a page reload costs zero
+  requests — see [Caching](#caching-browser--server--gh) below; every expand also
+  **auto-discovers PRs** referencing those issues (one `gh pr list` call, matched
+  in-process) so the pipeline is populated without a manual step — a per-issue
+  **↻** button remains for an explicit, always-live re-check
+- a **flat two-line layout**: one line per issue (number, title, and the pin /
+  GitHub / refresh / delete cluster), then **one workflow line per PR** —
+  `#43 [ PR created ▸ Deploy ▸ Merge ]`. The first workflow line always has an
+  empty PR number and starts a *new* PR, since one issue can have several
+- each stage is a colored segment (blue = planned, yellow = running, green =
+  done, red = failed); a **⋯** toggle reveals that line's logs, abort and timing,
+  and opens itself automatically while a stage runs
+- **repo open/closed state is remembered per device**, so a reload lands on the
+  same view instead of collapsing everything
 - **Deploy is per-repo configurable**: iOS repos ship to TestFlight via the
   `testflight-deploy` skill; other repos (cloud-copilot itself included) just run
   a shell command you define (e.g. restart the local service) — see
@@ -62,14 +70,25 @@ one **work** (Create PR) record plus a map of **PRs**, and every PR carries its 
 | Deploy     | `Deploy` 🔵       | `Deploying…` 🟡    | `Deployed` 🟢   | `Deploy failed` 🔴 / `Aborted`   |
 | Merge      | `🔒 Merge` 🔵 (dim until Deploy succeeds) | `Merging…` 🟡 | `Merged` 🟢 | `Merge failed` 🔴 / `Aborted` |
 
-Each PR renders as one row across all three stages — a **Create PR | Deploy |
-Merge** pipeline, matching the state machine above: blue = planned, yellow =
-running, green = done, red = failed.
+Each PR renders as **one workflow line** across all three stages — a **Create PR |
+Deploy | Merge** pipeline, matching the state machine above: blue = planned,
+yellow = running, green = done, red = failed. The PR number sits at the head of
+the line:
 
+```
+#42  Deploy dies on a dirty working tree: salvage local changes…   📌 ↗ ↻ 🗑
+  —  [   Create PR   ▸     Deploy     ▸     Merge     ]              ⋯
+ #43 [  PR created   ▸     Deploy     ▸  🔒 Merge     ]           ↗  ⋯
+```
+
+- **The first line always has an empty PR number** (`—`) and its first segment is
+  the live **Create PR** button. It stays there after a PR exists, because one
+  issue can legitimately get a second PR.
 - **Success shows on the issue**, not the button: on a created PR the issue gets a
-  green border + green `#number`, and the **Create PR** button stays "Create PR".
-- **Per-action logs** are hidden by default. A small `▤` toggle by **Create PR**
-  reveals the creation log; each PR row has `▤` toggles for its Deploy and Merge logs.
+  green border + green `#number`, and the Create PR segment resets to "Create PR".
+- **Per-line logs are hidden behind `⋯`**, along with that line's abort button and
+  run timing. The toggle only appears when there is something to show, and opens
+  itself while a stage is running so Abort is always one tap away.
 - **Abort**: while running, Create PR / Deploy / Merge each show a red `⨯` button.
   Confirming signals the whole process group (copilot + fastlane/xcodebuild/gh), so
   subprocesses die too; the run ends in an `aborted` state you can re-run.
@@ -94,6 +113,44 @@ running, green = done, red = failed.
   `fastlane beta build:<n> version:<v>` — so what cloud-copilot records and
   displays is guaranteed to match what was actually built, not inferred
   after the fact from the agent's free-form report.
+
+### Caching (browser → server → `gh`)
+
+Issue and PR data is read through three tiers, so the dashboard is instant and
+`gh` is called as rarely as possible:
+
+| Tier | Where | TTL | Cost | Survives |
+|---|---|---|---|---|
+| **L1** | browser `localStorage` | 15 min | 0 ms | page reloads |
+| **L2** | `data/gh-cache.json` + memory | 15 min | ~5 ms | server restarts |
+| **L3** | the `gh` CLI (real GitHub) | — | ~800 ms+ | — |
+
+- **Expanding a repo** renders from L1 immediately — if that copy is under 15
+  minutes old, **no request leaves the browser at all**. A reload of a page with
+  an already-expanded repo therefore issues zero issue requests.
+- **Past the TTL**, the browser silently asks the server and updates the list in
+  place. That request usually costs nothing beyond L2; only if the server's own
+  copy has aged out does it reach for `gh`.
+- **The server refreshes every repo hourly** in the background (`force`, so it
+  really does hit GitHub), which bounds staleness even if nobody opens the page.
+  A repo with a job running is skipped and picked up on the next pass.
+- **`↻ Refresh` punches through all three tiers**: a live `gh` read that rewrites
+  the server's cache *and* this browser's copy.
+- The background top-up is **skipped while anything in that repo is running**,
+  since re-rendering the list would tear down the DOM a live log is streaming into.
+
+The freshness pill next to the issue count shows both halves and a countdown:
+
+```
+9 open   ☁ 3m · 💾 just now · ↻ 12m
+         │      │              └ next automatic sync
+         │      └ when this browser last copied it
+         └ when the server last read GitHub
+```
+
+Green inside the TTL, amber under an hour, grey beyond that; hovering gives
+absolute timestamps. Tune with `GH_CACHE_TTL_MS`, `GH_SYNC_INTERVAL_MS`, and
+`GH_SYNC_FIRST_DELAY_MS`.
 
 ### Auto-run depth
 
@@ -295,7 +352,7 @@ behaviour:
 | GET  | `/api/settings/model` | Current model + the selectable list. `POST` the same path to change it. |
 | GET  | `/api/settings/self` | The cloud-copilot repo serving this app: `{ repo, branch, defaultBranch, dirty, busy }`, or `{ repo: null }`. |
 | POST | `/api/settings/self/restart-main` | **Restart main** — stash if dirty, check out the default branch, `pull --ff-only`, then restart detached. Takes the repo working-tree lock; `409` when it's held. |
-| GET  | `/api/repos/:name/issues[?refresh=1]` | List open issues (cached 5 min) merged with local status; includes `activeWorkIssues` (repo lock). Also auto-discovers and persists PRs referencing these issues (one whole-repo `gh pr list`, cached 5 min, `?refresh=1` bypasses it too). |
+| GET  | `/api/repos/:name/issues[?refresh=1]` | List open issues merged with local status; includes `activeWorkIssues` (repo lock) and cache telemetry (`serverAt`, `ttlMs`, `nextSyncAt`) for the freshness pill. Served from the L2 cache (15 min TTL, persisted to `data/gh-cache.json`); `?refresh=1` forces a live `gh` read and rewrites it. Also auto-discovers and persists PRs referencing these issues (one whole-repo `gh pr list`, same cache). |
 | GET  | `/api/repos/:name/issues/:n/record` | Full stored record (work + per-PR deploy/merge, transcripts, `live` flags). |
 | GET  | `/api/repos/:name/issues/:n/prs` | Force-refresh the PR list for one issue from GitHub — always live, bypasses the whole-repo PR cache. |
 | POST | `/api/repos/:name/issues/:n/work` | **Create PR** — SSE stream. Body: `{ "mode": "allow-all" }`. |
@@ -554,9 +611,11 @@ cloud-copilot/
 ├── server.js           # Express app: repos/issues/work/deploy/merge routes + state machine
 ├── lib/
 │   ├── gh.js           # enumerate repos, list issues/PRs/single-PR via `gh` (cached)
+│   ├── ghCache.js      # L2 cache for gh results, persisted to data/gh-cache.json
 │   ├── store.js        # per-issue status persisted to data/state.json
 │   ├── jobs.js         # durable job manager: child outlives the browser connection
 │   ├── runner.js       # spawn copilot, stream SSE, capture transcript + session id
+│   ├── mergeRunner.js  # gh pr merge + verify, with automatic Copilot conflict recovery
 │   └── repoConfig.js   # loads a repo's .cloud-copilot.json (or auto-detects iOS)
 ├── public/
 │   ├── index.html      # repos → issues → Create PR / Deploy / Merge pipeline console

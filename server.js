@@ -28,6 +28,7 @@ const repoConfig = require('./lib/repoConfig');
 const { runCopilotSSE, writeSseHead } = require('./lib/runner');
 const jobs = require('./lib/jobs');
 const { UPLOADS_DIR, saveUploadedImages, cleanupOldUploads } = require('./lib/attachments');
+const { cleanupAfterMerge } = require('./lib/mergeCleanup');
 
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 8787);
@@ -1264,6 +1265,27 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
         m.recoveryMessage = recoveryMessage;
         m.finishedAt = new Date().toISOString();
       });
+      let cleanup = null;
+      if (success) {
+        // GitHub only auto-closes the issue when the PR body carries `Closes #N`
+        // and targets the default branch, and it never closes the other PRs
+        // opened for the same issue — do both ourselves. Best-effort: a cleanup
+        // failure must not flip an already successful merge to 'failed'.
+        try {
+          const record = store.getRecord(repo.name, n);
+          cleanup = await cleanupAfterMerge({
+            ownerRepo: repo.ownerRepo,
+            issueNumber: n,
+            mergedPrNumber: prNumber,
+            prNumbers: Object.keys(record.prs || {}).map(Number),
+          });
+        } catch (error) {
+          cleanup = { errors: [error.message], message: `Post-merge cleanup failed: ${error.message}` };
+        }
+        store.updateMerge(repo.name, n, prNumber, (m) => {
+          m.cleanup = cleanup;
+        });
+      }
       if (success && baseRefName) {
         // Best-effort: bring the local clone back to the base branch, like the
         // manual `git checkout main && git pull` done after a manual merge.
@@ -1285,6 +1307,8 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
         recoveryAttempted,
         conflictResolved,
         recoveryMessage,
+        cleanup,
+        cleanupMessage: (cleanup && cleanup.message) || null,
       };
     },
   });

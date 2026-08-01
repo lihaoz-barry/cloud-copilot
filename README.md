@@ -19,7 +19,9 @@ your LAN/VPN. From your phone you can:
 - **Merge** (`gh pr merge --merge --delete-branch`) unlocks once Deploy succeeds;
   you can still force it early behind a confirm if you're confident. If the
   command fails, cloud-copilot automatically starts a repo-scoped Copilot session
-  to investigate, resolve branch conflicts, push, retry, and verify the merge
+  to investigate, resolve branch conflicts, push, retry, and verify the merge.
+  Once the merge lands, cloud-copilot **closes the issue and every other still-open
+  PR for that issue** (with a "superseded by #N" comment + branch deletion)
 - **click a PR** to open its own **detail page** (`#/pr/<repo>/<issue>/<pr>`,
   bookmarkable/shareable) — same pipeline, plus a **Deploy History** list (every
   build number/version/status the PR has ever shipped, not just the latest) and
@@ -82,6 +84,13 @@ running, green = done, red = failed.
   failure, resolves and pushes conflicts against the PR's actual base branch,
   retries the merge, and verifies GitHub reports `MERGED`. The Merge cell says
   `Merged · conflict resolved` when that recovery resolved a reported conflict.
+- **A successful merge cleans up after itself** — GitHub only auto-closes an issue
+  when the PR body has `Closes #N` *and* targets the default branch, and it never
+  touches sibling PRs. So after the PR reaches `MERGED`, cloud-copilot closes the
+  issue (comment: `Closed by #N (merged via cloud-copilot).`) and closes every other
+  still-open PR of that issue with `Superseded by #N…` + `--delete-branch`. Already
+  merged/closed PRs are skipped, the whole step is best-effort (it can never fail an
+  already successful merge), and `MERGE_AUTO_CLEANUP=0` turns it off.
 - Success/failure is decided by the CLI/command **exit code** plus detection: a PR
   URL in the transcript (fallback: `gh pr list` referencing the issue) for Create
   PR; a fastlane/TestFlight success marker for an `ios-testflight` Deploy (plain
@@ -302,7 +311,7 @@ behaviour:
 | POST | `/api/repos/:name/issues/:n/work/cancel` | Abort the running PR creation. |
 | POST | `/api/repos/:name/issues/:n/deploy/:pr` | **Deploy a specific PR** — SSE stream. Dispatched per the repo's `.cloud-copilot.json`. |
 | POST | `/api/repos/:name/issues/:n/deploy/:pr/cancel` | Abort the running deploy for that PR. |
-| POST | `/api/repos/:name/issues/:n/merge/:pr` | **Merge a specific PR** — SSE stream. Body: `{ "force": false }`. Blocked unless Deploy succeeded, unless `force: true`. A failed `gh pr merge` automatically starts Copilot to investigate, resolve conflicts, retry, and verify the merge. |
+| POST | `/api/repos/:name/issues/:n/merge/:pr` | **Merge a specific PR** — SSE stream. Body: `{ "force": false }`. Blocked unless Deploy succeeded, unless `force: true`. A failed `gh pr merge` automatically starts Copilot to investigate, resolve conflicts, retry, and verify the merge. On success the issue and the issue's other open PRs are closed automatically (`MERGE_AUTO_CLEANUP=0` disables it). |
 | POST | `/api/repos/:name/issues/:n/merge/:pr/cancel` | Abort the running merge for that PR. |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat` | **Chat with a PR** — SSE stream. Body: `{ "message": "...", "mode": "plan"\|"apply", "model": "..." }`. `plan` is read-only (default approval flags); `apply` implements + pushes to the existing branch and resets Deploy/Merge on success. The optional `model` overrides the global setting for that turn only (unknown values fall back to it). |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat/cancel` | Abort the running chat turn for that PR. |
@@ -491,6 +500,7 @@ Other optional env vars:
 | `GH_BIN`     | `gh`           | Path/name of the GitHub CLI              |
 | `PORT`       | `8787`         | Port to listen on                        |
 | `HOST`       | `0.0.0.0`      | Bind address (`127.0.0.1` for local-only)|
+| `MERGE_AUTO_CLEANUP` | `1`    | `0` disables closing the issue + superseded PRs after a merge |
 
 ---
 
@@ -557,6 +567,8 @@ cloud-copilot/
 │   ├── store.js        # per-issue status persisted to data/state.json
 │   ├── jobs.js         # durable job manager: child outlives the browser connection
 │   ├── runner.js       # spawn copilot, stream SSE, capture transcript + session id
+│   ├── mergeRunner.js  # gh pr merge + Copilot recovery, verifies the PR is MERGED
+│   ├── mergeCleanup.js # after a merge: close the issue + superseded sibling PRs
 │   └── repoConfig.js   # loads a repo's .cloud-copilot.json (or auto-detects iOS)
 ├── public/
 │   ├── index.html      # repos → issues → Create PR / Deploy / Merge pipeline console

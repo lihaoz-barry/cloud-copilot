@@ -28,6 +28,12 @@ const repoConfig = require('./lib/repoConfig');
 const { runCopilotSSE, writeSseHead } = require('./lib/runner');
 const jobs = require('./lib/jobs');
 const { UPLOADS_DIR, saveUploadedImages, cleanupOldUploads } = require('./lib/attachments');
+const queue = require('./lib/queue');
+const queueConfig = require('./lib/queueConfig');
+const worktree = require('./lib/worktree');
+const scheduler = require('./lib/scheduler');
+const report = require('./lib/report');
+const mailer = require('./lib/mailer');
 
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 8787);
@@ -137,8 +143,18 @@ const WORKING_TREE_ACTION_RE = /^(\d+):(work|deploy|chat|merge|restart)(?::(\d+)
 const manualLocks = new Set();
 
 // Every key currently holding a working-tree lock, from both sources.
+//
+// Jobs the task queue started are EXCLUDED: they run in the repo's dedicated
+// worktree (`~/.cloud-copilot/worktrees/<repo>`), not in the checkout this lock
+// protects, so they must not block a Deploy/Chat/Merge you kick off by hand.
+// That exclusion is the whole point of the worktree split — without it, an
+// unattended 20-minute Create PR would still lock you out of your own repo.
 function heldWorkingTreeKeys() {
-  return [...jobs.runningKeys(), ...manualLocks];
+  const mainTreeJobs = jobs.runningKeys().filter((k) => {
+    const job = jobs.getJob(k);
+    return !(job && job.meta && job.meta.worktree);
+  });
+  return [...mainTreeJobs, ...manualLocks];
 }
 
 // First OTHER running job (excluding `excludeKey`) that touches this repo's
@@ -761,38 +777,39 @@ app.post('/api/repos/:name/preissues/:id/create-issue', async (req, res) => {
 // Action: Create PR (implement the issue end-to-end and open a PR)
 // ---------------------------------------------------------------------------
 
-app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
-  const repo = resolveRepo(req.params.name);
-  if (!repo) return res.status(404).json({ error: 'repo not found' });
-  const n = Number(req.params.n);
+// Build and launch the Copilot run that implements an issue and opens a PR.
+//
+// Extracted from the route below so the task queue can start the very same run
+// unattended — same job key, same success detection, same state.json writes.
+// The only things the queue changes are WHERE it runs (`cwd`, a worktree) and
+// two extra prompt sentences pinning the branch and the test port.
+//
+// Sharing the job key is what lets you open the issue on your phone and watch
+// (or abort) a queue-started run with no extra plumbing.
+//
+// @param {object} opts
+//   mode    approval mode (default 'allow-all' — implementing needs file+git access)
+//   cwd     where to run; defaults to the repo's main checkout
+//   branch  pre-created branch in the worktree; when set the agent is told NOT
+//           to create its own
+//   port    the worktree's dedicated port, injected as PORT and named in the prompt
+function startWorkJob(repo, n, { mode = 'allow-all', cwd = null, branch = null, port = null } = {}) {
   const key = `${repo.name}#${n}:work`;
-
-  writeSseHead(res);
-
-  // Reconnect: if a job for this issue is already running, just attach to it.
-  const existing = jobs.getJob(key);
-  if (existing && existing.status === 'running') {
-    jobs.subscribe(existing, res);
-    return;
-  }
-
-  // Repo-level lock: only one working-tree action (Create PR, Deploy, Chat)
-  // may run per repo at a time, otherwise concurrent runs collide on the same
-  // checkout.
-  const busyKey = findOtherRepoBusyKey(repo.name, key);
-  if (busyKey) {
-    const msg = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`;
-    return sendSseBlocked(res, { action: 'work', status: 'blocked', message: msg });
-  }
-
-  const mode = ['default', 'granular', 'allow-all'].includes(req.body?.mode)
-    ? req.body.mode
-    : 'allow-all'; // implementing an issue needs to edit files, run git & gh
+  const inWorktree = Boolean(cwd && cwd !== repo.path);
 
   const prompt =
     `Work on GitHub issue #${n} in this repository (${repo.ownerRepo}). ` +
-    `Create a new branch, implement the change end-to-end until it is complete, ` +
+    (branch
+      ? `You are in a dedicated git worktree, already checked out on the branch \`${branch}\` — ` +
+        `do NOT create another branch, just work on this one. `
+      : `Create a new branch, `) +
+    `implement the change end-to-end until it is complete, ` +
     `commit, push, and open a pull request that closes #${n}. ` +
+    (port
+      ? `If you need to start a dev server to test your work, use port ${port} — ` +
+        `it is reserved for this worktree. Do not use the default port; another ` +
+        `instance of the app is already running on it. `
+      : '') +
     `When finished, print the pull request URL on its own line.`;
   const args = ['-p', prompt, ...approvalFlags(mode), ...modelFlags()];
 
@@ -807,8 +824,11 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
   const job = jobs.startJob(key, {
     bin: COPILOT_BIN,
     args,
-    cwd: repo.path,
-    meta: { action: 'work' },
+    cwd: cwd || repo.path,
+    env: port ? { PORT: String(port) } : undefined,
+    // `worktree: true` keeps this run out of the main-tree lock — see
+    // heldWorkingTreeKeys() above.
+    meta: { action: 'work', worktree: inWorktree, branch },
     onSession: (id) =>
       store.updateRecord(repo.name, n, (r) => {
         r.work.sessionId = id;
@@ -873,7 +893,40 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
     },
   });
 
-  jobs.subscribe(job, res);
+  return job;
+}
+
+app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const n = Number(req.params.n);
+  const key = `${repo.name}#${n}:work`;
+
+  writeSseHead(res);
+
+  // Reconnect: if a job for this issue is already running, just attach to it.
+  // This also covers a run the task queue started in a worktree — same key,
+  // same stream, so the log shows up exactly where you'd expect.
+  const existing = jobs.getJob(key);
+  if (existing && existing.status === 'running') {
+    jobs.subscribe(existing, res);
+    return;
+  }
+
+  // Repo-level lock: only one working-tree action (Create PR, Deploy, Chat)
+  // may run per repo at a time, otherwise concurrent runs collide on the same
+  // checkout.
+  const busyKey = findOtherRepoBusyKey(repo.name, key);
+  if (busyKey) {
+    const msg = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`;
+    return sendSseBlocked(res, { action: 'work', status: 'blocked', message: msg });
+  }
+
+  const mode = ['default', 'granular', 'allow-all'].includes(req.body?.mode)
+    ? req.body.mode
+    : 'allow-all'; // implementing an issue needs to edit files, run git & gh
+
+  jobs.subscribe(startWorkJob(repo, n, { mode }), res);
 });
 
 // Abort a running PR creation for an issue.
@@ -1633,6 +1686,218 @@ app.delete('/api/admin/chats/:sessionId', (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------------------------------------------------------------------------
+// Task queue — the unattended half of the app.
+//
+// Everything below drives work that runs in each repo's dedicated worktree,
+// never in the checkout the routes above operate on. Reads are plain JSON and
+// the panel polls them; the live LOG of a queued run is not here — it streams
+// from the existing job SSE under the same `<repo>#<n>:work` key.
+// ---------------------------------------------------------------------------
+
+// Decorate raw queue rows with what the panel needs but the queue doesn't store.
+function decorateTask(t) {
+  const job = t.jobKey ? jobs.getJob(t.jobKey) : null;
+  return {
+    ...t,
+    live: Boolean(job && job.status === 'running'),
+    elapsedMs: t.startedAt ? Date.now() - new Date(t.startedAt).getTime() : null,
+  };
+}
+
+app.get('/api/queue', (req, res) => {
+  const cfg = queueConfig.get();
+  const repos = gh
+    .listRepos(REPOS_ROOT)
+    .filter((r) => r.github)
+    .map((r) => {
+      const s = queueConfig.repoSettings(r.name);
+      const c = queue.get().counters[r.name] || {};
+      return {
+        name: r.name,
+        ownerRepo: r.ownerRepo,
+        enabled: s.enabled,
+        paused: s.paused,
+        labels: s.labels,
+        port: worktree.settingsFor(r.path).port,
+        worktreeExists: worktree.exists(r.name),
+        lastScanAt: c.lastScanAt || null,
+        totalDone: c.totalDone || 0,
+        totalFailed: c.totalFailed || 0,
+        tasks: queue.tasksForRepo(r.name).map(decorateTask),
+      };
+    });
+
+  res.json({
+    enabled: cfg.enabled,
+    summary: queue.summary(),
+    repos,
+    lastSyncScanDate: queue.get().lastSyncScanDate,
+    lastReportDate: queue.get().lastReportDate,
+  });
+});
+
+// Deliberately tiny: this is the one the FAB badge polls on a short interval.
+app.get('/api/queue/summary', (req, res) => {
+  res.json({ ...queue.summary(), enabled: queueConfig.get().enabled });
+});
+
+app.post('/api/queue/scan', async (req, res) => {
+  try {
+    const added = await scheduler.issueScan({ reason: 'manual' });
+    res.json({ ok: true, added });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/queue/tasks', (req, res) => {
+  const { repo: repoName, type = 'create-pr', issueNumber, branch, prNumber, title } = req.body || {};
+  const repo = resolveRepo(repoName);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  if (type === 'create-pr' && !Number.isInteger(Number(issueNumber))) {
+    return res.status(400).json({ error: 'issueNumber required for create-pr' });
+  }
+  const task = queue.enqueue(
+    {
+      repo: repo.name,
+      type,
+      issueNumber: issueNumber != null ? Number(issueNumber) : null,
+      prNumber: prNumber != null ? Number(prNumber) : null,
+      branch: branch || null,
+      title: title || (issueNumber ? `#${issueNumber}` : type),
+      jobKey: type === 'create-pr' ? `${repo.name}#${Number(issueNumber)}:work` : null,
+      source: 'manual',
+      priority: -1, // things you asked for by hand go to the front
+    },
+    { force: true },
+  );
+  res.json({ ok: true, task });
+});
+
+app.delete('/api/queue/tasks/:id', (req, res) => {
+  const task = queue.getTask(req.params.id);
+  if (!task) return res.status(404).json({ error: 'task not found' });
+  if (task.status === 'running') {
+    return res.status(409).json({ error: 'task is running — cancel it first' });
+  }
+  res.json({ ok: queue.remove(req.params.id) });
+});
+
+app.post('/api/queue/tasks/:id/top', (req, res) => {
+  res.json({ ok: queue.moveToTop(req.params.id) });
+});
+
+app.post('/api/queue/tasks/:id/cancel', (req, res) => {
+  const task = queue.getTask(req.params.id);
+  if (!task) return res.status(404).json({ error: 'task not found' });
+  // Killing the job makes the worker's `await job.finished` return; the worker
+  // then records the terminal status itself, so we don't touch the row here.
+  const cancelled = task.jobKey ? jobs.cancelJob(task.jobKey) : false;
+  if (!cancelled && task.status === 'queued') queue.finish(task.id, 'cancelled', { error: 'cancelled before it started' });
+  res.json({ ok: true, cancelled });
+});
+
+app.post('/api/queue/tasks/:id/retry', (req, res) => {
+  const task = queue.retry(req.params.id);
+  if (!task) return res.status(404).json({ error: 'task not found' });
+  res.json({ ok: true, task });
+});
+
+app.post('/api/queue/repos/:name/pause', (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const paused = Boolean(req.body?.paused);
+  queueConfig.setRepo(repo.name, { paused });
+  res.json({ ok: true, paused });
+});
+
+app.get('/api/queue/config', (req, res) => {
+  res.json(queueConfig.redacted());
+});
+
+app.put('/api/queue/config', (req, res) => {
+  try {
+    queueConfig.update(req.body || {});
+    res.json(queueConfig.redacted());
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Real labels from the repo, so the settings picker offers what actually
+// exists instead of asking you to type a name and hope.
+app.get('/api/repos/:name/labels', (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  if (!repo.ownerRepo) return res.json({ labels: [] });
+  try {
+    const out = execFileSync(
+      gh.GH_BIN,
+      ['label', 'list', '--repo', repo.ownerRepo, '--limit', '100', '--json', 'name,color'],
+      { encoding: 'utf8', timeout: 20000 },
+    );
+    res.json({ labels: JSON.parse(out) });
+  } catch (err) {
+    res.status(502).json({ error: `gh label list failed: ${err.message}` });
+  }
+});
+
+app.get('/api/queue/worktrees', (req, res) => {
+  const rows = gh
+    .listRepos(REPOS_ROOT)
+    .filter((r) => r.github)
+    .map((r) => ({
+      repo: r.name,
+      path: worktree.pathFor(r.name),
+      exists: worktree.exists(r.name),
+      branch: worktree.exists(r.name) ? worktree.currentBranch(r) : null,
+      clean: worktree.exists(r.name) ? worktree.isClean(r) : null,
+      bytes: worktree.diskUsage(r.name),
+      settings: worktree.settingsFor(r.path),
+      info: queue.worktreeInfo(r.name),
+    }));
+  res.json({ root: queueConfig.worktreeRoot(), worktrees: rows });
+});
+
+app.delete('/api/queue/worktrees/:name', (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  if (queue.runningTask(repo.name)) {
+    return res.status(409).json({ error: 'a task is running in this worktree' });
+  }
+  worktree.remove(repo);
+  res.json({ ok: true });
+});
+
+app.get('/api/reports', (req, res) => {
+  res.json({ dates: report.list() });
+});
+
+app.get('/api/reports/:date', (req, res) => {
+  const r = report.read(req.params.date);
+  if (!r) return res.status(404).json({ error: 'no report for that date' });
+  res.json(r);
+});
+
+app.post('/api/reports/run', async (req, res) => {
+  try {
+    const { report: r, mail } = await report.generateAndDeliver({ reposRoot: REPOS_ROOT });
+    res.json({ ok: true, report: r, mail });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Send a one-off email so you can prove the token works without waiting for 08:00.
+app.post('/api/queue/email/test', async (req, res) => {
+  const result = await mailer.send({
+    subject: 'cloud-copilot test email',
+    text: 'If you are reading this, the daily report will reach you too.',
+  });
+  res.json(result);
+});
+
 app.listen(PORT, HOST, () => {
   console.log(`cloud-copilot running at http://${HOST}:${PORT}`);
   console.log(`Authorized repos root: ${REPOS_ROOT}`);
@@ -1643,5 +1908,17 @@ app.listen(PORT, HOST, () => {
   const recovered = store.reconcileInterruptedAdminTurns();
   if (recovered.length) {
     console.log(`Recovered ${recovered.length} interrupted admin turn(s): ${recovered.map((r) => r.turnId).join(', ')}`);
+  }
+
+  // Start the unattended half. It reconciles any task the previous process was
+  // running when it died, prunes stale worktrees, then begins scanning.
+  // CC_DISABLE_SCHEDULER lets tests boot the server without background work.
+  if (!process.env.CC_DISABLE_SCHEDULER) {
+    scheduler.start({
+      reposRoot: REPOS_ROOT,
+      copilotBin: COPILOT_BIN,
+      startWorkJob,
+      resolveModel,
+    });
   }
 });

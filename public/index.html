@@ -135,6 +135,81 @@
     }
     .depth-scrim.show { display: block; }
 
+    /* ---- task queue: top-left FAB + left drawer ------------------------- */
+    .queue-fab {
+      position: fixed; top: 12px; left: 12px; z-index: 42; border-radius: 999px;
+      padding: 7px 12px; box-shadow: 0 6px 20px #0004; font-size: .82rem;
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    .queue-fab .qbadge {
+      min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px;
+      background: #2563eb; color: #fff; font-size: .7rem; font-weight: 700;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .queue-fab.busy { border-color: #b4880055; }
+    .queue-fab.busy .qdot { color: #eab308; animation: qpulse 1.4s ease-in-out infinite; }
+    .queue-fab .qfail { color: #ef4444; font-weight: 700; }
+    @keyframes qpulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+    @media (prefers-reduced-motion: reduce) { .queue-fab.busy .qdot { animation: none } }
+
+    /* Above the .navbar (z-index 60): on a phone the nav pill is nearly full
+       width and would otherwise sit on top of the drawer's own header. */
+    #queueScrim { z-index: 69; }
+    .queue-drawer {
+      position: fixed; top: 0; left: 0; height: 100%; width: min(360px, 92vw); z-index: 70;
+      background: Canvas; color: CanvasText; border-right: 1px solid #8884; box-shadow: 8px 0 30px #0006;
+      padding: 16px 14px; transform: translateX(-100%); transition: transform .2s ease;
+      overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
+    }
+    .queue-drawer.show { transform: translateX(0); }
+    .queue-drawer h3 { margin: 0; font-size: 1rem; }
+    .queue-head { display: flex; align-items: center; gap: 8px; }
+    .queue-head .spacer { flex: 1; }
+    .queue-tabs { display: flex; gap: 6px; }
+    .queue-tabs button { font-size: .74rem; padding: 4px 10px; border-radius: 999px; }
+    .queue-tabs button[aria-selected="true"] { background: #2563eb; color: #fff; border-color: #2563eb; }
+
+    .qrepo { border: 1px solid #8883; border-radius: 10px; padding: 8px; }
+    .qrepo-head { display: flex; align-items: center; gap: 6px; font-size: .82rem; font-weight: 600; }
+    .qrepo-head .port { color: #888; font-weight: 400; font-size: .72rem; }
+    .qrepo-head .spacer { flex: 1; }
+    .qrepo-head button { font-size: .7rem; padding: 3px 8px; }
+    .qrepo.off { opacity: .5; }
+    .qempty { color: #888; font-size: .74rem; padding: 4px 2px; }
+
+    .qtask {
+      display: flex; align-items: center; gap: 6px; padding: 6px 4px;
+      border-top: 1px solid #8882; font-size: .78rem;
+    }
+    .qtask:first-of-type { border-top: 0; }
+    .qtask .qlabel {
+      flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .qtask .qlabel.click { cursor: pointer; text-decoration: underline dotted; }
+    .qtask .qmeta { color: #888; font-size: .7rem; white-space: nowrap; }
+    .qtask .qerr { color: #ef4444; font-size: .7rem; }
+    .qtask button { font-size: .7rem; padding: 2px 6px; }
+    .qpill { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+    .qpill.queued { background: #2563eb; }
+    .qpill.running { background: #eab308; animation: qpulse 1.4s ease-in-out infinite; }
+    .qpill.success { background: #22c55e; }
+    .qpill.failed, .qpill.interrupted { background: #ef4444; }
+    .qpill.skipped, .qpill.cancelled { background: #6b7280; }
+
+    .qfoot { display: flex; align-items: center; gap: 8px; font-size: .74rem; color: #888; }
+    .qfoot .spacer { flex: 1; }
+    .qreport { font-size: .78rem; }
+    .qreport pre {
+      white-space: pre-wrap; word-break: break-word; font-size: .72rem;
+      background: #05050733; border: 1px solid #8883; border-radius: 8px; padding: 8px; margin: 6px 0 0;
+    }
+    .qlabelpick { display: flex; flex-wrap: wrap; gap: 5px; margin: 4px 0 8px; }
+    .qlabelpick label {
+      display: inline-flex; align-items: center; gap: 4px; font-size: .72rem;
+      border: 1px solid #8884; border-radius: 999px; padding: 2px 8px; cursor: pointer;
+    }
+    .qlabelpick .swatch { width: 8px; height: 8px; border-radius: 50%; }
+
     .panel {
       margin-top: 8px; border: 1px solid #8883; border-radius: 10px; padding: 10px;
       background: #0b0b0e; color: #e6e6e6; font-family: ui-monospace, Menlo, monospace;
@@ -728,6 +803,42 @@
               </div>
               <div id="restartNote" class="settings-note" hidden></div>
             </div>
+            <div class="settings-section">
+              <h4>⚡ 任务队列</h4>
+              <label class="toggle-row">
+                <input type="checkbox" id="qcEnabled">
+                <span><span class="lbl">启用调度器</span><div class="desc">关掉后所有仓库的队列都停止取新任务。</div></span>
+              </label>
+              <div class="settings-row">
+                <label class="settings-note">巡查间隔(分钟)
+                  <input type="number" id="qcScanInterval" min="1" max="1440" style="width:70px">
+                </label>
+              </div>
+              <div class="settings-row">
+                <label class="settings-note">同步时间 <input type="text" id="qcSyncAt" placeholder="03:00" style="width:64px"></label>
+                <label class="settings-note">日报时间 <input type="text" id="qcReportAt" placeholder="08:00" style="width:64px"></label>
+              </div>
+              <div id="qcRepos"></div>
+              <h4>📧 日报邮件</h4>
+              <label class="toggle-row">
+                <input type="checkbox" id="qcEmailEnabled">
+                <span><span class="lbl">发送到邮箱</span><div class="desc">通过 Resend 发送,零额外依赖。</div></span>
+              </label>
+              <div class="settings-row">
+                <input type="password" id="qcEmailToken" placeholder="Resend API token" autocomplete="off" style="flex:1">
+              </div>
+              <div class="settings-row">
+                <input type="text" id="qcEmailFrom" placeholder="from@yourdomain" style="flex:1">
+              </div>
+              <div class="settings-row">
+                <input type="text" id="qcEmailTo" placeholder="收件人" style="flex:1">
+              </div>
+              <div class="settings-row">
+                <button id="qcSave" class="ghost sm">保存</button>
+                <button id="qcTestMail" class="ghost sm">发测试邮件</button>
+              </div>
+              <div id="qcNote" class="settings-note" hidden></div>
+            </div>
             <h4>Show repositories</h4>
             <div id="filterList"></div>
             <div class="filter-actions">
@@ -810,8 +921,30 @@
 
   <button id="depthFab" class="ghost depth-fab" title="Set pipeline auto-run depth">⏩ Depth</button>
   <button id="notifyFab" class="ghost notify-fab" title="Notification settings" aria-label="Notification settings">🔔 Alerts</button>
+  <button id="queueFab" class="ghost queue-fab" title="Task queue" aria-label="Task queue">
+    <span class="qdot">⚡</span><span id="queueBadge" class="qbadge" hidden>0</span>
+  </button>
   <div id="depthScrim" class="depth-scrim"></div>
   <div id="notifyScrim" class="depth-scrim"></div>
+  <div id="queueScrim" class="depth-scrim"></div>
+  <div id="queueDrawer" class="queue-drawer" role="dialog" aria-label="Task queue">
+    <div class="queue-head">
+      <h3>⚡ 任务队列</h3>
+      <div class="spacer"></div>
+      <div class="queue-tabs">
+        <button id="qTabQueue" class="ghost sm" aria-selected="true">队列</button>
+        <button id="qTabReport" class="ghost sm" aria-selected="false">日报</button>
+      </div>
+    </div>
+    <p class="hint" id="queueHint">调度器在每个仓库专用的 worktree 里跑,不会碰你本地的 checkout。</p>
+    <div id="queueBody"></div>
+    <div id="queueReport" class="qreport" hidden></div>
+    <div class="qfoot">
+      <span id="queueTotals"></span>
+      <span class="spacer"></span>
+      <button id="queueScanBtn" class="ghost sm">立即巡查</button>
+    </div>
+  </div>
   <div id="notifyDrawer" class="settings-drawer">
     <h3>🔔 Task alerts</h3>
     <p class="hint">Get told the moment a Create PR / Deploy / Merge / chat turn finishes — even if you switched apps or locked the phone.</p>
@@ -910,6 +1043,401 @@ document.querySelectorAll('input[name="depth"]').forEach((r) => {
   r.addEventListener('change', () => { if (r.checked) setPipelineDepth(r.value); });
 });
 syncDepthRadios();
+
+// ---- task queue drawer -----------------------------------------------------
+// Polled, not streamed: the queue is a small JSON blob, and a 3s poll while the
+// drawer is open is far less machinery than another long-lived SSE connection.
+// The *log* of a queued run isn't here at all — clicking a Create PR task jumps
+// to its issue, where the existing job stream already shows it live.
+const queueFab = document.getElementById('queueFab');
+const queueDrawer = document.getElementById('queueDrawer');
+const queueScrim = document.getElementById('queueScrim');
+const queueBadge = document.getElementById('queueBadge');
+const queueBody = document.getElementById('queueBody');
+const queueReport = document.getElementById('queueReport');
+const queueTotals = document.getElementById('queueTotals');
+const queueHint = document.getElementById('queueHint');
+
+let queuePollTimer = null;
+let queueBadgeTimer = null;
+let queueTab = 'queue';
+
+const QSTATUS_TEXT = {
+  queued: '排队中', running: '运行中', success: '成功', failed: '失败',
+  interrupted: '被中断', cancelled: '已取消', skipped: '已跳过',
+};
+
+function fmtElapsed(ms) {
+  if (!ms || ms < 0) return '';
+  const m = Math.round(ms / 60000);
+  if (m < 1) return `${Math.round(ms / 1000)}s`;
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m`;
+}
+
+function fmtBytes(b) {
+  if (!b) return '';
+  const gb = b / 1e9;
+  return gb >= 1 ? `${gb.toFixed(1)}GB` : `${Math.round(b / 1e6)}MB`;
+}
+
+async function qFetch(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+  return r.json();
+}
+
+async function refreshQueueBadge() {
+  try {
+    const s = await qFetch('/api/queue/summary');
+    const pending = s.pending || 0;
+    queueBadge.hidden = pending === 0 && !s.failed;
+    queueBadge.textContent = s.failed && !pending ? '!' : String(pending);
+    queueFab.classList.toggle('busy', (s.running || 0) > 0);
+    queueFab.classList.toggle('qfail', (s.failed || 0) > 0 && !s.running);
+    queueBadge.style.background = s.failed && !pending ? '#ef4444' : '';
+  } catch {
+    /* server restarting; the next tick will catch up */
+  }
+}
+
+function renderQueue(data) {
+  queueTotals.textContent =
+    `排队 ${data.summary.queued} · 运行 ${data.summary.running} · 待处理失败 ${data.summary.failed}`;
+  queueHint.textContent = data.enabled
+    ? '调度器在每个仓库专用的 worktree 里跑,不会碰你本地的 checkout。'
+    : '⚠️ 调度器总开关已关闭 — 设置面板里可以打开。';
+
+  const parts = [];
+  for (const repo of data.repos) {
+    const tasks = repo.tasks.slice().sort((a, b) => {
+      const rank = (t) => (t.status === 'running' ? 0 : t.status === 'queued' ? 1 : 2);
+      return rank(a) - rank(b) || a.priority - b.priority ||
+        new Date(a.enqueuedAt) - new Date(b.enqueuedAt);
+    });
+    if (!tasks.length && !repo.enabled) continue; // don't clutter with idle disabled repos
+
+    const rows = tasks.map((t) => {
+      const label = escape(t.title || t.type);
+      // Only PR-bearing tasks get an in-app destination: the PR detail page
+      // carries the pipeline, the transcript and the chat. Before a PR exists
+      // there is nothing to deep-link to, so those rows link out to the issue.
+      const target = t.prNumber
+        ? `#/pr/${encodeURIComponent(repo.name)}/${t.issueNumber}/${t.prNumber}`
+        : t.issueNumber && repo.ownerRepo
+          ? `https://github.com/${repo.ownerRepo}/issues/${t.issueNumber}`
+          : null;
+      const clickable = Boolean(target);
+      const meta = t.status === 'running'
+        ? fmtElapsed(t.elapsedMs)
+        : t.durationMs ? fmtElapsed(t.durationMs) : QSTATUS_TEXT[t.status] || t.status;
+      const actions = [];
+      if (t.status === 'queued') {
+        actions.push(`<button class="ghost" data-qact="top" data-qid="${t.id}" title="置顶">↑</button>`);
+        actions.push(`<button class="ghost" data-qact="del" data-qid="${t.id}" title="移除">🗑</button>`);
+      }
+      if (t.status === 'running') {
+        actions.push(`<button class="ghost" data-qact="cancel" data-qid="${t.id}" title="中止">⨯</button>`);
+      }
+      if (t.status === 'failed' || t.status === 'interrupted') {
+        actions.push(`<button class="ghost" data-qact="retry" data-qid="${t.id}" title="重试">↻</button>`);
+      }
+      const err = t.error && t.status !== 'success'
+        ? `<div class="qerr">${escape(t.error)}</div>` : '';
+      return `<div class="qtask">
+        <span class="qpill ${t.status}"></span>
+        <span class="qlabel${clickable ? ' click' : ''}"
+              ${clickable ? `data-qgo="${escape(target)}"` : ''}
+              title="${label}">${label}${err}</span>
+        <span class="qmeta">${escape(meta)}</span>${actions.join('')}
+      </div>`;
+    });
+
+    parts.push(`<div class="qrepo${repo.enabled && !repo.paused ? '' : ' off'}">
+      <div class="qrepo-head">
+        <span>${escape(repo.name)}</span>
+        ${repo.port ? `<span class="port">:${repo.port}</span>` : ''}
+        <span class="spacer"></span>
+        <button class="ghost" data-qpause="${escape(repo.name)}" data-qpaused="${repo.paused ? '1' : '0'}">
+          ${repo.paused ? '▶ 恢复' : '⏸ 暂停'}
+        </button>
+      </div>
+      ${rows.length ? rows.join('') : '<div class="qempty">没有任务</div>'}
+    </div>`);
+  }
+
+  queueBody.innerHTML = parts.length ? parts.join('') : '<div class="qempty">队列是空的。</div>';
+}
+
+async function refreshQueuePanel() {
+  if (queueTab !== 'queue') return;
+  try {
+    renderQueue(await qFetch('/api/queue'));
+  } catch (err) {
+    queueBody.innerHTML = `<div class="qempty">读取队列失败:${escape(err.message)}</div>`;
+  }
+}
+
+async function refreshQueueReport() {
+  queueReport.innerHTML = '<div class="qempty">加载中…</div>';
+  try {
+    const { dates } = await qFetch('/api/reports');
+    if (!dates.length) {
+      queueReport.innerHTML =
+        '<div class="qempty">还没有日报。每天 08:00 自动生成,也可以点下面的按钮先生成一份。</div>' +
+        '<div class="actions" style="margin-top:8px"><button id="qRunReport" class="ghost sm">立即生成日报</button></div>';
+    } else {
+      const opts = dates.map((d) => `<option value="${d}">${d}</option>`).join('');
+      queueReport.innerHTML =
+        `<select id="qReportDate" style="width:100%">${opts}</select>` +
+        '<pre id="qReportBody">加载中…</pre>' +
+        '<div class="actions" style="margin-top:8px"><button id="qRunReport" class="ghost sm">立即生成日报</button></div>';
+      const sel = document.getElementById('qReportDate');
+      const load = async () => {
+        const r = await qFetch(`/api/reports/${sel.value}`);
+        document.getElementById('qReportBody').textContent = r.markdown || '(空)';
+      };
+      sel.addEventListener('change', load);
+      await load();
+    }
+    const runBtn = document.getElementById('qRunReport');
+    if (runBtn) {
+      runBtn.addEventListener('click', async () => {
+        runBtn.disabled = true;
+        runBtn.textContent = '生成中…';
+        try {
+          await qFetch('/api/reports/run', { method: 'POST' });
+          await refreshQueueReport();
+        } catch (err) {
+          alert(`生成失败:${err.message}`);
+          runBtn.disabled = false;
+          runBtn.textContent = '立即生成日报';
+        }
+      });
+    }
+  } catch (err) {
+    queueReport.innerHTML = `<div class="qempty">读取日报失败:${escape(err.message)}</div>`;
+  }
+}
+
+function setQueueTab(tab) {
+  queueTab = tab;
+  document.getElementById('qTabQueue').setAttribute('aria-selected', String(tab === 'queue'));
+  document.getElementById('qTabReport').setAttribute('aria-selected', String(tab === 'report'));
+  queueBody.hidden = tab !== 'queue';
+  queueReport.hidden = tab !== 'report';
+  if (tab === 'queue') refreshQueuePanel(); else refreshQueueReport();
+}
+
+function openQueueDrawer() {
+  queueDrawer.classList.add('show');
+  queueScrim.classList.add('show');
+  setQueueTab(queueTab);
+  clearInterval(queuePollTimer);
+  queuePollTimer = setInterval(refreshQueuePanel, 3000);
+}
+
+function closeQueueDrawer() {
+  queueDrawer.classList.remove('show');
+  queueScrim.classList.remove('show');
+  clearInterval(queuePollTimer);
+  queuePollTimer = null;
+}
+
+queueFab.addEventListener('click', openQueueDrawer);
+queueScrim.addEventListener('click', closeQueueDrawer);
+document.getElementById('qTabQueue').addEventListener('click', () => setQueueTab('queue'));
+document.getElementById('qTabReport').addEventListener('click', () => setQueueTab('report'));
+
+document.getElementById('queueScanBtn').addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  btn.textContent = '巡查中…';
+  try {
+    const r = await qFetch('/api/queue/scan', { method: 'POST' });
+    btn.textContent = `+${r.added}`;
+  } catch (err) {
+    btn.textContent = '失败';
+    console.warn(err);
+  }
+  setTimeout(() => { btn.disabled = false; btn.textContent = '立即巡查'; }, 1500);
+  refreshQueuePanel();
+  refreshQueueBadge();
+});
+
+queueBody.addEventListener('click', async (e) => {
+  const go = e.target.closest('[data-qgo]');
+  if (go) {
+    const target = go.dataset.qgo;
+    if (target.startsWith('#/')) {
+      // In-app: the PR page streams this run's transcript under the same job
+      // key the queue used, so there is nothing to duplicate here.
+      closeQueueDrawer();
+      location.hash = target;
+    } else {
+      window.open(target, '_blank', 'noopener');
+    }
+    return;
+  }
+
+  const pause = e.target.closest('[data-qpause]');
+  if (pause) {
+    const paused = pause.dataset.qpaused !== '1';
+    await qFetch(`/api/queue/repos/${encodeURIComponent(pause.dataset.qpause)}/pause`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ paused }),
+    }).catch((err) => alert(err.message));
+    refreshQueuePanel();
+    return;
+  }
+
+  const act = e.target.closest('[data-qact]');
+  if (!act) return;
+  const id = act.dataset.qid;
+  try {
+    if (act.dataset.qact === 'top') await qFetch(`/api/queue/tasks/${id}/top`, { method: 'POST' });
+    if (act.dataset.qact === 'del') await qFetch(`/api/queue/tasks/${id}`, { method: 'DELETE' });
+    if (act.dataset.qact === 'retry') await qFetch(`/api/queue/tasks/${id}/retry`, { method: 'POST' });
+    if (act.dataset.qact === 'cancel') {
+      if (!confirm('中止这个正在运行的任务?')) return;
+      await qFetch(`/api/queue/tasks/${id}/cancel`, { method: 'POST' });
+    }
+  } catch (err) {
+    alert(err.message);
+  }
+  refreshQueuePanel();
+  refreshQueueBadge();
+});
+
+refreshQueueBadge();
+queueBadgeTimer = setInterval(refreshQueueBadge, 15000);
+
+// ---- queue settings (inside the ⚙ Settings menu) ---------------------------
+// Labels are offered from the repo's REAL `gh label list` rather than a text
+// box, so you can't queue nothing for an hour because of a typo.
+const qcNote = document.getElementById('qcNote');
+let qcConfig = null;
+let qcRepoState = {}; // repo → { enabled, labels[] }
+const qcLabelCache = {};
+
+function qcSetNote(text, ok = true) {
+  qcNote.hidden = !text;
+  qcNote.textContent = text || '';
+  qcNote.style.color = ok ? '' : '#ef4444';
+}
+
+async function qcLabelsFor(repo) {
+  if (qcLabelCache[repo]) return qcLabelCache[repo];
+  try {
+    const { labels } = await qFetch(`/api/repos/${encodeURIComponent(repo)}/labels`);
+    qcLabelCache[repo] = labels;
+    return labels;
+  } catch {
+    qcLabelCache[repo] = [];
+    return [];
+  }
+}
+
+async function renderQueueSettings() {
+  const host = document.getElementById('qcRepos');
+  if (!host) return;
+  let data;
+  try {
+    [qcConfig, data] = await Promise.all([qFetch('/api/queue/config'), qFetch('/api/queue')]);
+  } catch (err) {
+    host.innerHTML = `<div class="settings-note">读取队列配置失败:${escape(err.message)}</div>`;
+    return;
+  }
+
+  document.getElementById('qcEnabled').checked = Boolean(qcConfig.enabled);
+  document.getElementById('qcScanInterval').value = qcConfig.scanIntervalMinutes;
+  document.getElementById('qcSyncAt').value = qcConfig.syncAt;
+  document.getElementById('qcReportAt').value = qcConfig.reportAt;
+  document.getElementById('qcEmailEnabled').checked = Boolean(qcConfig.email.enabled);
+  document.getElementById('qcEmailFrom').value = qcConfig.email.from || '';
+  document.getElementById('qcEmailTo').value = qcConfig.email.to || '';
+  const tokenInput = document.getElementById('qcEmailToken');
+  tokenInput.value = '';
+  tokenInput.placeholder = qcConfig.email.hasToken ? '已保存(留空即不改动)' : 'Resend API token';
+
+  qcRepoState = {};
+  const blocks = [];
+  for (const repo of data.repos) {
+    qcRepoState[repo.name] = { enabled: repo.enabled, labels: [...repo.labels] };
+    const labels = await qcLabelsFor(repo.name);
+    const chips = (labels.length ? labels : repo.labels.map((n) => ({ name: n, color: '888888' })))
+      .map((l) => {
+        const on = repo.labels.includes(l.name);
+        return `<label>
+          <input type="checkbox" data-qclabel="${escape(repo.name)}" value="${escape(l.name)}" ${on ? 'checked' : ''}>
+          <span class="swatch" style="background:#${escape(l.color || '888888')}"></span>${escape(l.name)}
+        </label>`;
+      })
+      .join('');
+    blocks.push(`<div class="settings-note" style="margin-top:8px">
+      <label style="display:flex;align-items:center;gap:6px">
+        <input type="checkbox" data-qcrepo="${escape(repo.name)}" ${repo.enabled ? 'checked' : ''}>
+        <strong>${escape(repo.name)}</strong>
+      </label>
+      <div class="qlabelpick">${chips || '<span class="qempty">这个仓库还没有 label</span>'}</div>
+    </div>`);
+  }
+  host.innerHTML = blocks.join('');
+}
+
+document.addEventListener('change', (e) => {
+  const repoCb = e.target.closest('[data-qcrepo]');
+  if (repoCb) qcRepoState[repoCb.dataset.qcrepo].enabled = repoCb.checked;
+  const labelCb = e.target.closest('[data-qclabel]');
+  if (labelCb) {
+    const st = qcRepoState[labelCb.dataset.qclabel];
+    const set = new Set(st.labels);
+    if (labelCb.checked) set.add(labelCb.value);
+    else set.delete(labelCb.value);
+    st.labels = [...set];
+  }
+});
+
+document.getElementById('qcSave')?.addEventListener('click', async () => {
+  const repos = {};
+  for (const [name, st] of Object.entries(qcRepoState)) {
+    repos[name] = { enabled: st.enabled, labels: st.labels };
+  }
+  try {
+    await qFetch('/api/queue/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        enabled: document.getElementById('qcEnabled').checked,
+        scanIntervalMinutes: Number(document.getElementById('qcScanInterval').value) || 30,
+        syncAt: document.getElementById('qcSyncAt').value.trim() || '03:00',
+        reportAt: document.getElementById('qcReportAt').value.trim() || '08:00',
+        email: {
+          enabled: document.getElementById('qcEmailEnabled').checked,
+          provider: 'resend',
+          token: document.getElementById('qcEmailToken').value, // empty = keep stored
+          from: document.getElementById('qcEmailFrom').value.trim(),
+          to: document.getElementById('qcEmailTo').value.trim(),
+        },
+        repos,
+      }),
+    });
+    qcSetNote('已保存');
+    refreshQueueBadge();
+  } catch (err) {
+    qcSetNote(`保存失败:${err.message}`, false);
+  }
+});
+
+document.getElementById('qcTestMail')?.addEventListener('click', async () => {
+  qcSetNote('发送中…');
+  try {
+    const r = await qFetch('/api/queue/email/test', { method: 'POST' });
+    qcSetNote(r.ok ? '测试邮件已发出' : `未发送:${r.skipped || r.error}`, Boolean(r.ok));
+  } catch (err) {
+    qcSetNote(`发送失败:${err.message}`, false);
+  }
+});
 
 // ---- notification settings drawer -----------------------------------------
 // All the platform detection lives in /notify.js (CCNotify); this is just the
@@ -1072,6 +1600,9 @@ function openSettings() {
   filterBtn.setAttribute('aria-expanded', 'true');
   clampSettingsMenu();
   loadSelfInfo();
+  // Labels come from `gh` and repo state from the queue; both are cheap and
+  // both go stale, so refresh them each time the panel opens rather than once.
+  renderQueueSettings();
 }
 function closeSettings({ focusTrigger = false } = {}) {
   if (!settingsOpen()) return;

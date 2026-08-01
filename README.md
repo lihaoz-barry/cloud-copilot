@@ -104,9 +104,14 @@ every workflow bar starts at the same x whichever icons a line has.
 - **Each PR line carries its branch and tip commit** — `⎇ branch`, the short SHA,
   how long ago it landed, and the commit subject — so you can tell at a glance
   what code a given Deploy actually shipped. The SHA links straight to that
-  commit on GitHub. The repo header does the same for the **local checkout**, so
-  you can see what this machine would deploy right now. (On phones the branch is
-  dropped in favour of the commit subject, which says more in less space.)
+  commit on GitHub. (On phones the branch is dropped in favour of the commit
+  subject, which says more in less space.)
+- **The repo header does the same for the local checkout**, plus the issue that
+  branch belongs to: `feat-x · #45 主页扁平化… · d9132eb 2m …`. The issue is
+  resolved client-side by matching the branch against each PR's `headRefName`,
+  so it costs no extra API call. An **unpushed** commit has no page on GitHub —
+  linking to it would just 404 — so it renders as a plain chip with an
+  `unpushed` badge instead of a dead link.
 - **Abort**: while running, Create PR / Deploy / Merge each show a red `⨯` button.
   Confirming signals the whole process group (copilot + fastlane/xcodebuild/gh), so
   subprocesses die too; the run ends in an `aborted` state you can re-run.

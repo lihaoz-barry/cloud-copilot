@@ -221,6 +221,9 @@ app.get('/api/repos', (req, res) => {
   const repos = gh.listRepos(REPOS_ROOT).map((r) => ({
     name: r.name,
     branch: r.branch,
+    // Tip commit of the local checkout, so the repo header can say which code
+    // this machine would actually deploy right now.
+    headCommit: r.headCommit,
     ownerRepo: r.ownerRepo,
     github: r.github,
   }));
@@ -466,6 +469,47 @@ app.get('/api/testflight/builds', (req, res) => {
   res.json({ builds });
 });
 
+/**
+ * Pull a repo's issues + PRs (through the L2 cache unless `force`) and fold the
+ * discovered PRs into the store. Shared by the issues endpoint and the hourly
+ * background refresher so both keep the store in exactly the same shape.
+ */
+async function syncRepoFromGitHub(repo, { force = false } = {}) {
+  const { issues, cached, at } = await gh.listIssues(repo.ownerRepo, { force });
+  const dismissed = store.getDismissedNumbers(repo.name);
+  const visible = issues.filter((i) => !dismissed.has(i.number));
+
+  // Auto-discover PRs referencing any of these issues — one `gh pr list`
+  // call for the whole repo, matched in-process — so the pipeline is
+  // populated on every expand without needing the manual "↻ PRs" click.
+  const { prs: allPrs } = await gh.listAllPrs(repo.ownerRepo, { force });
+  // Best-effort branch + tip-commit annotations; an empty map just means the
+  // rows render without them.
+  const headCommits = await gh.listPrHeadCommits(repo.ownerRepo, { force });
+  for (const issue of visible) {
+    const matched = gh.matchPrsForIssue(allPrs, issue.number);
+    for (const p of matched) {
+      const head = headCommits[String(p.number)] || null;
+      store.upsertPr(repo.name, issue.number, {
+        prNumber: p.number,
+        prUrl: p.url,
+        title: p.title,
+        createdAt: p.createdAt,
+        source: 'gh',
+        headRefName: p.headRefName || (head && head.headRefName) || null,
+        headCommit: head
+          ? { sha: head.sha, abbrev: head.abbrev, committedDate: head.committedDate, headline: head.headline, url: head.url }
+          : undefined,
+      });
+    }
+    // Drop previously auto-discovered PRs that no longer match (e.g. the
+    // match heuristic got stricter, or a PR body was edited) — never
+    // touches PRs cloud-copilot itself created for this issue.
+    store.pruneStaleGhPrs(repo.name, issue.number, matched.map((p) => p.number));
+  }
+  return { visible, cached, at };
+}
+
 app.get('/api/repos/:name/issues', async (req, res) => {
   const repo = resolveRepo(req.params.name);
   if (!repo) return res.status(404).json({ error: 'repo not found under REPOS_ROOT' });
@@ -473,30 +517,7 @@ app.get('/api/repos/:name/issues', async (req, res) => {
 
   try {
     const force = req.query.refresh === '1' || req.query.refresh === 'true';
-    const { issues, cached, at } = await gh.listIssues(repo.ownerRepo, { force });
-    const dismissed = store.getDismissedNumbers(repo.name);
-    const visible = issues.filter((i) => !dismissed.has(i.number));
-
-    // Auto-discover PRs referencing any of these issues — one `gh pr list`
-    // call for the whole repo, matched in-process — so the pipeline is
-    // populated on every expand without needing the manual "↻ PRs" click.
-    const { prs: allPrs } = await gh.listAllPrs(repo.ownerRepo, { force });
-    for (const issue of visible) {
-      const matched = gh.matchPrsForIssue(allPrs, issue.number);
-      for (const p of matched) {
-        store.upsertPr(repo.name, issue.number, {
-          prNumber: p.number,
-          prUrl: p.url,
-          title: p.title,
-          createdAt: p.createdAt,
-          source: 'gh',
-        });
-      }
-      // Drop previously auto-discovered PRs that no longer match (e.g. the
-      // match heuristic got stricter, or a PR body was edited) — never
-      // touches PRs cloud-copilot itself created for this issue.
-      store.pruneStaleGhPrs(repo.name, issue.number, matched.map((p) => p.number));
-    }
+    const { visible, cached, at } = await syncRepoFromGitHub(repo, { force });
 
     const numbers = visible.map((i) => i.number);
     const statuses = store.getStatuses(repo.name, numbers);
@@ -514,7 +535,20 @@ app.get('/api/repos/:name/issues', async (req, res) => {
     // existing `activeWorkIssues[0]` client contract.
     const busyIssue = repoBusyIssueNumber(repo.name);
     const activeWorkIssues = busyIssue != null ? [busyIssue] : [];
-    res.json({ repo: repo.name, ownerRepo: repo.ownerRepo, cached, at, issues: merged, activeWorkIssues });
+    res.json({
+      repo: repo.name,
+      ownerRepo: repo.ownerRepo,
+      cached,
+      at,
+      // Cache telemetry the client's sync pill renders from: when this repo's
+      // L2 entry was last filled, how long entries stay fresh, and when the
+      // hourly background refresh will next touch it.
+      serverAt: gh.cache.syncedAt(repo.ownerRepo) ?? at,
+      ttlMs: gh.CACHE_TTL_MS,
+      nextSyncAt: nextBackgroundSyncAt(),
+      issues: merged,
+      activeWorkIssues,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message, stderr: (err.stderr || '').toString() });
   }
@@ -557,13 +591,19 @@ app.get('/api/repos/:name/issues/:n/prs', async (req, res) => {
     // Manual refresh always bypasses the whole-repo PR cache — unlike the
     // automatic discovery on repo expand, this is an explicit "check again now".
     const prs = await gh.findPrsForIssue(repo.ownerRepo, n, { force: true });
+    const headCommits = await gh.listPrHeadCommits(repo.ownerRepo, { force: true });
     for (const p of prs) {
+      const head = headCommits[String(p.number)] || null;
       store.upsertPr(repo.name, n, {
         prNumber: p.number,
         prUrl: p.url,
         title: p.title,
         createdAt: p.createdAt,
         source: 'gh',
+        headRefName: p.headRefName || (head && head.headRefName) || null,
+        headCommit: head
+          ? { sha: head.sha, abbrev: head.abbrev, committedDate: head.committedDate, headline: head.headline, url: head.url }
+          : undefined,
       });
     }
     const record = store.getRecord(repo.name, n);
@@ -1633,10 +1673,70 @@ app.delete('/api/admin/chats/:sessionId', (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------------------------------------------------------------------------
+// Hourly background sync — keeps the L2 cache warm so the dashboard is never
+// showing data older than an hour, even if nobody opened the page.
+// ---------------------------------------------------------------------------
+
+const BG_SYNC_INTERVAL_MS = Number(process.env.GH_SYNC_INTERVAL_MS || 60 * 60 * 1000);
+// Delay the first pass so a restart doesn't fire N `gh` calls while the user is
+// still loading the page they just restarted for.
+const BG_SYNC_FIRST_DELAY_MS = Number(process.env.GH_SYNC_FIRST_DELAY_MS || 60 * 1000);
+
+let nextBackgroundSync = Date.now() + BG_SYNC_FIRST_DELAY_MS;
+function nextBackgroundSyncAt() {
+  return nextBackgroundSync;
+}
+
+// Repos are synced one at a time, not in parallel: four concurrent `gh`
+// processes on a laptop is a lot of noise for a background job nobody is
+// waiting on. A repo with a running job is skipped and picked up next hour.
+async function runBackgroundSync() {
+  let repos;
+  try {
+    repos = gh.listRepos(REPOS_ROOT).filter((r) => r.github);
+  } catch (err) {
+    console.warn(`[gh-sync] could not enumerate repos: ${err.message}`);
+    return;
+  }
+  let synced = 0;
+  let skipped = 0;
+  for (const repo of repos) {
+    if (findOtherRepoBusyKey(repo.name, null)) {
+      skipped += 1;
+      continue;
+    }
+    try {
+      await syncRepoFromGitHub(repo, { force: true });
+      synced += 1;
+    } catch (err) {
+      // Leave the previous (stale) cache entry in place — stale data beats no
+      // data, and the next pass will try again.
+      console.warn(`[gh-sync] ${repo.name}: ${err.message}`);
+    }
+  }
+  console.log(`[gh-sync] refreshed ${synced}/${repos.length} repo(s)${skipped ? `, skipped ${skipped} busy` : ''}`);
+}
+
+function scheduleBackgroundSync(delayMs) {
+  nextBackgroundSync = Date.now() + delayMs;
+  setTimeout(async () => {
+    await runBackgroundSync();
+    scheduleBackgroundSync(BG_SYNC_INTERVAL_MS);
+  }, delayMs).unref();
+}
+
 app.listen(PORT, HOST, () => {
   console.log(`cloud-copilot running at http://${HOST}:${PORT}`);
   console.log(`Authorized repos root: ${REPOS_ROOT}`);
   console.log(`Copilot binary: ${COPILOT_BIN}`);
+  const cacheInfo = gh.cache.load();
+  console.log(
+    cacheInfo.restored
+      ? `GitHub cache: restored ${cacheInfo.repos} repo(s) from ${gh.cache.CACHE_FILE}`
+      : 'GitHub cache: starting cold',
+  );
+  scheduleBackgroundSync(BG_SYNC_FIRST_DELAY_MS);
   // Recover any admin turn that was still in-flight when the previous
   // process died (e.g. a chat turn triggered its own restart mid-reply) so
   // it shows up as an "interrupted" turn instead of silently vanishing.

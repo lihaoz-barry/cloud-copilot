@@ -178,10 +178,26 @@
       display: inline-flex; align-items: baseline; gap: 5px; max-width: 46ch;
       color: inherit; text-decoration: none; border-radius: 5px; padding: 0 3px; vertical-align: bottom;
     }
-    a.repo-commit::before { content: '·'; opacity: .5; margin-right: 4px; }
+    .repo-commit::before { content: '·'; opacity: .5; margin-right: 4px; }
     a.repo-commit:hover { background: #8882; }
     a.repo-commit:hover .wfsha { text-decoration: underline; }
-    a.repo-commit .wfheadline { display: inline-block; max-width: 28ch; }
+    .repo-commit .wfheadline { display: inline-block; max-width: 28ch; }
+    /* A commit that exists only on this machine: no GitHub page to link to. */
+    .repo-commit.is-local { cursor: help; }
+    .repo-commit.is-local .wfsha { color: inherit; opacity: .7; }
+    .unpushed {
+      flex: none; font-size: .62rem; font-weight: 700; letter-spacing: .02em;
+      padding: 0 5px; border-radius: 999px; background: #eab30833; color: #a16207;
+      text-transform: uppercase;
+    }
+    /* Which issue the checked-out branch belongs to. */
+    .repo-issue-link {
+      color: inherit; text-decoration: none; border-radius: 5px; padding: 0 4px;
+      display: inline-block; max-width: 34ch; overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; vertical-align: bottom; opacity: .95;
+    }
+    .repo-issue-link::before { content: '·'; opacity: .5; margin-right: 5px; }
+    .repo-issue-link:hover { background: #2563eb22; color: #1d4ed8; }
     .pritem .chevtools { display: none; }
     .pritem.tools-open .chevtools { display: flex; }
     .chevbar { display: flex; flex: 1; min-width: 0; }
@@ -1480,23 +1496,35 @@ function renderRepo(repo) {
   el.className = 'repo';
   el.dataset.repo = repo.name;
   // Tip commit of the local checkout — what this machine would deploy right
-  // now. The link opens that exact commit on GitHub.
+  // now. An UNPUSHED commit has no page on GitHub (linking to it just 404s),
+  // so it renders as a plain chip carrying an "unpushed" marker instead.
+  // The separator lives inside the chip (via CSS ::before) so hiding it on
+  // narrow screens doesn't strand a dangling "·".
   const c = repo.headCommit;
-  const commitUrl = c && repo.ownerRepo ? `https://github.com/${repo.ownerRepo}/commit/${c.sha}` : null;
-  // The separator lives inside the anchor (via CSS ::before) so hiding the
-  // chip on narrow screens doesn't strand a dangling "·".
-  const headBit = c
-    ? `<a class="repo-commit" href="${escape(commitUrl || '#')}" target="_blank" rel="noopener"` +
-      ` title="${escape(`${c.sha}\n${c.committedDate ? new Date(c.committedDate).toLocaleString() : ''}\n${c.headline || ''}`)}">` +
-      `<span class="wfsha">${escape(c.abbrev || '')}</span>` +
-      `<span class="wfwhen">${escape(fmtAgo(c.committedDate ? Date.now() - new Date(c.committedDate).getTime() : null))}</span>` +
-      `<span class="wfheadline">${escape(c.headline || '')}</span></a>`
+  const when = c && c.committedDate ? fmtAgo(Date.now() - new Date(c.committedDate).getTime()) : '';
+  const commitTitle = c
+    ? `${c.sha}\n${c.committedDate ? new Date(c.committedDate).toLocaleString() : ''}\n${c.headline || ''}` +
+      (c.pushed ? '' : '\n\nNot pushed yet — GitHub has no page for this commit.')
     : '';
+  const commitInner = c
+    ? `<span class="wfsha">${escape(c.abbrev || '')}</span>` +
+      (c.pushed ? '' : '<span class="unpushed">unpushed</span>') +
+      `<span class="wfwhen">${escape(when)}</span>` +
+      `<span class="wfheadline">${escape(c.headline || '')}</span>`
+    : '';
+  let headBit = '';
+  if (c && c.pushed && repo.ownerRepo) {
+    headBit =
+      `<a class="repo-commit" href="https://github.com/${escape(repo.ownerRepo)}/commit/${escape(c.sha)}"` +
+      ` target="_blank" rel="noopener" title="${escape(commitTitle)}">${commitInner}</a>`;
+  } else if (c) {
+    headBit = `<span class="repo-commit is-local" title="${escape(commitTitle)}">${commitInner}</span>`;
+  }
   el.innerHTML = `
     <div class="repo-head">
       <span class="caret">▶</span>
       <span class="repo-name">${escape(repo.name)}</span>
-      <span class="repo-meta">${repo.ownerRepo ? escape(repo.ownerRepo) : 'no github remote'} · <span class="repo-branch">${escape(repo.branch || '')}</span>${headBit}</span>
+      <span class="repo-meta">${repo.ownerRepo ? escape(repo.ownerRepo) : 'no github remote'} · <span class="repo-branch">${escape(repo.branch || '')}</span><span class="repo-issue"></span>${headBit}</span>
     </div>
     <div class="repo-body"><div class="muted" style="padding:8px 4px">Click to load issues…</div></div>`;
   const head = el.querySelector('.repo-head');
@@ -1608,6 +1636,39 @@ function renderIssueList(repo, body, data, localAt) {
   for (const issue of data.issues) body.appendChild(renderIssue(repo, issue, repoCtx));
   repoCtx.update();
   mountedRepos.set(repo.name, { repo, body, repoCtx });
+  paintRepoIssueLink(repo, data);
+}
+
+/**
+ * Name the issue the checked-out branch belongs to, right beside the branch in
+ * the repo header — so "which ticket is this working tree on?" is answerable
+ * without opening anything. Resolved purely from data already on screen: each
+ * issue's PRs now carry `headRefName`, so the branch matches at most one.
+ */
+function paintRepoIssueLink(repo, data) {
+  const el = document.querySelector(`.repo[data-repo="${cssEsc(repo.name)}"] .repo-issue`);
+  if (!el) return;
+  el.textContent = '';
+  el.removeAttribute('title');
+  if (!repo.branch) return;
+  let match = null;
+  for (const issue of data.issues || []) {
+    const prs = (issue.status && issue.status.prs) || [];
+    const pr = prs.find((p) => p.headRefName && p.headRefName === repo.branch);
+    if (pr) { match = { issue, pr }; break; }
+  }
+  if (!match) return;
+  const a = document.createElement('a');
+  a.className = 'repo-issue-link';
+  a.href = `#/pr/${enc(repo.name)}/${match.issue.number}/${match.pr.prNumber}`;
+  a.textContent = `#${match.issue.number} ${match.issue.title}`;
+  a.title = `This branch is PR #${match.pr.prNumber} for issue #${match.issue.number}: ${match.issue.title}`;
+  el.appendChild(a);
+}
+
+// Escape a value for use inside a CSS attribute selector.
+function cssEsc(s) {
+  return window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/["\\]/g, '\\$&');
 }
 
 // Two-segment freshness readout: when the server last talked to GitHub, and

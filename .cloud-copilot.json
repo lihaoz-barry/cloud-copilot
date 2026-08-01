@@ -2,5 +2,11 @@
   "deploy": {
     "type": "shell",
     "command": "npm run cc:restart"
+  },
+  "worktree": {
+    "bootstrap": "npm install",
+    "refresh": "npm install",
+    "port": 9101,
+    "copyFiles": []
   }
 }

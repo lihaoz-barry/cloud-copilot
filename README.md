@@ -40,6 +40,11 @@ your LAN/VPN. From your phone you can:
   while one is in progress, to avoid working-tree collisions
 - a **⚙ Settings** panel (mode / model / repo filter) that fits a phone, plus a
   **Restart main** button that checks out `main`, pulls, and restarts cloud-copilot
+- an **unattended ⚡ task queue** (top-left icon): label an issue `committed` and
+  cloud-copilot opens the PR on its own, in a **dedicated git worktree** that never
+  touches the checkout you work in — plus a nightly sweep that brings every open
+  PR branch up to date with `main`, and a daily report. See
+  [Task queue](#-task-queue-unattended) below
 
 This is a proof-of-concept for remotely driving a local coding-agent CLI from a web UI.
 
@@ -308,6 +313,27 @@ behaviour:
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat/cancel` | Abort the running chat turn for that PR. |
 | POST | `/api/run` | Simple one-shot demo (prompt + optional `sessionId` resume). |
 
+### Task queue
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| GET | `/api/queue` | Everything the panel shows: per-repo settings, counters and task rows. Polled every 3s while the drawer is open. |
+| GET | `/api/queue/summary` | Just `{ queued, running, failed, pending }` — what the FAB badge polls. |
+| POST | `/api/queue/scan` | Scan every active repo for newly-labelled issues right now. |
+| POST | `/api/queue/tasks` | Manually queue work: `{ repo, type, issueNumber }`. Goes to the head of the queue and ignores cooldown. |
+| DELETE | `/api/queue/tasks/:id` | Drop a queued task. `409` if it is running. |
+| POST | `/api/queue/tasks/:id/top` | Move a queued task to the front. |
+| POST | `/api/queue/tasks/:id/cancel` | Kill a running task's process group. |
+| POST | `/api/queue/tasks/:id/retry` | Clear the cooldown and re-queue at the front. |
+| POST | `/api/queue/repos/:name/pause` | Body `{ paused }` — stop/resume one repo's worker. |
+| GET/PUT | `/api/queue/config` | Read/write `data/queue-config.json`. The email token is redacted on read; an empty token on write means "keep the stored one". |
+| GET | `/api/repos/:name/labels` | Real `gh label list` output — feeds the label picker. |
+| GET | `/api/queue/worktrees` | Per-repo worktree path, branch, cleanliness and disk usage. |
+| DELETE | `/api/queue/worktrees/:name` | Remove a worktree; the next task rebuilds and re-bootstraps it. |
+| GET | `/api/reports` · `/api/reports/:date` | Daily report index / one report (JSON + markdown). |
+| POST | `/api/reports/run` | Generate (and email, if configured) a report now. |
+| POST | `/api/queue/email/test` | Send a one-off test email to prove the token works. |
+
 ### SSE events
 
 `meta` (command) → `chunk` (`{stream,text}` streamed output) → `session`
@@ -545,11 +571,110 @@ session). The "running mode" selector here controls *tool approval policy*, not 
 
 ---
 
+## ⚡ Task queue (unattended)
+
+Everything above is something you press a button for. This is the half that runs
+while you're asleep.
+
+### The one rule that makes it safe
+
+```
+交互世界 · your checkout            调度世界 · dedicated worktrees
+~/Repos/<repo>/                    ~/.cloud-copilot/worktrees/<repo>/
+────────────────────────────       ────────────────────────────────
+Deploy · Merge · chat ·            Create PR · sync-scan ·
+Admin terminal · Restart main      sync-branch · sync-conflict
+you press a button                 a timer fires
+never queued, runs immediately     one serial queue per repo
+guarded by the existing repo lock  guarded by "nobody else uses this directory"
+```
+
+**The scheduler never touches your working tree.** That is the whole design. It
+is why the existing per-repo lock, and every Deploy/Merge/chat route, is
+completely unchanged — and why a 20-minute unattended Create PR can't lock you
+out of your own repo. The two worlds share only `.git`, which git is built to
+handle across worktrees.
+
+### What it does
+
+- **every 30 min** — every open issue carrying a configured label (default
+  `committed`) that has no PR yet gets queued for Create PR
+- **daily at 03:00** — one `sync-scan` per repo works out which open PR branches
+  are behind `origin/main`, and queues a `sync-branch` for each. That one is pure
+  git (`checkout` → `merge` → `push`, no tokens). If the merge conflicts it is
+  **aborted** and handed to a separate `sync-conflict` task that starts Copilot —
+  because the serial queue shares one worktree, and a conflicted tree left behind
+  would poison every task after it
+- **daily at 08:00** — a report of the last 24h lands in `data/reports/`, shows up
+  in the drawer's 日报 tab, and is emailed if you configured a token
+
+Queue depth stops at **Create PR**. Deploy and Merge stay manual — a human keeps
+the last gate.
+
+### Failure behaviour
+
+| What happened | What the queue does |
+| ------------- | ------------------- |
+| The run finished but opened no PR | `failed`, enters **cooldown** — never auto-retried. Hit ↻ in the drawer to try again. |
+| The server was killed mid-task | `interrupted` → automatically re-run **once**. A second interruption is treated as failed rather than looping through a crash it may be causing. |
+| The label was pulled / a PR already exists / the branch is no longer behind | `skipped`. Not a failure, no cooldown. |
+| The run hung | Killed at `taskTimeoutMinutes` (default 60). |
+
+Progress lives in `data/queue.json`, written atomically on every transition — so
+counters and queue depth survive a restart instead of being recomputed.
+
+### Per-repo worktree config
+
+Add a `worktree` block to a repo's `.cloud-copilot.json`:
+
+```jsonc
+{
+  "deploy": { "type": "shell", "command": "npm run cc:restart" },
+  "worktree": {
+    "bootstrap": "npm ci",     // run once, when the worktree is first created
+    "refresh": "npm ci",       // re-run when a lockfile's hash changes
+    "port": 9101,              // exported as PORT and named in the agent's prompt
+    "copyFiles": [".env"]      // gitignored files to copy in from the main checkout
+  }
+}
+```
+
+A fresh worktree has no `node_modules` / `Pods` / `.env` — those are gitignored, so
+`git worktree add` doesn't bring them. That's what `bootstrap` is for. Between
+tasks the worktree is reset with `git reset --hard` + `git clean -df` — note the
+missing `-x`: ignored files are **kept**, so bootstrap is a one-time cost.
+
+Every task ends by detaching the worktree's HEAD. Without that, git would refuse
+to let a later Deploy check out the branch on your main tree
+(`fatal: 'cc/issue-96' is already checked out at ...`).
+
+### Settings
+
+`data/queue-config.json` (gitignored, so the email token never gets committed).
+Everything is editable from ⚙ Settings → 任务队列, where the label picker is
+populated from the repo's real `gh label list`. Repos default to **enabled**;
+toggle off the ones you don't want touched.
+
+Email uses **Resend** — one `fetch` POST with a bearer token, so the dependency
+list stays at exactly one entry.
+
+### Tests
+
+```bash
+npm test
+```
+
+78 tests on Node's built-in runner, no test framework. Real git and real
+worktrees throughout; the agent itself is a fake `copilot` shell script, so the
+suite exercises the whole spawn/stream/abort path without spending a token.
+
+---
+
 ## Files
 
 ```
 cloud-copilot/
-├── package.json        # express dependency, `npm start`, `cc:restart` (self deploy)
+├── package.json        # express dependency, `npm start`, `npm test`, `cc:restart`
 ├── .cloud-copilot.json # this repo's own deploy config (shell -> cc:restart)
 ├── server.js           # Express app: repos/issues/work/deploy/merge routes + state machine
 ├── lib/
@@ -557,7 +682,14 @@ cloud-copilot/
 │   ├── store.js        # per-issue status persisted to data/state.json
 │   ├── jobs.js         # durable job manager: child outlives the browser connection
 │   ├── runner.js       # spawn copilot, stream SSE, capture transcript + session id
-│   └── repoConfig.js   # loads a repo's .cloud-copilot.json (or auto-detects iOS)
+│   ├── repoConfig.js   # loads a repo's .cloud-copilot.json (or auto-detects iOS)
+│   ├── queue.js        # durable task queue -> data/queue.json (dedupe, cooldown, reconcile)
+│   ├── queueConfig.js  # data/queue-config.json: labels, schedule, email token
+│   ├── worktree.js     # per-repo worktree: create, bootstrap, reset, detach, prune
+│   ├── scheduler.js    # the three timers + one serial worker per repo
+│   ├── syncTasks.js    # sync-scan / sync-branch / sync-conflict (git first, agent last)
+│   ├── report.js       # daily summary -> data/reports/<date>.{json,md}
+│   └── mailer.js       # Resend delivery over built-in fetch (zero dependencies)
 ├── public/
 │   ├── index.html      # repos → issues → Create PR / Deploy / Merge pipeline console
 │   ├── chat-render.js  # CCChat: streamed markdown renderer shared by every chat surface
@@ -569,7 +701,10 @@ cloud-copilot/
 │   └── sounds/         # success + failure chimes (generated)
 ├── scripts/
 │   └── gen-assets.js   # regenerates public/icons + public/sounds (no deps)
-├── data/               # state.json (gitignored)
+├── test/               # node:test suite (real git + a fake copilot binary)
+├── docs/
+│   └── task-queue-design.md  # the design this queue was built from
+├── data/               # state.json, queue.json, queue-config.json, reports/ (gitignored)
 ├── .gitignore
 └── README.md
 ```

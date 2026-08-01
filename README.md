@@ -246,6 +246,60 @@ button), never on page load.
 fully closed. Phase 1 fires notifications from the page itself, which covers the
 "app backgrounded / screen briefly locked" case, not "app killed".
 
+### Phone pushes (ntfy) — one message per task
+
+The alerts above need a page that is (or recently was) open. To reach a phone
+with the app fully closed, the **server** publishes one [ntfy](https://ntfy.sh)
+message per job the moment it reaches a terminal state (`lib/notifier.js`,
+called from `lib/jobs.js`).
+
+Each push names the task, not just the session:
+
+```
+✅ Create PR · cloud-copilot#27          ❌ Deploy · ios-diet-expert PR #112 失败
+   Task-aware ntfy notifications            fastlane: build failed
+   本 repo 第 2 个 Create PR                 exit code 1
+   https://github.com/…/pull/48
+```
+
+- **Title** = action · repo#issue / repo PR #n, plus the conversation title for
+  chat turns (`💬 Admin chat · 「刷新页面后聊天新开了一个 tab」`) and a status
+  suffix for anything that didn't succeed.
+- **Body** = what the task was about (issue/PR title, or the chat title) + a
+  one-line gist of the agent's final answer + the key result (PR link, TestFlight
+  build number, or the first line of the error).
+- **Tags** render as the leading emoji: ✅ success, ❌ failure, ⚠️ aborted;
+  failures are also sent with a higher ntfy priority.
+- **Tapping** opens the matching place in the app — the PR page, the pre-issue
+  chat, or `#/admin/chat/<id>` for an admin conversation (needs `APP_BASE_URL`).
+
+Configuration is machine-local and never committed — copy
+[`setup/notify.env.example`](setup/notify.env.example) to
+`~/.config/cloud-copilot/notify.env`:
+
+```bash
+NTFY_TOPIC=some-long-unguessable-topic   # your topic IS the credential
+NTFY_SERVER=https://ntfy.sh              # or your self-hosted instance
+APP_BASE_URL=http://192.168.1.20:8787    # how your phone reaches this app
+```
+
+Every key can also be given as an environment variable (which wins), the file is
+re-read when it changes (no restart), and **with no topic set nothing is pushed
+and nothing errors**. A push has a 10s timeout, is de-duplicated per job key for
+60s, and can never fail a job — errors are logged and dropped. The 🔔 Alerts
+drawer shows the current status and has a **Test phone push** button
+(`GET/POST /api/settings/ntfy[/test]`).
+
+Jobs are spawned with `CLOUD_COPILOT_JOB=1`, which the Copilot CLI `sessionEnd`
+hook (`~/Repos/hooks/copilot-notify.sh`) checks before sending its own generic
+`[repo] session complete` message — so cloud-copilot's runs notify exactly once,
+with the specific message, and other Copilot CLI sessions still get the generic
+one:
+
+```bash
+[[ -n "$CLOUD_COPILOT_JOB" ]] && exit 0
+```
+
 ### Settings panel (⚙, top-right of Home)
 
 Mode, model and the per-device repo filter all live behind a single `⚙ Settings`
@@ -379,6 +433,8 @@ behaviour:
 | GET  | `/api/repos` | List git repos under `REPOS_ROOT` (with remotes). |
 | GET  | `/api/health` | Liveness probe: `{ ok, pid, startedAt }`. Polled by the client while the server restarts itself. |
 | GET  | `/api/settings/model` | Current model + the selectable list. `POST` the same path to change it. |
+| GET  | `/api/settings/ntfy` | Phone-push status: `{ enabled, server, topic (masked), appBaseUrl, configFile }`. |
+| POST | `/api/settings/ntfy/test` | Send a test push to the configured ntfy topic. `400` when unconfigured, `502` when ntfy rejects it. |
 | GET  | `/api/settings/self` | The cloud-copilot repo serving this app: `{ repo, branch, defaultBranch, dirty, busy }`, or `{ repo: null }`. |
 | POST | `/api/settings/self/restart-main` | **Restart main** — stash if dirty, check out the default branch, `pull --ff-only`, then restart detached. Takes the repo working-tree lock; `409` when it's held. |
 | GET  | `/api/repos/:name/issues[?refresh=1]` | List open issues merged with local status; includes `activeWorkIssues` (repo lock) and cache telemetry (`serverAt`, `ttlMs`, `nextSyncAt`) for the freshness pill. Served from the L2 cache (15 min TTL, persisted to `data/gh-cache.json`); `?refresh=1` forces a live `gh` read and rewrites it. Also auto-discovers and persists PRs referencing these issues (one whole-repo `gh pr list`, same cache). |
@@ -643,6 +699,7 @@ cloud-copilot/
 │   ├── ghCache.js      # L2 cache for gh results, persisted to data/gh-cache.json
 │   ├── store.js        # per-issue status persisted to data/state.json
 │   ├── jobs.js         # durable job manager: child outlives the browser connection
+│   ├── notifier.js     # task-aware ntfy pushes when a job reaches a terminal state
 │   ├── runner.js       # spawn copilot, stream SSE, capture transcript + session id
 │   ├── mergeRunner.js  # gh pr merge + verify, with automatic Copilot conflict recovery
 │   └── repoConfig.js   # loads a repo's .cloud-copilot.json (or auto-detects iOS)
@@ -655,6 +712,10 @@ cloud-copilot/
 │   ├── manifest.webmanifest  # PWA manifest — makes "Add to Home Screen" a real app
 │   ├── icons/          # PWA / apple-touch icons (generated)
 │   └── sounds/         # success + failure chimes (generated)
+├── setup/
+│   ├── setup.sh              # onboard a fresh Mac (CLI, gh, skills, .p8, fastlane)
+│   ├── deploy.env.example    # -> ~/.config/cloud-copilot/deploy.env
+│   └── notify.env.example    # -> ~/.config/cloud-copilot/notify.env (ntfy pushes)
 ├── scripts/
 │   └── gen-assets.js   # regenerates public/icons + public/sounds (no deps)
 ├── data/               # state.json (gitignored)

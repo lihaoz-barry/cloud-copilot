@@ -15,3 +15,4 @@ setup/deploy.env
 
 # playwright-mcp scratch output
 .playwright-mcp/
+setup/notify.env

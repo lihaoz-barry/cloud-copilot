@@ -27,6 +27,7 @@ const gh = require('./lib/gh');
 const repoConfig = require('./lib/repoConfig');
 const { runCopilotSSE, writeSseHead } = require('./lib/runner');
 const jobs = require('./lib/jobs');
+const notifier = require('./lib/notifier');
 const { UPLOADS_DIR, saveUploadedImages, cleanupOldUploads } = require('./lib/attachments');
 
 const HOST = process.env.HOST || '0.0.0.0';
@@ -183,6 +184,37 @@ function describeBusyKey(repoName, busyKey) {
   return `${label}${prSuffix} is already running for issue #${issueNum} in ${repoName}`;
 }
 
+// ---------------------------------------------------------------------------
+// Context for task-aware push notifications (issue #27). A push has to say
+// *which* task of *which* repo finished, so every job's `meta` carries the
+// repo/issue/PR identity plus a human subject line. These lookups are all
+// cache-only (no `gh` calls) — a missing title just means a shorter push.
+// ---------------------------------------------------------------------------
+
+function cachedGhTitle(ownerRepo, kind, number) {
+  try {
+    const entry = gh.cache.get(ownerRepo, kind);
+    const hit = entry && entry.data.find((x) => x.number === number);
+    return (hit && hit.title) || null;
+  } catch {
+    return null;
+  }
+}
+
+const cachedIssueTitle = (repo, n) => (repo.ownerRepo ? cachedGhTitle(repo.ownerRepo, 'issues', n) : null);
+const cachedPrTitle = (repo, prNumber) =>
+  repo.ownerRepo ? cachedGhTitle(repo.ownerRepo, 'prs', prNumber) : null;
+
+// How many Create PR runs this repo has started since the server came up —
+// lets a push say "本 repo 第 2 个 Create PR" when several are queued up on the
+// same repo, which is otherwise the hardest case to tell apart on a phone.
+const createPrRuns = new Map();
+function nextCreatePrSequence(repoName) {
+  const n = (createPrRuns.get(repoName) || 0) + 1;
+  createPrRuns.set(repoName, n);
+  return n;
+}
+
 // Map a UI mode to copilot approval flags.
 // `--allow-all` = --allow-all-tools --allow-all-paths --allow-all-urls, which is
 // required for autonomous runs that touch files outside the repo working dir
@@ -246,6 +278,26 @@ app.post('/api/settings/model', (req, res) => {
     return res.status(400).json({ error: `unknown model "${model}"` });
   }
   res.json({ model: store.setModel(model) });
+});
+
+// ---------------------------------------------------------------------------
+// Phone pushes (ntfy) — status + a "send a test push" button, so the machine's
+// notify.env can be verified from the settings panel without waiting for a real
+// job to finish. The topic is never returned in full (it IS the credential).
+// ---------------------------------------------------------------------------
+app.get('/api/settings/ntfy', (req, res) => {
+  res.json(notifier.status());
+});
+
+app.post('/api/settings/ntfy/test', async (req, res) => {
+  const result = await notifier.sendTest();
+  if (result.skipped) {
+    return res.status(400).json({
+      error: `No ntfy topic configured. Create ${notifier.status().configFile} (see setup/notify.env.example).`,
+    });
+  }
+  if (!result.ok) return res.status(502).json({ error: result.error });
+  res.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -748,7 +800,14 @@ app.post('/api/repos/:name/preissues/:id/chat', async (req, res) => {
     bin: COPILOT_BIN,
     args,
     cwd: repo.path,
-    meta: { action: 'preissue-chat', id, model },
+    meta: {
+      action: 'preissue-chat',
+      id,
+      model,
+      repo: repo.name,
+      chatTitle: store.titleFromMessage(pre.text),
+      subject: store.titleFromMessage(message),
+    },
     onSession: (sid) => store.setPreIssueSession(repo.name, id, sid),
     onDone: async (j) => {
       const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
@@ -848,7 +907,13 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
     bin: COPILOT_BIN,
     args,
     cwd: repo.path,
-    meta: { action: 'work' },
+    meta: {
+      action: 'work',
+      repo: repo.name,
+      issueNumber: n,
+      subject: cachedIssueTitle(repo, n) || `issue #${n}`,
+      sequence: nextCreatePrSequence(repo.name),
+    },
     onSession: (id) =>
       store.updateRecord(repo.name, n, (r) => {
         r.work.sessionId = id;
@@ -1011,7 +1076,13 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
       bin: COPILOT_BIN,
       args,
       cwd: repo.path,
-      meta: { action: 'deploy', prNumber },
+      meta: {
+        action: 'deploy',
+        prNumber,
+        repo: repo.name,
+        issueNumber: n,
+        subject: pr.title || `PR #${prNumber}`,
+      },
       onSession: (id) =>
         store.updateDeploy(repo.name, n, prNumber, (d) => {
           d.sessionId = id;
@@ -1111,7 +1182,13 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
       bin: 'bash',
       args: ['-lc', command],
       cwd: repo.path,
-      meta: { action: 'deploy', prNumber },
+      meta: {
+        action: 'deploy',
+        prNumber,
+        repo: repo.name,
+        issueNumber: n,
+        subject: pr.title || `PR #${prNumber}`,
+      },
       onDone: async (j) => {
         const success = j.exitCode === 0;
         const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
@@ -1254,7 +1331,13 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
       resolveModel(),
     ],
     cwd: repo.path,
-    meta: { action: 'merge', prNumber },
+    meta: {
+      action: 'merge',
+      prNumber,
+      repo: repo.name,
+      issueNumber: n,
+      subject: cachedPrTitle(repo, prNumber) || `PR #${prNumber}`,
+    },
     onSession: (id) =>
       store.updateMerge(repo.name, n, prNumber, (m) => {
         m.sessionId = id;
@@ -1438,7 +1521,15 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
     bin: COPILOT_BIN,
     args,
     cwd: repo.path,
-    meta: { action: 'chat', prNumber, mode, model },
+    meta: {
+      action: 'chat',
+      prNumber,
+      mode,
+      model,
+      repo: repo.name,
+      issueNumber: n,
+      chatTitle: store.titleFromMessage(message),
+    },
     onSession: (id) =>
       store.updateRecord(repo.name, n, (r) => {
         const pr2 = r.prs[prNumber];
@@ -1594,7 +1685,16 @@ app.post('/api/admin/chat', (req, res) => {
     bin: COPILOT_BIN,
     args,
     cwd,
-    meta: { action: 'admin', turnId, repo: repoName || null, model },
+    meta: {
+      action: 'admin',
+      turnId,
+      repo: repoName || null,
+      model,
+      sessionId,
+      chatTitle: store.titleFromMessage(
+        (sessionId && store.getAdminChat(sessionId)?.title) || message,
+      ),
+    },
     onSession: (sid) => store.updateAdminTurnProgress(turnId, { sessionId: sid }),
     onProgress: (j) => store.updateAdminTurnProgress(turnId, { assistantText: j.conversation, sessionId: j.sessionId }),
     onDone: async (j) => {

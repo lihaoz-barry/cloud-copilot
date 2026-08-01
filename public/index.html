@@ -984,6 +984,12 @@
     <div class="actions">
       <button id="notifyTest" class="ghost sm">▶ Test notification</button>
     </div>
+    <h3 style="margin-top:18px">📲 Phone push (ntfy)</h3>
+    <p class="hint">Pushes reach your phone even when cloud-copilot isn’t open. Each finished job sends its own message naming the repo, the action and the issue/PR or chat title.</p>
+    <div class="notify-state" id="ntfyState">Checking…</div>
+    <div class="actions">
+      <button id="ntfyTest" class="ghost sm">▶ Test phone push</button>
+    </div>
   </div>
   <div id="depthDrawer" class="depth-drawer">
     <h3>Auto-run depth</h3>
@@ -1104,6 +1110,7 @@ function syncNotifyUi() {
 
 function openNotifyDrawer() {
   syncNotifyUi();
+  syncNtfyUi();
   notifyDrawer.classList.add('show');
   notifyScrim.classList.add('show');
 }
@@ -1136,6 +1143,45 @@ notifyTestBtn.addEventListener('click', async () => {
     }
   } finally {
     notifyTestBtn.disabled = false;
+  }
+});
+
+// ---- server-side phone pushes (ntfy) --------------------------------------
+// The browser-side alerts above only fire while a page is (or was) open; these
+// are sent by the server itself when a job reaches a terminal state, so they
+// arrive even with the app fully closed. Config lives on the machine, not here.
+const ntfyStateEl = document.getElementById('ntfyState');
+const ntfyTestBtn = document.getElementById('ntfyTest');
+
+async function syncNtfyUi() {
+  try {
+    const s = await fetch('/api/settings/ntfy').then((r) => r.json());
+    const configured = Boolean(s.enabled);
+    ntfyTestBtn.disabled = !configured;
+    ntfyStateEl.classList.toggle('warn', !configured);
+    ntfyStateEl.textContent = configured
+      ? `Pushing to ${s.server} · topic ${s.topic}${s.appBaseUrl ? '' : ' · set APP_BASE_URL to make pushes tappable'}`
+      : `Not configured — create ${s.configFile} from setup/notify.env.example (NTFY_TOPIC=…).`;
+  } catch {
+    ntfyStateEl.classList.add('warn');
+    ntfyStateEl.textContent = 'Couldn’t reach the server to check push settings.';
+  }
+}
+
+ntfyTestBtn.addEventListener('click', async () => {
+  ntfyTestBtn.disabled = true;
+  const before = ntfyStateEl.textContent;
+  try {
+    const r = await fetch('/api/settings/ntfy/test', { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    ntfyStateEl.textContent = r.ok ? 'Sent — check your phone.' : `Push failed: ${d.error || `HTTP ${r.status}`}`;
+    ntfyStateEl.classList.toggle('warn', !r.ok);
+    if (r.ok) setTimeout(() => { ntfyStateEl.textContent = before; }, 4000);
+  } catch (e) {
+    ntfyStateEl.textContent = `Push failed: ${e.message}`;
+    ntfyStateEl.classList.add('warn');
+  } finally {
+    ntfyTestBtn.disabled = false;
   }
 });
 
@@ -3189,6 +3235,11 @@ function applyTab() {
 }
 function setTab(tab) {
   currentTab = tab;
+  // Leaving the Admin tab by hand must drop an #/admin… deep link, otherwise
+  // the router would immediately bounce back to it.
+  if (tab !== 'admin' && /^#\/admin(\/|$)/.test(location.hash)) {
+    history.replaceState(null, '', location.pathname + location.search);
+  }
   applyTab();
   if (tab === 'admin') initAdminTerminal();
   if (tab === 'testflight') loadTestflightBuilds();
@@ -3365,6 +3416,14 @@ function parsePreIssueDetailHash() {
   return m ? { repo: m[1], id: m[2] } : null;
 }
 
+// Deep link into the Admin Terminal (#/admin, or #/admin/chat/<chatId>) — what
+// an "Admin chat" push notification points at, so tapping it lands on the very
+// conversation that just replied.
+function parseAdminHash() {
+  const m = decodeURIComponent(location.hash).match(/^#\/admin(?:\/chat\/([^/]+))?$/);
+  return m ? { chatId: m[1] || null } : null;
+}
+
 function hideAllHomeViews() {
   mainView.style.display = 'none';
   prDetailView.style.display = 'none';
@@ -3373,6 +3432,13 @@ function hideAllHomeViews() {
 }
 
 function route() {
+  const admin = parseAdminHash();
+  if (admin) {
+    if (currentTab !== 'admin') setTab('admin');
+    else initAdminTerminal();
+    if (admin.chatId && window.CCAdmin) window.CCAdmin.openChat(admin.chatId);
+    return;
+  }
   if (currentTab !== 'home') return;
   const parsed = parseHash();
   const preList = parsePreIssuesHash();
@@ -4737,6 +4803,14 @@ function initAdminTerminal() {
   // any messages restored from the queue, which would otherwise race it.
   if (hasSavedTurn()) queue.enqueue({ reconnect: true }, { front: true });
   queue.start();
+
+  // Entry point for the #/admin/chat/<id> deep link (push notifications).
+  window.CCAdmin = {
+    openChat(id) {
+      if (!id || id === currentChatId) return;
+      loadConversation(id);
+    },
+  };
 }
 
 loadRepos().then(route);

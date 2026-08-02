@@ -79,6 +79,15 @@
       font-size: .92rem; flex: 1; min-width: 0;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
+    /* "Reviewed and merged into main" spark (issue #68). Fixed width and
+       `visibility` (never `display`) when absent, so a row without it keeps
+       exactly the same alignment as one with it — the same trick the .wfsync
+       slot on a Create-PR line uses. */
+    .spark {
+      flex: none; width: 16px; text-align: center; font-size: .8rem; line-height: 1;
+      cursor: default; user-select: none;
+    }
+    .spark[hidden] { display: inline-block; visibility: hidden; }
     .labels { display: flex; gap: 4px; flex: none; overflow: hidden; max-width: 30%; }
     .label {
       display: inline-block; font-size: .68rem; padding: 1px 6px; border-radius: 999px;
@@ -1173,6 +1182,7 @@
 <script src="/vendor/purify.min.js"></script>
 <script src="/vendor/highlight.min.js"></script>
 <script src="/chat-render.js"></script>
+<script src="/spark-badge.js"></script>
 <script>
 const reposEl = document.getElementById('repos');
 const rootLine = document.getElementById('rootline');
@@ -2509,6 +2519,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       ${opts.pinned ? `<span class="repo-badge">${escape(repo.name)}</span>` : ''}
       <span class="issue-num">#${issue.number}</span>
       <span class="issue-title" title="${escape(issue.title)}">${escape(issue.title)}</span>
+      <span class="issue-spark spark" hidden>${CCSpark.ICON}</span>
       <span class="labels">${labels}</span>
       <span class="issue-icons">
         <button class="pinbtn" title="Pin to top">📌</button>
@@ -2520,6 +2531,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     <div class="prlist"></div>`;
 
   const icons = el.querySelector('.issue-icons');
+  const issueSpark = el.querySelector('.issue-spark');
   const prlist = el.querySelector('.prlist');
   const worklog = el.querySelector('.worklog');
   const ghLink = el.querySelector('.ghlink');
@@ -2805,7 +2817,28 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     prlist.innerHTML = '';
     if (showCreateRow()) prlist.appendChild(renderCreateRow());
     for (const pr of st.prs) prlist.appendChild(renderPrRow(pr));
+    paintSpark(issueSpark, CCSpark.issueSparkView(st.prs));
     paintWork(st.work.status);
+  }
+
+  // ✨ = reviewed AND merged into the default branch (issue #68). Display only:
+  // the decision is CCSpark's, this just turns it into (or out of) a glyph.
+  // Absent means `hidden`, not removed — .spark[hidden] keeps its slot so the
+  // titles of neighbouring rows stay on the same x.
+  function paintSpark(node, view) {
+    if (!node) return;
+    if (!view) {
+      node.hidden = true;
+      node.removeAttribute('title');
+      node.removeAttribute('aria-label');
+      node.removeAttribute('role');
+      return;
+    }
+    node.hidden = false;
+    node.textContent = view.text;
+    node.title = view.title;
+    node.setAttribute('aria-label', view.title);
+    node.setAttribute('role', 'img');
   }
 
   // The Create PR line: same three-segment workflow bar as a real PR row, but
@@ -2833,9 +2866,13 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     syncSlot.className = 'wfsync';
     syncSlot.style.visibility = 'hidden';
     syncSlot.textContent = '✓';
+    const sparkSlot = document.createElement('span');
+    sparkSlot.className = 'spark';
+    sparkSlot.hidden = true;
+    sparkSlot.textContent = CCSpark.ICON;
     const lead = document.createElement('span');
     lead.className = 'wflead';
-    lead.append(syncSlot, num, ghSlot);
+    lead.append(syncSlot, num, ghSlot, sparkSlot);
 
     const chevbar = document.createElement('div');
     chevbar.className = 'chevbar';
@@ -3039,9 +3076,14 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     ghIcon.textContent = '↗';
     ghIcon.title = 'Open PR on GitHub';
 
+    const prSpark = document.createElement('span');
+    prSpark.className = 'prspark spark';
+    prSpark.hidden = true;
+    prSpark.textContent = CCSpark.ICON;
+
     const lead = document.createElement('span');
     lead.className = 'wflead';
-    lead.append(syncBtn, link, ghIcon);
+    lead.append(syncBtn, link, ghIcon, prSpark);
 
     row.append(lead, chevbar, more);
     item.append(row, makeCommitLine(pr), tools, prlog, mergelog, updatelog);
@@ -3071,6 +3113,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     mergeAbortBtn.hidden = m0 !== 'merging';
     const u0 = (pr.update && pr.update.status) || 'idle';
     paintSyncBadge(syncBtn, pr);
+    paintSpark(prSpark, CCSpark.prSparkView(pr));
     const showUpdateLog0 = u0 === 'updating' || (pr.update && pr.update.hasConversation) || u0 === 'success' || u0 === 'failed' || u0 === 'aborted';
     updateLogBtn.hidden = !showUpdateLog0;
     updateAbortBtn.hidden = u0 !== 'updating';
@@ -3234,6 +3277,11 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         // Freshly collected sync status wins; a refresh that couldn't collect
         // it keeps the previous value rather than blanking the badge.
         sync: p.sync || (ex && ex.sync) || null,
+        // Same rule for the completed-review marker behind the ✨ badge: a
+        // refresh that didn't carry it must not blank a badge we already
+        // earned. Narrowed to the marker itself — /prs answers with the raw
+        // record, whose `review` also drags the whole review transcript along.
+        review: p.review ? { lastReviewedSha: p.review.lastReviewedSha || null } : (ex && ex.review) || null,
         deploy: ex ? ex.deploy : (p.deploy || { status: 'idle' }),
         merge: ex ? ex.merge : (p.merge || { status: 'idle' }),
         update: (ex && ex.update) || p.update || { status: 'idle' },
@@ -3768,6 +3816,11 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         prNumber: p.prNumber, prUrl: p.prUrl, title: p.title, createdAt: p.createdAt,
         state: p.state || null,
         sync: p.sync || null,
+        // Only the completed-review marker, exactly as /statuses ships it: the
+        // raw record's `review` also carries the whole transcript, and without
+        // this field a Create PR run finishing would blank an already-earned
+        // ✨ on this issue's other (merged) PR rows.
+        review: { lastReviewedSha: (p.review && p.review.lastReviewedSha) || null },
         deploy: { ...p.deploy }, merge: { ...p.merge }, update: { ...(p.update || { status: 'idle' }) },
       }));
     st.prs = arr;

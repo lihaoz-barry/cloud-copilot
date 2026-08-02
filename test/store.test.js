@@ -111,3 +111,40 @@ test('unknown actions and unknown issues never write a record', () => {
 
   assert.strictEqual(fs.readFileSync(path.join(dataDir, 'state.json'), 'utf8'), before);
 });
+
+// --- getStatuses payload (issue #68) ---------------------------------------
+// The ✨ badge is decided in the browser from the status payload alone, so the
+// completed-review marker has to travel with it — without this field a merged,
+// reviewed PR can never light up, no matter how correct the frontend is.
+test('getStatuses exposes the completed-review sha next to the PR state', () => {
+  store.upsertPr(REPO, 7, { prNumber: 55, prUrl: 'https://example.test/pr/55' });
+  store.updateReview(REPO, 7, 55, (rv) => { rv.status = 'success'; rv.lastReviewedSha = 'deadbeefcafe'; });
+  store.updateRecord(REPO, 7, (r) => { r.prs[55].state = 'MERGED'; });
+
+  const pr = store.getStatuses(REPO, [7])[7].prs.find((p) => p.prNumber === 55);
+  assert.strictEqual(pr.state, 'MERGED');
+  assert.strictEqual(pr.review.lastReviewedSha, 'deadbeefcafe');
+});
+
+test('getStatuses reports a never-reviewed PR as review.lastReviewedSha = null', () => {
+  store.upsertPr(REPO, 8, { prNumber: 56, prUrl: 'https://example.test/pr/56' });
+
+  const pr = store.getStatuses(REPO, [8])[8].prs.find((p) => p.prNumber === 56);
+  assert.deepStrictEqual(pr.review, { lastReviewedSha: null });
+});
+
+// The status sweep runs for every visible issue on every poll, so the review
+// sub-object must stay exactly one field wide: spreading the whole record here
+// would ship each PR's full review transcript to the browser on a timer.
+test('getStatuses ships only the review marker, never the review transcript', () => {
+  store.upsertPr(REPO, 9, { prNumber: 57, prUrl: 'https://example.test/pr/57' });
+  store.updateReview(REPO, 9, 57, (rv) => {
+    rv.status = 'success';
+    rv.lastReviewedSha = 'cafebabe1234';
+    rv.conversation = 'a very long review transcript';
+    rv.sessionId = 'sess-1';
+  });
+
+  const pr = store.getStatuses(REPO, [9])[9].prs.find((p) => p.prNumber === 57);
+  assert.deepStrictEqual(pr.review, { lastReviewedSha: 'cafebabe1234' });
+});

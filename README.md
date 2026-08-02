@@ -499,6 +499,26 @@ direction `base → PR head` only:
   the job survives a page reload or a dropped phone connection like every other
   action.
 
+### ✨ Reviewed-and-merged badge
+
+An issue that finished the whole pipeline gets a small ✨ next to its title, and
+so does the PR row that earned it. It lights up only when **both** halves of the
+promise held for the same PR:
+
+- GitHub reports that PR as `MERGED` (the work is on the default branch), and
+- the scheduler's review-and-improve pass completed at least once against it
+  (`review.lastReviewedSha` is set).
+
+Merged-but-never-reviewed and reviewed-but-still-open both stay dark: half a
+pipeline is not a finished result. An issue with several PRs lights up as soon
+as any one of them qualifies. Hovering (or a screen reader) reads
+`Reviewed and merged into main (PR #123, reviewed at abc1234)`.
+
+It is pure display — no extra GitHub call, no effect on scheduling or merging.
+The decision is one shared pure function, `public/spark-badge.js` (`CCSpark`),
+used by both the issue row and the PR row so they can never disagree; it is unit
+tested in `test/spark.test.js`.
+
 ### Chat with a PR (plan → apply)
 
 Click any PR to open its detail page (`#/pr/<repo>/<issue>/<pr>`). Below the same
@@ -1074,6 +1094,7 @@ cloud-copilot/
 ├── public/
 │   ├── index.html      # repos → issues → Create PR / Deploy / Merge pipeline console
 │   ├── chat-render.js  # CCChat: streamed markdown renderer shared by every chat surface
+│   ├── spark-badge.js  # CCSpark: decides the ✨ "reviewed AND merged into main" badge
 │   ├── vendor/         # marked + DOMPurify + highlight.js, committed (never a CDN)
 │   ├── notify.js       # CCNotify: completion chime + system notification + toast
 │   ├── sw.js           # service worker (required for notifications on iOS)

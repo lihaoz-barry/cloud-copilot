@@ -3474,7 +3474,14 @@ function tfDuration(ms) {
 
 const tfBuildTime = (b) => new Date(b.finishedAt || b.startedAt || 0).getTime() || 0;
 
+// Loads can overlap (a Refresh click while a merge's own reload is in flight,
+// or a tab switch during either). Responses can come back out of order, so an
+// older one must never overwrite a newer snapshot: each load takes a ticket and
+// only the latest one is allowed to touch the DOM.
+let tfLoadSeq = 0;
+
 async function loadTestflightBuilds() {
+  const seq = ++tfLoadSeq;
   tfList.innerHTML = '<div class="placeholder"><div class="big">✈️</div><p>Loading builds…</p></div>';
   tfFilters.hidden = true;
   tfCount.hidden = true;
@@ -3486,6 +3493,7 @@ async function loadTestflightBuilds() {
     data = await r.json();
     if (!data || !Array.isArray(data.builds)) throw new Error('Malformed response from /api/testflight/builds');
   } catch (e) {
+    if (seq !== tfLoadSeq) return;
     tfList.innerHTML =
       `<div class="placeholder"><div class="big">⚠️</div><h2>Couldn't load builds</h2>` +
       `<p>${escape(e.message)}</p><p><button class="ghost" id="tfRetryBtn" type="button">↻ Retry</button></p></div>`;
@@ -3493,6 +3501,7 @@ async function loadTestflightBuilds() {
     if (retry) retry.addEventListener('click', () => loadTestflightBuilds());
     return;
   }
+  if (seq !== tfLoadSeq) return;
   // A refresh replaces the snapshot with the server's — which itself is the
   // full archived history, so nothing accumulated earlier is lost.
   tfAllBuilds = data.builds;
@@ -3705,6 +3714,7 @@ function renderTfCard(b) {
     }
   }
   bit(`issue #${b.issueNumber}`);
+  if (b.repoKnown === false) bit('repo not configured here');
   if (b.prState) bit(`PR ${String(b.prState).toLowerCase()}`);
   if (Number.isFinite(b.exitCode) && b.exitCode !== 0) bit(`exit ${b.exitCode}`);
 
@@ -3735,7 +3745,15 @@ function renderTfCard(b) {
       const btn = document.createElement('button');
       btn.className = 'tf-mergebtn';
       btn.textContent = ms === 'failed' || ms === 'aborted' ? 'Retry merge' : 'Merge';
-      btn.addEventListener('click', () => onTfMerge(b, btn));
+      // The repo isn't checked out on this machine any more: the build stays in
+      // history, but every action route keyed on it would 404. Say so instead
+      // of handing over a button that can only fail.
+      if (b.repoKnown === false) {
+        btn.disabled = true;
+        btn.title = `"${b.repo}" is not one of this machine's configured repos, so it can't be merged from here.`;
+      } else {
+        btn.addEventListener('click', () => onTfMerge(b, btn));
+      }
       row.appendChild(btn);
     }
   }

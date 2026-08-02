@@ -158,3 +158,62 @@ test('summarizeFailure tolerates junk input', () => {
   const long = `error: ${'x'.repeat(500)}`;
   assert.ok(buildHistory.summarizeFailure(long).length <= 240);
 });
+
+// --- annotateBuilds: what the /api/testflight/builds route does to the list --
+
+const iosRepo = (name) => ({ name, path: `/repos/${name}`, ownerRepo: `o/${name}` });
+
+test('annotateBuilds keeps ios-testflight builds and drops shell-deploy ones', () => {
+  const builds = [{ repo: 'ios' }, { repo: 'shellapp' }, { repo: 'ios' }];
+  const { builds: out, errors } = buildHistory.annotateBuilds(builds, {
+    resolveRepo: (n) => iosRepo(n),
+    deployTypeOf: (repo) => (repo.name === 'ios' ? 'ios-testflight' : 'shell'),
+  });
+  assert.deepStrictEqual(errors, []);
+  assert.strictEqual(out.length, 2);
+  assert.strictEqual(out[0].ownerRepo, 'o/ios');
+  assert.strictEqual(out[0].repoKnown, true);
+});
+
+test('annotateBuilds resolves each repo once no matter how long the history is', () => {
+  const resolved = [];
+  const configRead = [];
+  const builds = Array.from({ length: 50 }, (_, i) => ({ repo: i % 2 ? 'a' : 'b' }));
+  buildHistory.annotateBuilds(builds, {
+    resolveRepo: (n) => {
+      resolved.push(n);
+      return iosRepo(n);
+    },
+    deployTypeOf: (repo) => {
+      configRead.push(repo.name);
+      return 'ios-testflight';
+    },
+  });
+  assert.deepStrictEqual(resolved.sort(), ['a', 'b']);
+  assert.deepStrictEqual(configRead.sort(), ['a', 'b']);
+});
+
+test('annotateBuilds keeps builds of a repo that is gone from this machine', () => {
+  const { builds: out } = buildHistory.annotateBuilds([{ repo: 'vanished', buildNumber: 3 }], {
+    resolveRepo: () => null,
+    deployTypeOf: () => {
+      throw new Error('must not be called for an unknown repo');
+    },
+  });
+  assert.strictEqual(out.length, 1, 'history must survive a deleted checkout');
+  assert.strictEqual(out[0].repoKnown, false);
+  assert.strictEqual(out[0].ownerRepo, null);
+});
+
+test('annotateBuilds reports an unreadable repo config once and keeps its builds', () => {
+  const builds = [{ repo: 'broken' }, { repo: 'broken' }, { repo: 'broken' }];
+  const { builds: out, errors } = buildHistory.annotateBuilds(builds, {
+    resolveRepo: () => {
+      throw new Error('EACCES .cloud-copilot.json');
+    },
+    deployTypeOf: () => null,
+  });
+  assert.strictEqual(out.length, 3);
+  assert.strictEqual(errors.length, 1, 'one error per repo, not per build');
+  assert.match(errors[0].message, /EACCES/);
+});

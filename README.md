@@ -493,7 +493,7 @@ behaviour:
 | POST | `/api/repos/:name/issues/:n/merge/:pr/cancel` | Abort the running merge for that PR. |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat` | **Chat with a PR** — SSE stream. Body: `{ "message": "...", "mode": "plan"\|"apply", "model": "..." }`. `plan` is read-only (default approval flags); `apply` implements + pushes to the existing branch and resets Deploy/Merge on success. The optional `model` overrides the global setting for that turn only (unknown values fall back to it). |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat/cancel` | Abort the running chat turn for that PR. |
-| GET  | `/api/testflight/builds` | **TestFlight build history** — every deploy attempt ever recorded for `ios-testflight` repos (live + archived), newest first: `{ builds, errors, total, generatedAt }`. Each build carries version, build number, start/finish/duration, deploy status, branch + commit, PR/issue, the "What to Test" note, and a short failure reason for failed attempts. Attempts are never collapsed — several builds of the same version stay separate rows. Records that cannot be read land in `errors` instead of failing the response. |
+| GET  | `/api/testflight/builds` | **TestFlight build history** — every deploy attempt ever recorded for `ios-testflight` repos (live + archived), newest first: `{ builds, errors, total, generatedAt }`. Each build carries version, build number, start/finish/duration, deploy status, branch + commit, PR/issue, the "What to Test" note, and a short failure reason for failed attempts. Attempts are never collapsed — several builds of the same version stay separate rows. Records that cannot be read land in `errors` instead of failing the response; `repoKnown` is false when the repo is no longer configured on this machine (its builds are still listed). |
 | POST | `/api/run` | Simple one-shot demo (prompt + optional `sessionId` resume). |
 
 ### SSE events
@@ -520,6 +520,9 @@ duration, the branch and the exact commit that was shipped, the PR and issue, th
 "What to Test" note, and — for failed/aborted attempts — the exit code and a
 one-line reason extracted from the deploy transcript. Superseded attempts are
 badged `attempt n/m · superseded`; only the current attempt keeps its Merge button.
+A build whose repo is no longer configured on this machine stays in the list —
+it is marked `repo not configured here` and its Merge button is disabled, since
+every action route keyed on that repo would 404.
 
 The toolbar filters by version, status, date range and app. Filtering is purely a
 view over the full in-memory history (and `↻ Refresh` re-reads the complete

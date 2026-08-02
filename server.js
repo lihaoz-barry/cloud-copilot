@@ -29,6 +29,7 @@ const { runCopilotSSE, writeSseHead } = require('./lib/runner');
 const jobs = require('./lib/jobs');
 const notifier = require('./lib/notifier');
 const changelogLib = require('./lib/changelog');
+const buildHistory = require('./lib/buildHistory');
 const { UPLOADS_DIR, saveUploadedImages, cleanupOldUploads } = require('./lib/attachments');
 const { cleanupAfterMerge } = require('./lib/mergeCleanup');
 const worktrees = require('./lib/worktrees');
@@ -561,40 +562,12 @@ app.get('/api/testflight/builds', (req, res) => {
     return res.status(500).json({ error: `Could not read build history: ${err.message}`, builds: [], errors: [] });
   }
   const errors = [...(listed.errors || [])];
-  const builds = [];
-  // The history is unbounded (one row per deploy attempt ever), so resolving
-  // the repo and reading its .cloud-copilot.json is memoised per repo instead
-  // of per row — otherwise a long history means hundreds of identical fs reads
-  // (and hundreds of identical error rows) on every refresh.
-  const repoInfo = new Map();
-  const infoFor = (name) => {
-    if (repoInfo.has(name)) return repoInfo.get(name);
-    let info;
-    try {
-      const repo = resolveRepo(name);
-      // A repo we don't know on this machine keeps its builds visible: history
-      // must not vanish just because the checkout is gone.
-      const type = repo ? repoConfig.loadDeployConfig(repo.path).type : null;
-      info = { repo, type, error: null };
-    } catch (err) {
-      // Unreadable repo config — keep the rows and report the problem once.
-      info = { repo: null, type: null, error: err.message };
-    }
-    repoInfo.set(name, info);
-    return info;
-  };
-  for (const b of listed.builds) {
-    const info = infoFor(b.repo);
-    if (info.error && !info.reported) {
-      info.reported = true;
-      errors.push({ repo: b.repo, issueNumber: null, prNumber: null, message: info.error });
-    }
-    // Repos configured for a "shell" deploy (e.g. a restart script) aren't
-    // TestFlight builds and would otherwise pollute this page.
-    if (info.repo && info.type !== 'ios-testflight') continue;
-    builds.push({ ...b, ownerRepo: (info.repo && info.repo.ownerRepo) || null, repoKnown: Boolean(info.repo) });
-  }
-  res.json({ builds, errors, total: builds.length, generatedAt: new Date().toISOString() });
+  const annotated = buildHistory.annotateBuilds(listed.builds, {
+    resolveRepo,
+    deployTypeOf: (repo) => repoConfig.loadDeployConfig(repo.path).type,
+  });
+  errors.push(...annotated.errors);
+  res.json({ builds: annotated.builds, errors, total: annotated.builds.length, generatedAt: new Date().toISOString() });
 });
 
 /**

@@ -128,7 +128,7 @@ test('resetForNewCommits keeps the previous build in history', () => {
   assert.strictEqual(builds[0].current, false);
 });
 
-test('an unreadable issue record is reported, not fatal', () => {
+test('a null issue record is skipped instead of blowing up the whole history', () => {
   writeState({
     'app#10': null,
     'app#11': {
@@ -146,4 +146,52 @@ test('an unreadable issue record is reported, not fatal', () => {
   assert.strictEqual(builds.length, 1);
   assert.strictEqual(builds[0].buildNumber, 4);
   assert.deepStrictEqual(errors, []);
+});
+
+test('a corrupt issue record is reported in errors while the rest still lists', () => {
+  writeState({
+    'app#20': { repo: 'app', issueNumber: 20, prs: 'not-an-object' },
+    'app#21': {
+      repo: 'app',
+      issueNumber: 21,
+      prs: {
+        22: {
+          prNumber: 22,
+          deploy: { status: 'success', buildNumber: 8, finishedAt: '2024-10-01T00:00:00.000Z' },
+        },
+      },
+    },
+  });
+  const { builds, errors } = store.listAllBuilds();
+  assert.deepStrictEqual(
+    builds.map((b) => b.buildNumber),
+    [8],
+    'the readable history must survive',
+  );
+  assert.strictEqual(errors.length, 1);
+  assert.strictEqual(errors[0].issueNumber, 20);
+});
+
+test('migrating a record that already pinned a commit does not wipe it', () => {
+  writeState({
+    'app#30': {
+      repo: 'app',
+      issueNumber: 30,
+      prs: {
+        31: {
+          prNumber: 31,
+          // Half-written record: `commit` present, `branch` never added.
+          deploy: {
+            status: 'success',
+            buildNumber: 12,
+            finishedAt: '2024-11-01T00:00:00.000Z',
+            commit: { sha: 'deadbeef', abbrev: 'deadbee' },
+          },
+        },
+      },
+    },
+  });
+  const { builds } = store.listAllBuilds();
+  assert.strictEqual(builds[0].commit.abbrev, 'deadbee');
+  assert.strictEqual(builds[0].branch, null);
 });

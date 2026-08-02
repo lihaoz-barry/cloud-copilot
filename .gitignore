@@ -12,6 +12,11 @@ scheduler.log
 
 # per-run isolated checkouts created by lib/worktreePool.js
 .worktrees/
+# an agent running inside a worktree gets CC_DATA_DIR=<checkout>/.cc-data
+# (lib/worktreePool.js), i.e. the per-run twin of the ignored data/ dir above.
+# It is regenerated state + gh cache, never source — and since the checkout is
+# the repo itself, without this it lands in whatever branch the agent commits.
+.cc-data/
 
 # secrets / local deploy config — never commit
 *.p8

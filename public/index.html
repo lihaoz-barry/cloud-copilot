@@ -277,12 +277,12 @@
       padding: 9px 13px; box-shadow: 0 6px 20px #0004;
     }
     .depth-drawer {
-      position: fixed; top: 0; right: 0; height: 100%; width: min(280px, 86vw); z-index: 41;
+      position: fixed; top: 0; right: 0; height: 100%; height: 100dvh; width: min(280px, 86vw); z-index: 70;
       background: Canvas; color: CanvasText; border-left: 1px solid #8884; box-shadow: -8px 0 30px #0006;
-      padding: 18px 16px; transform: translateX(100%); transition: transform .2s ease; overflow-y: auto;
+      transform: translateX(100%); visibility: hidden;
+      transition: transform .2s ease, visibility 0s linear .2s;
     }
-    .depth-drawer.show { transform: translateX(0); }
-    .depth-drawer h3 { margin: 0 0 4px; font-size: 1rem; }
+    .depth-drawer.show { transform: translateX(0); visibility: visible; transition: transform .2s ease; }
     .depth-drawer .hint { color: #888; font-size: .78rem; margin: 0 0 14px; }
     .depth-option {
       display: flex; align-items: flex-start; gap: 10px; padding: 10px 8px; border-radius: 10px;
@@ -293,9 +293,52 @@
     .depth-option .lbl { font-weight: 600; font-size: .88rem; }
     .depth-option .desc { color: #888; font-size: .76rem; margin-top: 2px; }
     .depth-scrim {
-      position: fixed; inset: 0; z-index: 40; background: #0004; display: none;
+      position: fixed; inset: 0; z-index: 69; background: #0004; display: none;
     }
     .depth-scrim.show { display: block; }
+
+    /* Shared drawer chrome (⏩ Depth + 🔔 Alerts). Both drawers sit above the
+       floating .navbar (z-index 60) so the nav pill can never paint over their
+       headers, and they respect the iOS status-bar / home-indicator insets.
+       They are sized in dvh (with a % fallback) like .term above: a fixed
+       `height: 100%` resolves against the *large* viewport, so on iOS Safari
+       the bottom of the drawer — including the home-indicator padding and the
+       last button — sits underneath the collapsing URL bar.
+       While closed they are visibility:hidden (delayed until the slide-out
+       finishes) so their controls leave the tab order and match aria-hidden. */
+    .settings-drawer, .depth-drawer { display: flex; flex-direction: column; overflow: hidden; }
+    .drawer-head {
+      position: sticky; top: 0; flex: none; z-index: 1;
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      padding: calc(14px + env(safe-area-inset-top, 0px)) 16px 10px;
+      background: Canvas; border-bottom: 1px solid #8883;
+    }
+    .drawer-head h3 { margin: 0; font-size: 1rem; }
+    /* Sub-headings inside the scrolling body (e.g. "📲 Phone push") keep the
+       compact sizing the drawers used before the head/body split. */
+    .drawer-body h3 { margin: 0 0 4px; font-size: 1rem; }
+    /* This ✕ is the fix for "the only way to close it on a phone is the thin
+       scrim strip", so it has to be comfortably tappable: 44×44 is the iOS HIG
+       / WCAG 2.5.5 minimum, and padding alone only got it to 32×32. The glyph
+       is centred instead of grown, so it looks the same. */
+    .drawer-close {
+      flex: none; background: transparent; color: inherit; border: none; cursor: pointer;
+      font: inherit; font-size: 1rem; line-height: 1; opacity: .6;
+      display: flex; align-items: center; justify-content: center;
+      min-width: 44px; min-height: 44px; margin: -6px -10px -6px 0;
+      padding: 0; border-radius: 10px; touch-action: manipulation;
+    }
+    .drawer-close:hover { opacity: 1; background: #8881; }
+    /* Opening a drawer moves focus here, so the ring must be visible — the
+       default UA outline is easy to lose against the drawer background. */
+    .drawer-close:focus-visible { opacity: 1; outline: 2px solid currentColor; outline-offset: -2px; }
+    .drawer-body {
+      flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch;
+      /* Without this, flicking past the end of the drawer keeps scrolling the
+         page *behind* the scrim, which looks like the drawer is broken. */
+      overscroll-behavior: contain;
+      padding: 14px 16px calc(18px + env(safe-area-inset-bottom, 0px));
+    }
 
     .panel {
       margin-top: 8px; border: 1px solid #8883; border-radius: 10px; padding: 10px;
@@ -823,12 +866,12 @@
       padding: 9px 13px; box-shadow: 0 6px 20px #0004;
     }
     .settings-drawer {
-      position: fixed; top: 0; left: 0; height: 100%; width: min(320px, 90vw); z-index: 41;
+      position: fixed; top: 0; left: 0; height: 100%; height: 100dvh; width: min(320px, 90vw); z-index: 70;
       background: Canvas; color: CanvasText; border-right: 1px solid #8884; box-shadow: 8px 0 30px #0006;
-      padding: 18px 16px; transform: translateX(-100%); transition: transform .2s ease; overflow-y: auto;
+      transform: translateX(-100%); visibility: hidden;
+      transition: transform .2s ease, visibility 0s linear .2s;
     }
-    .settings-drawer.show { transform: translateX(0); }
-    .settings-drawer h3 { margin: 0 0 4px; font-size: 1rem; }
+    .settings-drawer.show { transform: translateX(0); visibility: visible; transition: transform .2s ease; }
     .settings-drawer .hint { color: #888; font-size: .78rem; margin: 0 0 14px; }
     .toggle-row {
       display: flex; align-items: flex-start; gap: 10px; padding: 10px 8px; border-radius: 10px;
@@ -1121,8 +1164,12 @@
   <button id="notifyFab" class="ghost notify-fab" title="Notification settings" aria-label="Notification settings">🔔 Alerts</button>
   <div id="depthScrim" class="depth-scrim"></div>
   <div id="notifyScrim" class="depth-scrim"></div>
-  <div id="notifyDrawer" class="settings-drawer">
-    <h3>🔔 Task alerts</h3>
+  <div id="notifyDrawer" class="settings-drawer" role="dialog" aria-modal="true" aria-label="Task alerts" aria-hidden="true">
+    <div class="drawer-head">
+      <h3>🔔 Task alerts</h3>
+      <button type="button" class="drawer-close" id="notifyClose" title="Close" aria-label="Close notification settings">✕</button>
+    </div>
+    <div class="drawer-body">
     <p class="hint">Get told the moment a Create PR / Deploy / Merge / chat turn finishes — even if you switched apps or locked the phone.</p>
     <label class="toggle-row">
       <input type="checkbox" id="notifySound">
@@ -1148,9 +1195,14 @@
     <div class="actions">
       <button id="ntfyTest" class="ghost sm">▶ Test phone push</button>
     </div>
+    </div>
   </div>
-  <div id="depthDrawer" class="depth-drawer">
-    <h3>Auto-run depth</h3>
+  <div id="depthDrawer" class="depth-drawer" role="dialog" aria-modal="true" aria-label="Auto-run depth" aria-hidden="true">
+    <div class="drawer-head">
+      <h3>Auto-run depth</h3>
+      <button type="button" class="drawer-close" id="depthClose" title="Close" aria-label="Close auto-run depth settings">✕</button>
+    </div>
+    <div class="drawer-body">
     <p class="hint">Clicking Create PR runs one stage after another, automatically, until it reaches the depth you pick here. A stage only advances on success.</p>
     <label class="depth-option">
       <input type="radio" name="depth" value="pr">
@@ -1164,6 +1216,7 @@
       <input type="radio" name="depth" value="merge">
       <span><span class="lbl">…through Merge</span><div class="desc">Keep going through Deploy, then Merge, with no more clicks.</div></span>
     </label>
+    </div>
   </div>
 
 <script src="/notify.js"></script>
@@ -1274,13 +1327,35 @@ function setPipelineDepth(v) { localStorage.setItem(LS_DEPTH, v); }
 const depthFab = document.getElementById('depthFab');
 const depthDrawer = document.getElementById('depthDrawer');
 const depthScrim = document.getElementById('depthScrim');
+const depthCloseBtn = document.getElementById('depthClose');
 function syncDepthRadios() {
   document.querySelectorAll('input[name="depth"]').forEach((r) => { r.checked = r.value === pipelineDepth(); });
 }
-function openDepthDrawer() { syncDepthRadios(); depthDrawer.classList.add('show'); depthScrim.classList.add('show'); }
-function closeDepthDrawer() { depthDrawer.classList.remove('show'); depthScrim.classList.remove('show'); }
+function openDepthDrawer() {
+  // Only one drawer at a time — otherwise a keyboard user can open both and
+  // end up with two stacked scrims/dialogs.
+  closeNotifyDrawer();
+  syncDepthRadios();
+  depthDrawer.classList.add('show');
+  depthDrawer.setAttribute('aria-hidden', 'false');
+  depthScrim.classList.add('show');
+  depthCloseBtn.focus({ preventScroll: true });
+}
+function closeDepthDrawer() {
+  if (!depthDrawer.classList.contains('show')) return;
+  // Closed drawers are visibility:hidden, so hand focus back to the trigger
+  // instead of letting it fall off an invisible element. A scrim tap blurs the
+  // focused control first, so treat a bare <body> focus as "inside" too.
+  const active = document.activeElement;
+  const refocus = !active || active === document.body || depthDrawer.contains(active) || active === depthScrim;
+  depthDrawer.classList.remove('show');
+  depthDrawer.setAttribute('aria-hidden', 'true');
+  depthScrim.classList.remove('show');
+  if (refocus) depthFab.focus({ preventScroll: true });
+}
 depthFab.addEventListener('click', openDepthDrawer);
 depthScrim.addEventListener('click', closeDepthDrawer);
+depthCloseBtn.addEventListener('click', closeDepthDrawer);
 document.querySelectorAll('input[name="depth"]').forEach((r) => {
   r.addEventListener('change', () => { if (r.checked) setPipelineDepth(r.value); });
 });
@@ -1298,6 +1373,7 @@ const notifySystemCb = document.getElementById('notifySystem');
 const notifyStateEl = document.getElementById('notifyState');
 const notifyInstallEl = document.getElementById('notifyInstall');
 const notifyTestBtn = document.getElementById('notifyTest');
+const notifyCloseBtn = document.getElementById('notifyClose');
 
 function syncNotifyUi() {
   if (!window.CCNotify) return;
@@ -1327,17 +1403,75 @@ function syncNotifyUi() {
 }
 
 function openNotifyDrawer() {
+  closeDepthDrawer();
   syncNotifyUi();
   syncNtfyUi();
   notifyDrawer.classList.add('show');
+  notifyDrawer.setAttribute('aria-hidden', 'false');
   notifyScrim.classList.add('show');
+  notifyCloseBtn.focus({ preventScroll: true });
 }
 function closeNotifyDrawer() {
+  if (!notifyDrawer.classList.contains('show')) return;
+  const active = document.activeElement;
+  const refocus = !active || active === document.body || notifyDrawer.contains(active) || active === notifyScrim;
   notifyDrawer.classList.remove('show');
+  notifyDrawer.setAttribute('aria-hidden', 'true');
   notifyScrim.classList.remove('show');
+  if (refocus) notifyFab.focus({ preventScroll: true });
 }
 notifyFab.addEventListener('click', openNotifyDrawer);
 notifyScrim.addEventListener('click', closeNotifyDrawer);
+notifyCloseBtn.addEventListener('click', closeNotifyDrawer);
+
+// Esc closes whichever drawer is open (both are dismissible the same way).
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (notifyDrawer.classList.contains('show')) closeNotifyDrawer();
+  if (depthDrawer.classList.contains('show')) closeDepthDrawer();
+});
+
+// Both drawers declare aria-modal="true", which tells assistive tech the rest
+// of the page is inert — so Tab must not walk out of the open drawer onto the
+// content behind the scrim. Cycle within it instead.
+function openDrawerEl() {
+  if (notifyDrawer.classList.contains('show')) return notifyDrawer;
+  if (depthDrawer.classList.contains('show')) return depthDrawer;
+  return null;
+}
+function drawerFocusables(drawer) {
+  const sel = 'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])';
+  const visible = Array.from(drawer.querySelectorAll(sel))
+    .filter((el) => !el.disabled && el.tabIndex >= 0 && el.getClientRects().length > 0);
+  // A radio group is a single tab stop: only its checked member is reachable
+  // by Tab (or the first one when nothing is checked yet). Counting the others
+  // would put `last` on an unreachable radio and let Tab fall out of the drawer.
+  return visible.filter((el) => {
+    if (el.type !== 'radio' || !el.name) return true;
+    const group = visible.filter((r) => r.type === 'radio' && r.name === el.name);
+    return el === (group.find((r) => r.checked) || group[0]);
+  });
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Tab') return;
+  const drawer = openDrawerEl();
+  if (!drawer) return;
+  const items = drawerFocusables(drawer);
+  if (!items.length) return;
+  const first = items[0];
+  const last = items[items.length - 1];
+  const active = document.activeElement;
+  if (!drawer.contains(active)) {
+    e.preventDefault();
+    (e.shiftKey ? last : first).focus({ preventScroll: true });
+  } else if (e.shiftKey && active === first) {
+    e.preventDefault();
+    last.focus({ preventScroll: true });
+  } else if (!e.shiftKey && active === last) {
+    e.preventDefault();
+    first.focus({ preventScroll: true });
+  }
+});
 
 notifySoundCb.addEventListener('change', () => {
   CCNotify.setSoundEnabled(notifySoundCb.checked);

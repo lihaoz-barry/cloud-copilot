@@ -375,6 +375,26 @@ function checkoutBranchCwd(repoPath, branch) {
   return repoPath;
 }
 
+/**
+ * Snapshot of the commit a deploy is about to ship, recorded on the build so
+ * history rows stay accurate. Best-effort: any git failure yields null rather
+ * than blocking the deploy.
+ */
+function readShippedCommit(cwd) {
+  try {
+    const out = execFileSync('git', ['log', '-1', '--format=%H%n%h%n%cI%n%s'], {
+      cwd,
+      encoding: 'utf8',
+      timeout: 15000,
+    }).trim();
+    const [sha, abbrev, committedDate, ...rest] = out.split('\n');
+    if (!sha) return null;
+    return { sha, abbrev: abbrev || sha.slice(0, 7), committedDate: committedDate || null, headline: rest.join(' ') || null };
+  } catch {
+    return null;
+  }
+}
+
 // origin's default branch (usually `main`), falling back to "main".
 function defaultBranchOf(repoPath) {
   try {
@@ -528,18 +548,32 @@ app.post('/api/settings/self/restart-main', (req, res) => {
 // title as the "What to Test" note), and whether it's been merged yet.
 // ---------------------------------------------------------------------------
 app.get('/api/testflight/builds', (req, res) => {
-  const builds = store
-    .listAllBuilds()
-    .map((b) => {
+  let listed;
+  try {
+    listed = store.listAllBuilds();
+  } catch (err) {
+    return res.status(500).json({ error: `Could not read build history: ${err.message}`, builds: [], errors: [] });
+  }
+  const errors = [...(listed.errors || [])];
+  const builds = [];
+  // Annotating a build can fail per row (unreadable repo config, missing repo
+  // on this machine). Each row is isolated so one bad entry costs exactly one
+  // entry — the rest of the history still renders.
+  for (const b of listed.builds) {
+    try {
       const repo = resolveRepo(b.repo);
-      return { ...b, ownerRepo: repo?.ownerRepo || null, _repo: repo };
-    })
-    // Only ever show builds shipped through the ios-testflight deploy path —
-    // repos configured for a "shell" deploy (e.g. a restart script) aren't
-    // TestFlight builds and would otherwise pollute this page.
-    .filter((b) => !b._repo || repoConfig.loadDeployConfig(b._repo.path).type === 'ios-testflight')
-    .map(({ _repo, ...b }) => b);
-  res.json({ builds });
+      if (repo && repoConfig.loadDeployConfig(repo.path).type !== 'ios-testflight') {
+        // Repos configured for a "shell" deploy (e.g. a restart script) aren't
+        // TestFlight builds and would otherwise pollute this page.
+        continue;
+      }
+      builds.push({ ...b, ownerRepo: (repo && repo.ownerRepo) || null, repoKnown: Boolean(repo) });
+    } catch (err) {
+      errors.push({ repo: b.repo, issueNumber: b.issueNumber, prNumber: b.prNumber, message: err.message });
+      builds.push({ ...b, ownerRepo: null, repoKnown: false });
+    }
+  }
+  res.json({ builds, errors, total: builds.length, generatedAt: new Date().toISOString() });
 });
 
 /**
@@ -1165,6 +1199,14 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
         execFileSync('git', ['rev-list', '--count', 'HEAD'], { cwd: workCwd, encoding: 'utf8', timeout: 15000 }).trim(),
       );
       version = repoConfig.readMarketingVersion(workCwd); // null if not found — fastlane then uses its own default
+      // Pin the exact code this attempt ships onto the deploy record, so the
+      // TestFlight history keeps showing the right branch/commit for this
+      // build even after the PR gets new commits (or is merged and deleted).
+      const shipped = readShippedCommit(workCwd);
+      store.updateDeploy(repo.name, n, prNumber, (d) => {
+        d.branch = pr.headRefName;
+        d.commit = shipped;
+      });
     } catch (err) {
       const message = `Failed to check out branch "${pr.headRefName}" / compute build number: ${err.message}`;
       store.updateDeploy(repo.name, n, prNumber, (d) => {

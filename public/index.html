@@ -694,6 +694,33 @@
     }
     .tf-mergebtn:hover { background: #ffffff1a; }
     .tf-mergebtn:disabled { opacity: .5; cursor: default; }
+    .tf-filters {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 10px;
+      padding: 8px 10px; border: 1px solid #8883; border-radius: 10px; background: #ffffff05;
+    }
+    .tf-filters label { font-size: .72rem; color: #9aa0aa; display: flex; align-items: center; gap: 5px; }
+    .tf-filters select {
+      font: inherit; font-size: .78rem; padding: 3px 6px; border-radius: 7px;
+      border: 1px solid #8884; background: Canvas; color: CanvasText;
+    }
+    .tf-count { font-size: .75rem; color: #9aa0aa; margin: 0 2px 8px; }
+    .tf-partial {
+      margin: 0 0 10px; padding: 8px 10px; border-radius: 10px; font-size: .76rem;
+      background: #eab30818; border: 1px solid #eab30855; color: #eab308;
+    }
+    .tf-meta { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; font-size: .74rem; color: #9aa0aa; }
+    .tf-meta code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .72rem; }
+    .tf-meta a { color: inherit; }
+    .tf-badge {
+      font-size: .66rem; text-transform: uppercase; letter-spacing: .04em; padding: 2px 6px;
+      border-radius: 999px; border: 1px solid #8884; color: #9aa0aa;
+    }
+    .tf-fail {
+      margin-top: 8px; padding: 8px 10px; border-radius: 8px; font-size: .78rem;
+      background: #ef444418; border: 1px solid #ef444455; color: #fca5a5;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .tf-card.tf-broken { border-color: #ef444488; }
 
     /* ---- Notification settings ---------------------------------------------- */
     .notify-fab {
@@ -956,6 +983,30 @@
       <h2>✈️ TestFlight Builds</h2>
       <button id="tfRefreshBtn" class="ghost" type="button">↻ Refresh</button>
     </div>
+    <div class="tf-filters" id="tfFilters" hidden>
+      <label>Version
+        <select id="tfFilterVersion"><option value="">All versions</option></select>
+      </label>
+      <label>Status
+        <select id="tfFilterStatus"><option value="">All statuses</option></select>
+      </label>
+      <label>Date
+        <select id="tfFilterDate">
+          <option value="">Any time</option>
+          <option value="1">Last 24 hours</option>
+          <option value="7">Last 7 days</option>
+          <option value="30">Last 30 days</option>
+          <option value="90">Last 90 days</option>
+        </select>
+      </label>
+      <label>App
+        <select id="tfFilterRepo"><option value="">All apps</option></select>
+      </label>
+      <span class="tf-spacer"></span>
+      <button id="tfFilterReset" class="ghost" type="button">Clear filters</button>
+    </div>
+    <div class="tf-partial" id="tfPartial" hidden></div>
+    <div class="tf-count" id="tfCount" hidden></div>
     <div id="tfList"></div>
   </div>
 
@@ -3363,7 +3414,37 @@ document.querySelectorAll('.nav-tab').forEach((b) => {
 // button that reuses the same merge SSE endpoint as the PR detail page. -----
 const tfList = document.getElementById('tfList');
 const tfRefreshBtn = document.getElementById('tfRefreshBtn');
+const tfFilters = document.getElementById('tfFilters');
+const tfFilterVersion = document.getElementById('tfFilterVersion');
+const tfFilterStatus = document.getElementById('tfFilterStatus');
+const tfFilterDate = document.getElementById('tfFilterDate');
+const tfFilterRepo = document.getElementById('tfFilterRepo');
+const tfFilterReset = document.getElementById('tfFilterReset');
+const tfCount = document.getElementById('tfCount');
+const tfPartial = document.getElementById('tfPartial');
 tfRefreshBtn.addEventListener('click', () => loadTestflightBuilds());
+
+// The full, unfiltered history stays in memory: filters only ever narrow what
+// is rendered, so no filter (and no refresh) can drop a build from history.
+let tfAllBuilds = [];
+const tfFilterState = { version: '', status: '', days: '', repo: '' };
+
+for (const [el, keyName] of [
+  [tfFilterVersion, 'version'],
+  [tfFilterStatus, 'status'],
+  [tfFilterDate, 'days'],
+  [tfFilterRepo, 'repo'],
+]) {
+  el.addEventListener('change', () => {
+    tfFilterState[keyName] = el.value;
+    renderTfList();
+  });
+}
+tfFilterReset.addEventListener('click', () => {
+  tfFilterState.version = tfFilterState.status = tfFilterState.days = tfFilterState.repo = '';
+  tfFilterVersion.value = tfFilterStatus.value = tfFilterDate.value = tfFilterRepo.value = '';
+  renderTfList();
+});
 
 function tfTimeAgo(iso) {
   if (!iso) return '';
@@ -3377,25 +3458,157 @@ function tfTimeAgo(iso) {
   return `${days}d ago`;
 }
 
+function tfAbsTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString();
+}
+
+function tfDuration(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return '';
+  const secs = Math.round(ms / 1000);
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  return `${mins}m ${secs % 60}s`;
+}
+
+const tfBuildTime = (b) => new Date(b.finishedAt || b.startedAt || 0).getTime() || 0;
+
 async function loadTestflightBuilds() {
   tfList.innerHTML = '<div class="placeholder"><div class="big">✈️</div><p>Loading builds…</p></div>';
-  let builds;
+  tfFilters.hidden = true;
+  tfCount.hidden = true;
+  tfPartial.hidden = true;
+  let data;
   try {
     const r = await fetch('/api/testflight/builds');
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    ({ builds } = await r.json());
+    data = await r.json();
+    if (!data || !Array.isArray(data.builds)) throw new Error('Malformed response from /api/testflight/builds');
   } catch (e) {
-    tfList.innerHTML = `<div class="placeholder"><div class="big">⚠️</div><h2>Couldn't load builds</h2><p>${escape(e.message)}</p></div>`;
+    tfList.innerHTML =
+      `<div class="placeholder"><div class="big">⚠️</div><h2>Couldn't load builds</h2>` +
+      `<p>${escape(e.message)}</p><p><button class="ghost" id="tfRetryBtn" type="button">↻ Retry</button></p></div>`;
+    const retry = document.getElementById('tfRetryBtn');
+    if (retry) retry.addEventListener('click', () => loadTestflightBuilds());
     return;
   }
-  if (!builds.length) {
+  // A refresh replaces the snapshot with the server's — which itself is the
+  // full archived history, so nothing accumulated earlier is lost.
+  tfAllBuilds = data.builds;
+  tfPopulateFilterOptions();
+  tfRenderPartialErrors(data.errors || []);
+  renderTfList();
+}
+
+// Rebuild the option lists from the data we actually have, preserving the
+// current selection when it still exists (so a refresh doesn't reset filters).
+function tfPopulateFilterOptions() {
+  const fill = (sel, values, allLabel, labelFor) => {
+    const prev = sel.value;
+    sel.innerHTML = '';
+    const all = document.createElement('option');
+    all.value = '';
+    all.textContent = allLabel;
+    sel.appendChild(all);
+    for (const v of values) {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = labelFor ? labelFor(v) : v;
+      sel.appendChild(o);
+    }
+    sel.value = values.includes(prev) ? prev : '';
+  };
+  const versions = [...new Set(tfAllBuilds.map((b) => b.version).filter(Boolean))].sort((a, b) =>
+    String(b).localeCompare(String(a), undefined, { numeric: true }),
+  );
+  const statuses = [...new Set(tfAllBuilds.map((b) => b.deployStatus).filter(Boolean))].sort();
+  const repos = [...new Set(tfAllBuilds.map((b) => b.repo).filter(Boolean))].sort();
+  fill(tfFilterVersion, versions, 'All versions');
+  fill(tfFilterStatus, statuses, 'All statuses', (v) => (STATE_LABEL.deploy[v] || v));
+  fill(tfFilterRepo, repos, 'All apps');
+  tfFilterState.version = tfFilterVersion.value;
+  tfFilterState.status = tfFilterStatus.value;
+  tfFilterState.repo = tfFilterRepo.value;
+}
+
+function tfRenderPartialErrors(errors) {
+  if (!errors.length) {
+    tfPartial.hidden = true;
+    return;
+  }
+  const lines = errors
+    .slice(0, 5)
+    .map((e) => `${escape(String(e.repo || '?'))}${e.prNumber ? ` PR #${e.prNumber}` : ''}: ${escape(String(e.message || 'unreadable'))}`);
+  tfPartial.innerHTML =
+    `⚠️ ${errors.length} record${errors.length > 1 ? 's' : ''} couldn't be read — the builds below are still complete for everything else.` +
+    `<br>${lines.join('<br>')}${errors.length > 5 ? '<br>…' : ''}`;
+  tfPartial.hidden = false;
+}
+
+function tfMatchesFilters(b) {
+  if (tfFilterState.version && b.version !== tfFilterState.version) return false;
+  if (tfFilterState.status && b.deployStatus !== tfFilterState.status) return false;
+  if (tfFilterState.repo && b.repo !== tfFilterState.repo) return false;
+  if (tfFilterState.days) {
+    const cutoff = Date.now() - Number(tfFilterState.days) * 86400000;
+    const t = tfBuildTime(b);
+    if (!t || t < cutoff) return false;
+  }
+  return true;
+}
+
+function renderTfList() {
+  if (!tfAllBuilds.length) {
+    tfFilters.hidden = true;
+    tfCount.hidden = true;
     tfList.innerHTML =
       '<div class="placeholder"><div class="big">✈️</div><h2>No builds yet</h2>' +
       '<p>Deploy a PR from the Home tab and it will show up here with its version, build number, and merge status.</p></div>';
     return;
   }
+  tfFilters.hidden = false;
+  const shown = tfAllBuilds.filter(tfMatchesFilters);
+  tfCount.hidden = false;
+  tfCount.textContent =
+    shown.length === tfAllBuilds.length
+      ? `${tfAllBuilds.length} build${tfAllBuilds.length > 1 ? 's' : ''} in history`
+      : `${shown.length} of ${tfAllBuilds.length} builds shown`;
   tfList.innerHTML = '';
-  for (const b of builds) tfList.appendChild(renderTfCard(b));
+  if (!shown.length) {
+    tfList.innerHTML =
+      '<div class="placeholder"><div class="big">🔍</div><h2>No builds match these filters</h2>' +
+      '<p>Nothing was deleted — clear the filters to see the full history again.</p></div>';
+    return;
+  }
+  for (const b of shown) {
+    // One malformed build must never blank the page: render a compact error
+    // card in its place and keep going.
+    try {
+      tfList.appendChild(renderTfCard(b));
+    } catch (e) {
+      tfList.appendChild(renderTfBrokenCard(b, e));
+    }
+  }
+}
+
+function renderTfBrokenCard(b, err) {
+  const card = document.createElement('div');
+  card.className = 'tf-card tf-broken';
+  const where = b && b.prNumber ? `PR #${b.prNumber}` : 'unknown PR';
+  card.innerHTML =
+    `<div class="tf-card-top"><span class="tf-app">${escape(String((b && b.repo) || 'unknown app'))}</span>` +
+    `<span class="tf-ver">${escape(where)}</span></div>` +
+    `<div class="tf-fail">This build couldn't be rendered: ${escape(err.message)}</div>`;
+  return card;
+}
+
+function tfCommitUrl(b) {
+  const c = b.commit;
+  if (!c) return null;
+  if (c.url) return c.url;
+  if (b.ownerRepo && c.sha) return `https://github.com/${b.ownerRepo}/commit/${c.sha}`;
+  return null;
 }
 
 function renderTfCard(b) {
@@ -3409,10 +3622,19 @@ function renderTfCard(b) {
   app.textContent = b.repo;
   const ver = document.createElement('span');
   ver.className = 'tf-ver';
-  ver.textContent = b.version ? `${b.version} (${b.buildNumber ?? '?'})` : b.buildNumber ? `build ${b.buildNumber}` : '';
+  ver.textContent = b.version ? `${b.version} (${b.buildNumber ?? '?'})` : b.buildNumber ? `build ${b.buildNumber}` : '(no build number)';
   const dstatus = document.createElement('span');
   dstatus.className = `stbtn ${STATE_CLASS[b.deployStatus] || 'st-idle'}`;
   dstatus.innerHTML = `<span class="dot"></span>${escape(STATE_LABEL.deploy[b.deployStatus] || b.deployStatus)}`;
+  top.append(app, ver, dstatus);
+  // Several attempts of the same PR (often the same version) each keep their
+  // own card — label the older ones so they read as history, not duplicates.
+  if (b.superseded) {
+    const badge = document.createElement('span');
+    badge.className = 'tf-badge';
+    badge.textContent = `attempt ${(b.attemptIndex ?? 0) + 1}/${b.attemptCount ?? 1} · superseded`;
+    top.appendChild(badge);
+  }
   const prLink = document.createElement('span');
   prLink.className = 'tf-pr';
   if (b.prUrl) {
@@ -3420,11 +3642,31 @@ function renderTfCard(b) {
   } else {
     prLink.textContent = `PR #${b.prNumber}`;
   }
-  top.append(app, ver, dstatus, prLink);
+  top.appendChild(prLink);
 
   const what = document.createElement('div');
   what.className = 'tf-what';
   what.innerHTML = `<span class="lbl">What to test</span>${escape(b.changelog || b.title || '(no notes captured for this build)')}`;
+
+  const meta = document.createElement('div');
+  meta.className = 'tf-meta';
+  const bits = [];
+  const started = b.startedAt ? `started ${escape(tfAbsTime(b.startedAt))}` : '';
+  if (started) bits.push(started);
+  if (b.finishedAt) bits.push(`finished ${escape(tfAbsTime(b.finishedAt))}`);
+  const dur = tfDuration(b.durationMs);
+  if (dur) bits.push(`took ${dur}`);
+  if (b.branch) bits.push(`branch <code>${escape(b.branch)}</code>`);
+  if (b.commit && (b.commit.abbrev || b.commit.sha)) {
+    const label = escape(b.commit.abbrev || String(b.commit.sha).slice(0, 7));
+    const url = tfCommitUrl(b);
+    const hint = b.commitIsCurrentHead ? ' (PR head today)' : '';
+    bits.push(url ? `commit <a href="${url}" target="_blank" rel="noopener"><code>${label}</code></a>${hint}` : `commit <code>${label}</code>${hint}`);
+  }
+  bits.push(`issue #${b.issueNumber}`);
+  if (b.prState) bits.push(`PR ${escape(String(b.prState).toLowerCase())}`);
+  if (Number.isFinite(b.exitCode) && b.exitCode !== 0) bits.push(`exit ${b.exitCode}`);
+  meta.innerHTML = bits.map((x) => `<span>${x}</span>`).join('');
 
   const row = document.createElement('div');
   row.className = 'tf-row';
@@ -3458,7 +3700,14 @@ function renderTfCard(b) {
     }
   }
 
-  card.append(top, what, row);
+  card.append(top, what, meta);
+  if (b.failureReason) {
+    const fail = document.createElement('div');
+    fail.className = 'tf-fail';
+    fail.textContent = b.failureReason;
+    card.appendChild(fail);
+  }
+  card.appendChild(row);
   return card;
 }
 

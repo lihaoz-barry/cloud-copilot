@@ -493,6 +493,7 @@ behaviour:
 | POST | `/api/repos/:name/issues/:n/merge/:pr/cancel` | Abort the running merge for that PR. |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat` | **Chat with a PR** — SSE stream. Body: `{ "message": "...", "mode": "plan"\|"apply", "model": "..." }`. `plan` is read-only (default approval flags); `apply` implements + pushes to the existing branch and resets Deploy/Merge on success. The optional `model` overrides the global setting for that turn only (unknown values fall back to it). |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat/cancel` | Abort the running chat turn for that PR. |
+| GET  | `/api/testflight/builds` | **TestFlight build history** — every deploy attempt ever recorded for `ios-testflight` repos (live + archived), newest first: `{ builds, errors, total, generatedAt }`. Each build carries version, build number, start/finish/duration, deploy status, branch + commit, PR/issue, the "What to Test" note, and a short failure reason for failed attempts. Attempts are never collapsed — several builds of the same version stay separate rows. Records that cannot be read land in `errors` instead of failing the response. |
 | POST | `/api/run` | Simple one-shot demo (prompt + optional `sessionId` resume). |
 
 ### SSE events
@@ -501,6 +502,29 @@ behaviour:
 (`{sessionId}`) → `result` (`{action,status,prUrl?,prNumber?}`, where `status` is
 `success`/`failed`/`aborted`, or `blocked` when the repo lock rejects a second
 Create PR, or Merge is attempted before Deploy has succeeded) → `done` (`{exitCode}`).
+
+---
+
+## TestFlight tab — full build history
+
+The **✈️ TestFlight** tab lists *every* build the pipeline has ever shipped, not
+just the latest one per PR. Each deploy attempt is archived into the store
+(`deployHistory`) before the next one starts, so re-deploying a PR — or pushing
+new commits to it — never overwrites the earlier build's record, even when both
+attempts report the same version string.
+
+Each row shows: app, version + build number, deploy status, start/finish time and
+duration, the branch and the exact commit that was shipped, the PR and issue, the
+"What to Test" note, and — for failed/aborted attempts — the exit code and a
+one-line reason extracted from the deploy transcript. Superseded attempts are
+badged `attempt n/m · superseded`; only the current attempt keeps its Merge button.
+
+The toolbar filters by version, status, date range and app. Filtering is purely a
+view over the full in-memory history (and `↻ Refresh` re-reads the complete
+history from the server), so no filter or refresh can drop a build. Failures are
+isolated at every level: a record the server cannot read is reported in a banner
+while the rest of the history still renders, a build that cannot be rendered
+becomes a single error card, and a failed load offers a **Retry** button.
 
 ---
 
@@ -773,6 +797,7 @@ cloud-copilot/
 ├── .cloud-copilot.json # this repo's own deploy config (shell -> cc:restart)
 ├── server.js           # Express app: repos/issues/work/deploy/merge routes + state machine
 ├── lib/
+│   ├── buildHistory.js # flattens every deploy attempt into the TestFlight build history
 │   ├── changelog.js    # PR title -> short Chinese TestFlight "What to Test" note
 │   ├── gh.js           # enumerate repos, list issues/PRs/single-PR via `gh` (cached)
 │   ├── ghCache.js      # L2 cache for gh results, persisted to data/gh-cache.json

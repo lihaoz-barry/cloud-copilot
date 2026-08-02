@@ -29,6 +29,7 @@ const { runCopilotSSE, writeSseHead } = require('./lib/runner');
 const jobs = require('./lib/jobs');
 const notifier = require('./lib/notifier');
 const { UPLOADS_DIR, saveUploadedImages, cleanupOldUploads } = require('./lib/attachments');
+const { cleanupAfterMerge } = require('./lib/mergeCleanup');
 const worktrees = require('./lib/worktrees');
 
 const HOST = process.env.HOST || '0.0.0.0';
@@ -1516,6 +1517,27 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
         m.recoveryMessage = recoveryMessage;
         m.finishedAt = new Date().toISOString();
       });
+      let issueCleanup = null;
+      if (success) {
+        // GitHub only auto-closes the issue when the PR body carries `Closes #N`
+        // and targets the default branch, and it never closes the other PRs
+        // opened for the same issue — do both ourselves. Best-effort: a cleanup
+        // failure must not flip an already successful merge to 'failed'.
+        try {
+          const record = store.getRecord(repo.name, n);
+          issueCleanup = await cleanupAfterMerge({
+            ownerRepo: repo.ownerRepo,
+            issueNumber: n,
+            mergedPrNumber: prNumber,
+            prNumbers: Object.keys(record.prs || {}).map(Number),
+          });
+        } catch (error) {
+          issueCleanup = { errors: [error.message], message: `Post-merge cleanup failed: ${error.message}` };
+        }
+        store.updateMerge(repo.name, n, prNumber, (m) => {
+          m.cleanup = issueCleanup;
+        });
+      }
       if (success && baseRefName) {
         // Best-effort: bring the local clone back to the base branch, like the
         // manual `git checkout main && git pull` done after a manual merge.
@@ -1532,7 +1554,7 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
       }
       // A merged PR's worktree is dead weight, and GitHub usually deleted its
       // remote branch — so origin/<base> is what proves its commits are safe.
-      let cleanup = [];
+      let worktreeCleanup = [];
       if (success) {
         const base = baseRefName || defaultBranchOf(repo.path);
         let mergedBranch = null;
@@ -1542,11 +1564,11 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
         } catch {
           /* the sweep below still covers it */
         }
-        cleanup = worktrees.cleanupAfterRun(repo.path, mergedBranch, {
+        worktreeCleanup = worktrees.cleanupAfterRun(repo.path, mergedBranch, {
           skipPaths: [j.cwd],
           fallbackRef: `origin/${base}`,
         });
-        const cleanupText = worktrees.formatCleanup(cleanup);
+        const cleanupText = worktrees.formatCleanup(worktreeCleanup);
         if (cleanupText) {
           store.updateMerge(repo.name, n, prNumber, (m) => {
             m.conversation = `${m.conversation}\n${cleanupText}\n`;
@@ -1560,7 +1582,9 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
         recoveryAttempted,
         conflictResolved,
         recoveryMessage,
-        worktreeCleanup: cleanup,
+        cleanup: issueCleanup,
+        cleanupMessage: (issueCleanup && issueCleanup.message) || null,
+        worktreeCleanup,
       };
     },
   });

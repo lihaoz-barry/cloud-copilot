@@ -2365,6 +2365,10 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         el.textContent = 'Merged · recovered by Copilot';
         el.title = pr.merge.recoveryMessage || el.title;
       }
+      const cleanupMsg = pr.merge && pr.merge.cleanup && pr.merge.cleanup.message;
+      if (ms === 'success' && cleanupMsg) {
+        el.title = [el.title, cleanupMsg].filter(Boolean).join(' · ');
+      }
     }
   }
 
@@ -2734,11 +2738,15 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         pr.merge.recoveryAttempted = Boolean(resultData.recoveryAttempted);
         pr.merge.conflictResolved = Boolean(resultData.conflictResolved);
         pr.merge.recoveryMessage = resultData.recoveryMessage || null;
+        pr.merge.cleanup = resultData.cleanup || null;
       }
       paintMerge(prNumber);
       appendMerge(prNumber, `\n[merge #${prNumber}] finished: ${finalStatus}\n`, finalStatus === 'success' ? 'ok' : 'err');
       if (resultData && resultData.recoveryMessage) {
         appendMerge(prNumber, `[merge #${prNumber}] ${resultData.recoveryMessage}\n`, finalStatus === 'success' ? 'ok' : 'err');
+      }
+      if (resultData && resultData.cleanupMessage) {
+        appendMerge(prNumber, `[merge #${prNumber}] ${resultData.cleanupMessage}\n`, 'ok');
       }
       refreshMergeTiming(prNumber);
       repoCtx.clearActive(issue.number);

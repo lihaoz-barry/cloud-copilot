@@ -354,6 +354,79 @@ function isDirty(repoPath) {
   }
 }
 
+// A branch that is already checked out in a linked worktree (e.g. one an agent
+// session created under .claude/worktrees) can never be checked out again in the
+// main working tree — git aborts with "already used by worktree". Returns that
+// worktree's path, or null when the branch is free.
+function worktreePathForBranch(repoPath, branch) {
+  let out;
+  try {
+    out = git(repoPath, ['worktree', 'list', '--porcelain'], 15000);
+  } catch {
+    return null;
+  }
+  let current = null;
+  for (const line of out.split('\n')) {
+    if (line.startsWith('worktree ')) current = line.slice('worktree '.length).trim();
+    else if (line.startsWith('branch ') && current) {
+      const ref = line.slice('branch '.length).trim();
+      if (ref === `refs/heads/${branch}` && path.resolve(current) !== path.resolve(repoPath)) return current;
+    }
+  }
+  return null;
+}
+
+// True only when removing the worktree cannot lose work: nothing modified or
+// untracked, and every commit it holds already exists on origin/<branch>.
+// Anything we cannot prove (missing remote-tracking ref, git errors) counts as
+// unsafe, so the caller keeps the directory.
+function worktreeIsDisposable(worktreePath, branch) {
+  if (isDirty(worktreePath)) return false;
+  try {
+    return git(worktreePath, ['log', '--oneline', `origin/${branch}..HEAD`], 15000).length === 0;
+  } catch {
+    return false;
+  }
+}
+
+// Unlocks (locked worktrees refuse removal) and removes the worktree, then
+// prunes the stale administrative entry. Throws when git refuses.
+function releaseWorktree(repoPath, worktreePath) {
+  try {
+    git(repoPath, ['worktree', 'unlock', worktreePath], 15000);
+  } catch {
+    /* not locked — nothing to unlock */
+  }
+  git(repoPath, ['worktree', 'remove', worktreePath], 30000);
+  try {
+    git(repoPath, ['worktree', 'prune'], 15000);
+  } catch {
+    /* best effort */
+  }
+}
+
+// Makes `branch` the HEAD of the returned working directory. Normally that is
+// the repo itself: when a linked worktree holds the branch we release it first
+// so the action runs locally in the main tree, and only fall back to running
+// inside the worktree when it still holds uncommitted or unpushed work. Throws
+// on failure. Argument-array form (never a shell string) so branch names, which
+// come from GitHub, are never interpreted by a shell.
+function checkoutBranchCwd(repoPath, branch) {
+  execFileSync('git', ['fetch', 'origin', branch], { cwd: repoPath, stdio: 'ignore', timeout: 30000 });
+  const worktree = worktreePathForBranch(repoPath, branch);
+  if (worktree) {
+    if (worktreeIsDisposable(worktree, branch)) {
+      releaseWorktree(repoPath, worktree);
+    } else {
+      // The worktree carries local work — deploy it where it lives rather than
+      // deleting it or failing the job.
+      return worktree;
+    }
+  }
+  execFileSync('git', ['checkout', branch], { cwd: repoPath, stdio: 'ignore', timeout: 15000 });
+  return repoPath;
+}
+
 // origin's default branch (usually `main`), falling back to "main".
 function defaultBranchOf(repoPath) {
   try {
@@ -1058,16 +1131,13 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
     // exact commit being shipped — never inferred afterward from the agent's
     // free-form report. build = commit count (same source `fastlane beta`
     // itself defaults to); version = the Xcode project's own MARKETING_VERSION.
-    let buildNumber, version;
+    let buildNumber, version, workCwd;
     try {
-      // Argument-array form — branch names come from GitHub and are never
-      // interpreted by a shell.
-      execFileSync('git', ['fetch', 'origin', pr.headRefName], { cwd: repo.path, stdio: 'ignore', timeout: 30000 });
-      execFileSync('git', ['checkout', pr.headRefName], { cwd: repo.path, stdio: 'ignore', timeout: 15000 });
+      workCwd = checkoutBranchCwd(repo.path, pr.headRefName);
       buildNumber = Number(
-        execFileSync('git', ['rev-list', '--count', 'HEAD'], { cwd: repo.path, encoding: 'utf8', timeout: 15000 }).trim(),
+        execFileSync('git', ['rev-list', '--count', 'HEAD'], { cwd: workCwd, encoding: 'utf8', timeout: 15000 }).trim(),
       );
-      version = repoConfig.readMarketingVersion(repo.path); // null if not found — fastlane then uses its own default
+      version = repoConfig.readMarketingVersion(workCwd); // null if not found — fastlane then uses its own default
     } catch (err) {
       const message = `Failed to check out branch "${pr.headRefName}" / compute build number: ${err.message}`;
       store.updateDeploy(repo.name, n, prNumber, (d) => {
@@ -1100,7 +1170,7 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
     const job = jobs.startJob(key, {
       bin: COPILOT_BIN,
       args,
-      cwd: repo.path,
+      cwd: workCwd,
       meta: {
         action: 'deploy',
         prNumber,
@@ -1179,16 +1249,9 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
       return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
     }
 
-    // Argument-array form (never a shell string) so the branch name — which
-    // comes from GitHub and could in principle contain shell metacharacters —
-    // is never interpreted by a shell.
+    let workCwd;
     try {
-      execFileSync('git', ['fetch', 'origin', pr.headRefName], {
-        cwd: repo.path,
-        stdio: 'ignore',
-        timeout: 30000,
-      });
-      execFileSync('git', ['checkout', pr.headRefName], { cwd: repo.path, stdio: 'ignore', timeout: 15000 });
+      workCwd = checkoutBranchCwd(repo.path, pr.headRefName);
     } catch (err) {
       const message = `Failed to check out branch "${pr.headRefName}": ${err.message}`;
       store.updateDeploy(repo.name, n, prNumber, (d) => {
@@ -1206,7 +1269,7 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
     const job = jobs.startJob(key, {
       bin: 'bash',
       args: ['-lc', command],
-      cwd: repo.path,
+      cwd: workCwd,
       meta: {
         action: 'deploy',
         prNumber,
@@ -1507,9 +1570,9 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
     const message2 = `Could not resolve the branch for PR #${prNumber} via gh.`;
     return sendSseBlocked(res, { action: 'chat', prNumber, mode, status: 'failed', message: message2 });
   }
+  let workCwd;
   try {
-    execFileSync('git', ['fetch', 'origin', prInfo.headRefName], { cwd: repo.path, stdio: 'ignore', timeout: 30000 });
-    execFileSync('git', ['checkout', prInfo.headRefName], { cwd: repo.path, stdio: 'ignore', timeout: 15000 });
+    workCwd = checkoutBranchCwd(repo.path, prInfo.headRefName);
   } catch (err) {
     const message2 = `Failed to check out branch "${prInfo.headRefName}": ${err.message}`;
     return sendSseBlocked(res, { action: 'chat', prNumber, mode, status: 'failed', message: message2 });
@@ -1545,7 +1608,7 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
   const job = jobs.startJob(key, {
     bin: COPILOT_BIN,
     args,
-    cwd: repo.path,
+    cwd: workCwd,
     meta: {
       action: 'chat',
       prNumber,

@@ -117,6 +117,13 @@ every workflow bar starts at the same x whichever icons a line has.
   subprocesses die too; the run ends in an `aborted` state you can re-run.
 - **Re-deploy**: clicking Deploy on a finished/failed/aborted PR asks to confirm
   before starting a new run.
+- **Branches held by a worktree are released, not fought over** — Deploy and PR
+  chat check out the PR branch in the repo itself, which git refuses when a
+  linked worktree (e.g. one an agent session left under `.claude/worktrees/`)
+  already holds it. If that worktree is clean and fully pushed it is unlocked,
+  removed and pruned, and the run proceeds locally in the main tree. If it still
+  holds uncommitted changes or unpushed commits, nothing is deleted: the run
+  happens inside that worktree instead.
 - **Merge is gated on Deploy succeeding** — the Merge cell stays a dimmed, locked
   `🔒 Merge` until then. You can still click it early; it asks you to confirm a
   **force-merge** that skips the gate.

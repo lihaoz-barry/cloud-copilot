@@ -763,16 +763,32 @@ app.post('/api/settings/self/restart-main', (req, res) => {
 // title as the "What to Test" note), and whether it's been merged yet.
 // ---------------------------------------------------------------------------
 app.get('/api/testflight/builds', (req, res) => {
+  // Resolve each repo once, not once per build: the scan behind `resolveRepo`
+  // is synchronous, so doing it per row blocked the event loop for the whole
+  // page's worth of builds.
+  const repoByName = new Map();
+  const repoFor = (name) => {
+    if (!repoByName.has(name)) repoByName.set(name, resolveRepo(name));
+    return repoByName.get(name);
+  };
+  // Likewise cache the deploy config per repo rather than re-reading it per row.
+  const deployTypeByPath = new Map();
+  const deployType = (repoPath) => {
+    if (!deployTypeByPath.has(repoPath)) {
+      deployTypeByPath.set(repoPath, repoConfig.loadDeployConfig(repoPath).type);
+    }
+    return deployTypeByPath.get(repoPath);
+  };
   const builds = store
     .listAllBuilds()
     .map((b) => {
-      const repo = resolveRepo(b.repo);
+      const repo = repoFor(b.repo);
       return { ...b, ownerRepo: repo?.ownerRepo || null, _repo: repo };
     })
     // Only ever show builds shipped through the ios-testflight deploy path —
     // repos configured for a "shell" deploy (e.g. a restart script) aren't
     // TestFlight builds and would otherwise pollute this page.
-    .filter((b) => !b._repo || repoConfig.loadDeployConfig(b._repo.path).type === 'ios-testflight')
+    .filter((b) => !b._repo || deployType(b._repo.path) === 'ios-testflight')
     .map(({ _repo, ...b }) => b);
   res.json({ builds });
 });

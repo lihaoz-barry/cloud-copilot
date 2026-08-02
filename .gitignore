@@ -3,6 +3,8 @@ npm-debug.log*
 .DS_Store
 .env
 data/
+# pure acceleration layer — rebuilt from GitHub on demand, never source of truth
+data/gh-cache.json
 server.js.bak
 server.log
 
@@ -13,3 +15,4 @@ setup/deploy.env
 
 # playwright-mcp scratch output
 .playwright-mcp/
+setup/notify.env

@@ -221,6 +221,82 @@ test('a phase that cannot be spawned finishes the job instead of hanging', async
   assert.strictEqual(count(res.events.map((e) => e.event).join(','), 'done'), 1);
 });
 
+test('phaseLog() isolates the current phase, so a verdict is not read off an earlier one', async () => {
+  // The deploy's outcome is decided by matching fastlane's completion lines in
+  // the transcript. A salvaged deploy's transcript also holds the salvage
+  // session, whose own prose says things like "finished successfully" — reading
+  // the whole transcript would report a shipped build for an upload that failed.
+  const job = jobs.startJob(uniqueKey('phase-log'), {
+    ...nodePhase('salvage agent: finished successfully, PR opened'),
+    meta: { phase: 'salvage' },
+    nextPhase: async () => ({ ...nodePhase('fastlane: build failed'), phase: 'deploy' }),
+    onDone: async (j) => ({ deployLog: jobs.phaseLog(j) }),
+  });
+  await waitDone(job);
+
+  assert.ok(job.conversation.includes('finished successfully'), 'the full transcript keeps both phases');
+  const deployLog = job.result.deployLog;
+  assert.ok(deployLog.includes('fastlane: build failed'));
+  assert.ok(!deployLog.includes('finished successfully'), 'the deploy phase does not inherit phase 1 output');
+});
+
+test('phaseLog() on a single-phase job is the whole transcript', async () => {
+  const job = jobs.startJob(uniqueKey('phase-log-single'), {
+    ...nodePhase('successfully uploaded'),
+    onDone: async (j) => ({ deployLog: jobs.phaseLog(j) }),
+  });
+  await waitDone(job);
+  assert.ok(job.result.deployLog.includes('successfully uploaded'));
+});
+
+test('an abort raised while the supervisor is still answering stops the phase', async () => {
+  // The window between asking the supervisor for a session and being handed
+  // one: `cancelJob` finds no sessionRef and no child, so `abortByKey` matches
+  // nothing and the flag is all that is left. Without honouring it on arrival,
+  // the phase the abort was meant to prevent runs to completion — which for a
+  // deploy means shipping a build the user just cancelled.
+  const supervisorClient = require('../lib/supervisorClient');
+  const original = {
+    spawnSession: supervisorClient.spawnSession,
+    streamSession: supervisorClient.streamSession,
+    abortSession: supervisorClient.abortSession,
+    abortByKey: supervisorClient.abortByKey,
+  };
+  const abortedSessions = [];
+  let handlers = null;
+  supervisorClient.spawnSession = () =>
+    new Promise((resolve) => setTimeout(() => resolve({ session: { id: 'sess-1' } }), 100));
+  supervisorClient.streamSession = (_id, h) => {
+    handlers = h;
+    return () => {};
+  };
+  supervisorClient.abortSession = async (id) => {
+    abortedSessions.push(id);
+    handlers.onExit({ exitCode: null, aborted: true });
+    return { ok: true };
+  };
+  supervisorClient.abortByKey = async () => ({ ok: false });
+
+  try {
+    const key = uniqueKey('cancel-spawn-window');
+    let advanced = false;
+    const job = jobs.startJob(key, {
+      ...nodePhase('SALVAGE'),
+      nextPhase: async () => {
+        advanced = true;
+        return nodePhase('DEPLOY');
+      },
+    });
+    jobs.cancelJob(key); // lands before the supervisor has answered
+    await waitDone(job);
+    assert.deepStrictEqual(abortedSessions, ['sess-1'], 'the session is killed as soon as it exists');
+    assert.strictEqual(advanced, false, 'and the job never rolls on into the next phase');
+    assert.strictEqual(job.cancelled, true);
+  } finally {
+    Object.assign(supervisorClient, original);
+  }
+});
+
 test('note() lands in the transcript and on the stream', async () => {
   const res = fakeRes();
   const job = jobs.startJob(uniqueKey('note'), { ...nodePhase('X') });

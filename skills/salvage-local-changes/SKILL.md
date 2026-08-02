@@ -85,5 +85,9 @@ the work. Push and open the PR — do not stop at a local commit.
   PR out.
 - `git checkout -- .`, `git reset --hard`, and `git clean` destroy the very work
   you were asked to rescue. Never run them.
-- If the tree turns out to be clean already, do nothing, say so, and exit 0 — the
-  caller then proceeds straight to its checkout.
+- If the tree turns out to be clean already, do **not** assume you are done: the
+  caller still requires a real, open pull request that contains the commit at
+  `HEAD`. If the work was already committed locally, push it and open that PR
+  (steps 3, 10, 11). Only when there was genuinely nothing to rescue is exiting
+  0 with an explanation correct — the caller will then refuse to deploy rather
+  than guess, which is by design.

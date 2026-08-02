@@ -31,7 +31,7 @@ const { runCopilotSSE, writeSseHead } = require('./lib/runner');
 const jobs = require('./lib/jobs');
 const notifier = require('./lib/notifier');
 const changelogLib = require('./lib/changelog');
-const salvage = require('./lib/salvage');
+const salvageLib = require('./lib/salvage');
 const { UPLOADS_DIR, saveUploadedImages, cleanupOldUploads } = require('./lib/attachments');
 const { cleanupAfterMerge } = require('./lib/mergeCleanup');
 const worktrees = require('./lib/worktrees');
@@ -1550,7 +1550,7 @@ function refuseIfPrClosed(repo, n, prNumber, pr) {
 // The verification gate between the two phases lives in lib/salvage.js, with
 // git and gh injected so it can be unit-tested (test/salvage.test.js) instead of
 // only ever exercised by a live deploy.
-const salvageChecks = salvage.createSalvageChecks({ git, gh });
+const salvageChecks = salvageLib.createSalvageChecks({ git, gh });
 
 // A one-line-per-file digest of the dirty tree, for the prompt and the log.
 const dirtySummary = (repoPath) => salvageChecks.statusPorcelain(repoPath);
@@ -1749,13 +1749,18 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
         // Never reached the deploy phase — the salvage preflight failed, or the
         // checkout after it did. Report that, not a bogus deploy verdict.
         if (!reachedDeploy) return failedPreflight(repo, n, prNumber, j);
+        // ONLY the deploy phase's own output. A salvaged deploy's transcript
+        // also holds the salvage session, whose prose ("finished successfully",
+        // "uploaded…") would otherwise satisfy these markers and report a
+        // shipped build for an upload that never happened.
+        const deployLog = jobs.phaseLog(j);
         // Success markers emitted by fastlane / the skill's final report.
         // "finished processing the build" is fastlane's own real completion
         // line (confirmed against a live deploy) — the earlier patterns alone
         // missed it and mis-marked a genuinely successful upload as failed.
         const success =
           /successfully uploaded|finished successfully|finished processing the build|uploaded to testflight|build \d+ .*uploaded/i.test(
-            j.conversation,
+            deployLog,
           );
         const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
         // Xcode's export step can silently bump the build number past what we
@@ -1768,7 +1773,7 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
               // Tolerate markdown emphasis (**68**) around the numbers — this
               // matches the agent's own summary line, not fastlane's raw log
               // (which Copilot CLI collapses in the stored transcript).
-              const m = j.conversation.match(
+              const m = deployLog.match(
                 /finished processing the build\s+\**([\d.]+)\**\s*-\s*\**(\d+)\**\s*for/i,
               );
               return m ? { version: m[1], buildNumber: Number(m[2]) } : null;

@@ -972,7 +972,11 @@ the HTTP connection that started them:
   [deploy preflight](#deploy-preflight-dirty-working-trees) (salvage → deploy). Throwing
   from `nextPhase` surfaces the message on the stream and ends the job; a cancelled job
   never advances to the next phase — including a cancel that lands while `nextPhase` is
-  still awaiting, when there is no live child to kill. Covered by `test/jobs.test.js`.
+  still awaiting, or while the supervisor is still answering the spawn request, when in
+  both cases there is no live child to kill. A verdict read out of the transcript must use
+  `jobs.phaseLog(job)` (the current phase's slice) rather than `job.conversation`, or an
+  earlier phase's prose can satisfy the later phase's success markers. Covered by
+  `test/jobs.test.js`.
 
 ### SSE event types
 

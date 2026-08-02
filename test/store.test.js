@@ -111,3 +111,24 @@ test('unknown actions and unknown issues never write a record', () => {
 
   assert.strictEqual(fs.readFileSync(path.join(dataDir, 'state.json'), 'utf8'), before);
 });
+
+// --- getStatuses payload (issue #68) ---------------------------------------
+// The ✨ badge is decided in the browser from the status payload alone, so the
+// completed-review marker has to travel with it — without this field a merged,
+// reviewed PR can never light up, no matter how correct the frontend is.
+test('getStatuses exposes the completed-review sha next to the PR state', () => {
+  store.upsertPr(REPO, 7, { prNumber: 55, prUrl: 'https://example.test/pr/55' });
+  store.updateReview(REPO, 7, 55, (rv) => { rv.status = 'success'; rv.lastReviewedSha = 'deadbeefcafe'; });
+  store.updateRecord(REPO, 7, (r) => { r.prs[55].state = 'MERGED'; });
+
+  const pr = store.getStatuses(REPO, [7])[7].prs.find((p) => p.prNumber === 55);
+  assert.strictEqual(pr.state, 'MERGED');
+  assert.strictEqual(pr.review.lastReviewedSha, 'deadbeefcafe');
+});
+
+test('getStatuses reports a never-reviewed PR as review.lastReviewedSha = null', () => {
+  store.upsertPr(REPO, 8, { prNumber: 56, prUrl: 'https://example.test/pr/56' });
+
+  const pr = store.getStatuses(REPO, [8])[8].prs.find((p) => p.prNumber === 56);
+  assert.deepStrictEqual(pr.review, { lastReviewedSha: null });
+});

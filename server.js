@@ -29,6 +29,7 @@ const { runCopilotSSE, writeSseHead } = require('./lib/runner');
 const jobs = require('./lib/jobs');
 const notifier = require('./lib/notifier');
 const { UPLOADS_DIR, saveUploadedImages, cleanupOldUploads } = require('./lib/attachments');
+const worktrees = require('./lib/worktrees');
 
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 8787);
@@ -354,57 +355,6 @@ function isDirty(repoPath) {
   }
 }
 
-// A branch that is already checked out in a linked worktree (e.g. one an agent
-// session created under .claude/worktrees) can never be checked out again in the
-// main working tree — git aborts with "already used by worktree". Returns that
-// worktree's path, or null when the branch is free.
-function worktreePathForBranch(repoPath, branch) {
-  let out;
-  try {
-    out = git(repoPath, ['worktree', 'list', '--porcelain'], 15000);
-  } catch {
-    return null;
-  }
-  let current = null;
-  for (const line of out.split('\n')) {
-    if (line.startsWith('worktree ')) current = line.slice('worktree '.length).trim();
-    else if (line.startsWith('branch ') && current) {
-      const ref = line.slice('branch '.length).trim();
-      if (ref === `refs/heads/${branch}` && path.resolve(current) !== path.resolve(repoPath)) return current;
-    }
-  }
-  return null;
-}
-
-// True only when removing the worktree cannot lose work: nothing modified or
-// untracked, and every commit it holds already exists on origin/<branch>.
-// Anything we cannot prove (missing remote-tracking ref, git errors) counts as
-// unsafe, so the caller keeps the directory.
-function worktreeIsDisposable(worktreePath, branch) {
-  if (isDirty(worktreePath)) return false;
-  try {
-    return git(worktreePath, ['log', '--oneline', `origin/${branch}..HEAD`], 15000).length === 0;
-  } catch {
-    return false;
-  }
-}
-
-// Unlocks (locked worktrees refuse removal) and removes the worktree, then
-// prunes the stale administrative entry. Throws when git refuses.
-function releaseWorktree(repoPath, worktreePath) {
-  try {
-    git(repoPath, ['worktree', 'unlock', worktreePath], 15000);
-  } catch {
-    /* not locked — nothing to unlock */
-  }
-  git(repoPath, ['worktree', 'remove', worktreePath], 30000);
-  try {
-    git(repoPath, ['worktree', 'prune'], 15000);
-  } catch {
-    /* best effort */
-  }
-}
-
 // Makes `branch` the HEAD of the returned working directory. Normally that is
 // the repo itself: when a linked worktree holds the branch we release it first
 // so the action runs locally in the main tree, and only fall back to running
@@ -413,15 +363,11 @@ function releaseWorktree(repoPath, worktreePath) {
 // come from GitHub, are never interpreted by a shell.
 function checkoutBranchCwd(repoPath, branch) {
   execFileSync('git', ['fetch', 'origin', branch], { cwd: repoPath, stdio: 'ignore', timeout: 30000 });
-  const worktree = worktreePathForBranch(repoPath, branch);
-  if (worktree) {
-    if (worktreeIsDisposable(worktree, branch)) {
-      releaseWorktree(repoPath, worktree);
-    } else {
-      // The worktree carries local work — deploy it where it lives rather than
-      // deleting it or failing the job.
-      return worktree;
-    }
+  const released = worktrees.releaseBranchWorktree(repoPath, branch, { fetch: false });
+  if (released.status === 'kept') {
+    // The worktree carries local work — deploy it where it lives rather than
+    // deleting it or failing the job.
+    return released.path;
   }
   execFileSync('git', ['checkout', branch], { cwd: repoPath, stdio: 'ignore', timeout: 15000 });
   return repoPath;
@@ -1046,10 +992,30 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
       const success = fromTranscript ? Boolean(prUrl) : j.exitCode === 0 && Boolean(prUrl);
       const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
 
+      // Housekeeping BEFORE the record is written, so the cleanup notes end up
+      // in the stored transcript too. The agent may have implemented the issue
+      // inside a linked worktree it created (and even left locked); once the
+      // branch is pushed that directory only stands between Deploy and its
+      // branch. Removing it here — while this job still holds the repo lock —
+      // means Deploy never has to fight for the checkout. Anything holding
+      // uncommitted or unpushed work is left alone.
+      let headBranch = null;
+      if (prNumber) {
+        try {
+          const prInfo = await gh.getPr(repo.ownerRepo, prNumber);
+          headBranch = (prInfo && prInfo.headRefName) || null;
+        } catch {
+          /* branch stays null — the sweep below still covers it */
+        }
+      }
+      const cleanup = worktrees.cleanupAfterRun(repo.path, headBranch, { skipPaths: [j.cwd] });
+      const cleanupText = worktrees.formatCleanup(cleanup);
+      const conversation = cleanupText ? `${j.conversation}\n${cleanupText}\n` : j.conversation;
+
       store.updateRecord(repo.name, n, (r) => {
         r.work.status = status;
         r.work.exitCode = j.exitCode;
-        r.work.conversation = j.conversation;
+        r.work.conversation = conversation;
         r.work.prUrl = prUrl;
         r.work.prNumber = prNumber;
         r.work.sessionId = j.sessionId || r.work.sessionId;
@@ -1072,6 +1038,7 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
         prUrl,
         prNumber,
         sessionId: j.sessionId,
+        worktreeCleanup: cleanup,
       };
     },
   });
@@ -1489,6 +1456,29 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
           /* best-effort only — merge itself already succeeded */
         }
       }
+      // A merged PR's worktree is dead weight, and GitHub usually deleted its
+      // remote branch — so origin/<base> is what proves its commits are safe.
+      let cleanup = [];
+      if (success) {
+        const base = baseRefName || defaultBranchOf(repo.path);
+        let mergedBranch = null;
+        try {
+          const prInfo = await gh.getPr(repo.ownerRepo, prNumber);
+          mergedBranch = (prInfo && prInfo.headRefName) || null;
+        } catch {
+          /* the sweep below still covers it */
+        }
+        cleanup = worktrees.cleanupAfterRun(repo.path, mergedBranch, {
+          skipPaths: [j.cwd],
+          fallbackRef: `origin/${base}`,
+        });
+        const cleanupText = worktrees.formatCleanup(cleanup);
+        if (cleanupText) {
+          store.updateMerge(repo.name, n, prNumber, (m) => {
+            m.conversation = `${m.conversation}\n${cleanupText}\n`;
+          });
+        }
+      }
       return {
         action: 'merge',
         prNumber,
@@ -1496,6 +1486,7 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
         recoveryAttempted,
         conflictResolved,
         recoveryMessage,
+        worktreeCleanup: cleanup,
       };
     },
   });

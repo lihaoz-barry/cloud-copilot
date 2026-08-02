@@ -19,6 +19,7 @@
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+const crypto = require('crypto');
 const { execSync, execFileSync, spawn } = require('child_process');
 const express = require('express');
 
@@ -312,7 +313,7 @@ app.get('/api/repos', (req, res) => {
     ownerRepo: r.ownerRepo,
     github: r.github,
   }));
-  res.json({ root: REPOS_ROOT, repos });
+  res.json({ root: REPOS_ROOT, repos, committedLabel: gh.COMMITTED_LABEL });
 });
 
 // ---------------------------------------------------------------------------
@@ -441,6 +442,105 @@ function defaultBranchOf(repoPath) {
 // `startedAt`/`pid` let it tell "still the old process" from "back up".
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, pid: process.pid, startedAt: SERVER_STARTED_AT });
+});
+
+// ---------------------------------------------------------------------------
+// Which code is this process actually running?
+//
+// public/ is served from disk and re-read on every request, while server.js and
+// lib/ are baked into the process at require() time. A deploy that swaps the
+// files but fails to replace the process therefore leaves the browser running
+// the NEW dashboard against the OLD API — and every endpoint the new UI learned
+// about answers 404. That reads like a dozen unrelated bugs (a checkbox that
+// won't stay checked, a toggle that 404s, a panel that never updates) and it
+// takes hours to trace back to one stale pid.
+//
+// So the process records what it loaded at boot and the client compares it
+// against what is on disk right now.
+// ---------------------------------------------------------------------------
+
+function selfHeadSha() {
+  try {
+    return execFileSync('git', ['-C', __dirname, 'rev-parse', 'HEAD'], {
+      encoding: 'utf8',
+      timeout: 10000,
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The files whose contents this process froze at require() time.
+ *
+ * public/ is deliberately excluded: it is re-read from disk on every request,
+ * so editing the dashboard does NOT make the running server stale, and warning
+ * about it would train the user to ignore the warning that matters.
+ */
+function serverCodeFiles() {
+  const files = [path.join(__dirname, 'server.js')];
+  try {
+    const libDir = path.join(__dirname, 'lib');
+    for (const f of fs.readdirSync(libDir).sort()) {
+      if (f.endsWith('.js')) files.push(path.join(libDir, f));
+    }
+  } catch {
+    /* no lib/ — server.js alone is answer enough */
+  }
+  return files;
+}
+
+/**
+ * Hash of that code's actual contents.
+ *
+ * Contents rather than the commit sha, because the sha answers a subtly
+ * different question: committing the very code this process is already running
+ * moves HEAD without changing a byte of behaviour, and a "restart me" banner
+ * that fires on every commit is a banner nobody reads by the second day. This
+ * fires on exactly the two things that do matter — a checkout that swapped the
+ * files, and an edit in place.
+ */
+function serverCodeFingerprint() {
+  const hash = crypto.createHash('sha1');
+  for (const file of serverCodeFiles()) {
+    try {
+      hash.update(path.basename(file));
+      hash.update(fs.readFileSync(file));
+    } catch {
+      hash.update(`<unreadable:${path.basename(file)}>`);
+    }
+  }
+  return hash.digest('hex');
+}
+
+const BOOT_CODE = {
+  head: selfHeadSha(),
+  branch: gh.gitBranch(__dirname),
+  fingerprint: serverCodeFingerprint(),
+};
+
+app.get('/api/version', (req, res) => {
+  const head = selfHeadSha();
+  const fingerprint = serverCodeFingerprint();
+  const reasons = [];
+  if (fingerprint !== BOOT_CODE.fingerprint) {
+    reasons.push(
+      BOOT_CODE.head && head && head !== BOOT_CODE.head
+        ? `the checkout moved to ${head.slice(0, 7)}, but this process is running the code from ${BOOT_CODE.head.slice(0, 7)}`
+        : 'server.js or lib/ changed on disk after this process started',
+    );
+  }
+  res.json({
+    pid: process.pid,
+    startedAt: SERVER_STARTED_AT,
+    boot: { head: BOOT_CODE.head, branch: BOOT_CODE.branch },
+    disk: { head, branch: gh.gitBranch(__dirname) },
+    stale: reasons.length > 0,
+    reasons,
+    // The dashboard renders the committed checkbox against this rather than a
+    // hardcoded string, so CC_COMMITTED_LABEL cannot desync the two halves.
+    committedLabel: gh.COMMITTED_LABEL,
+  });
 });
 
 app.get('/api/settings/self', (req, res) => {
@@ -725,9 +825,33 @@ app.get('/api/repos/:name/statuses', (req, res) => {
   res.json({
     repo: repo.name,
     statuses: numbers.length ? store.getStatuses(repo.name, numbers) : {},
+    labels: numbers.length ? cachedLabels(repo, numbers) : {},
     activeWorkIssues: busyIssue != null ? [busyIssue] : [],
   });
 });
+
+/**
+ * Label names of the given issues, straight out of the L2 cache.
+ *
+ * Reading the cache in memory is not a `gh` call, so this keeps the promise
+ * /statuses makes above. It exists because the browser's L1 copy is up to 15
+ * minutes old and L2 is up to 15 minutes old on top of that: without this, a
+ * `committed` label added on github.com (or from another device, or by the
+ * scheduler) could take half an hour to show up on the checkbox. Issues that
+ * aren't in the cache are simply absent — the client must then keep whatever
+ * it already has rather than assume "no labels".
+ */
+function cachedLabels(repo, numbers) {
+  if (!repo.ownerRepo) return {};
+  const entry = gh.cache.get(repo.ownerRepo, 'issues');
+  if (!entry) return {};
+  const want = new Set(numbers);
+  const out = {};
+  for (const issue of entry.data) {
+    if (want.has(issue.number)) out[issue.number] = (issue.labels || []).map((l) => l.name);
+  }
+  return out;
+}
 
 // Just the base-branch sync badges of one repo (issue #58). The client polls
 // this every three minutes to repaint badges in place — it reads state.json
@@ -2387,7 +2511,20 @@ app.post('/api/repos/:name/issues/:n/committed', async (req, res) => {
       a.needsAttention = false;
     });
   }
-  res.json({ committed, label: gh.COMMITTED_LABEL });
+  // Committing something and watching nothing happen for up to ten minutes
+  // looks exactly like a broken button, so bring the next sweep forward. It is
+  // a no-op while the scheduler is off, and `runSoon` only reschedules the
+  // existing timer — a burst of clicks cannot start a burst of sweeps.
+  const scheduled = committed && store.isSchedulerEnabledFor(repo.name);
+  if (scheduled) scheduler.runSoon();
+  res.json({
+    committed,
+    label: gh.COMMITTED_LABEL,
+    scheduled,
+    // The full label set as the server now knows it, so the client can write
+    // the truth into its cache instead of guessing at a patch.
+    labels: gh.cachedIssueLabels(repo.ownerRepo, n),
+  });
 });
 
 app.get('/api/settings/scheduler', (req, res) => {
@@ -2778,6 +2915,9 @@ app.listen(PORT, HOST, () => {
     listRepos: () => gh.listRepos(REPOS_ROOT),
     isRepoBusy: (repoName) =>
       jobs.listRunning().some((j) => j.repo === repoName && !j.auto),
+    // Lets a sweep get a base-branch comparison for a PR that has none yet,
+    // instead of waiting up to three minutes for the periodic sweep.
+    syncRepo: (repo) => sweepRepoSync(repo),
   });
   scheduler.start();
   const schedulerSettings = store.getSchedulerSettings();

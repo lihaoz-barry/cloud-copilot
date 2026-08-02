@@ -415,6 +415,46 @@
     .committed:hover { opacity: 1; background: #8881; }
     .committed input { margin: 0; accent-color: #16a34a; }
     .committed:has(input:checked) { opacity: 1; color: #16a34a; font-weight: 700; }
+    /* "the sweep is coming now" — otherwise ticking the box looks like nothing
+       happened for up to a full scheduler interval. */
+    .committed-note {
+      font-weight: 400; font-size: .66rem; opacity: .8;
+      padding: 0 4px; border-radius: 5px; background: #16a34a22;
+    }
+
+    /* "the API you are talking to is not the code on disk" warning. Deliberately
+       across the full width and above everything: while it is up, half the
+       dashboard's buttons silently do nothing. */
+    .stale-banner {
+      margin: 0 0 10px; padding: 10px 12px; border-radius: 10px;
+      border: 1px solid #f59e0b88; background: #f59e0b22; color: #b45309;
+      font-size: .82rem; line-height: 1.45;
+    }
+    @media (prefers-color-scheme: dark) { .stale-banner { color: #fcd34d; } }
+
+    /* The ⚡ trigger carries the failure too — the panel it opens is where the
+       explanation lives, but it is closed most of the time. */
+    .tasks-broken { color: #dc2626; border-color: #dc262666 !important; }
+
+    /* A failed /api/jobs poll used to be swallowed, which made a dead API look
+       like a checkbox that would not stay checked. */
+    .tasks-error {
+      margin: 6px 0 2px; padding: 6px 8px; border-radius: 8px;
+      background: #dc262618; border: 1px solid #dc262655; color: #dc2626;
+      font-size: .72rem; line-height: 1.4;
+    }
+
+    /* Per-repo scheduler opt-outs, indented under the global switch. */
+    .sched-repos {
+      margin: 4px 0 2px 18px; display: flex; flex-direction: column; gap: 2px;
+      border-left: 2px solid #8883; padding-left: 8px;
+    }
+    .sched-repos label {
+      display: flex; align-items: center; gap: 6px; font-size: .74rem;
+      cursor: pointer; user-select: none; padding: 2px 0; opacity: .85;
+    }
+    .sched-repos label:hover { opacity: 1; }
+    .sched-repos input { margin: 0; accent-color: #16a34a; }
 
     /* pin-to-top toggle — sized for tapping, like the other icon buttons */
     .pinbtn {
@@ -932,6 +972,11 @@
     <button class="nav-tab" data-tab="testflight">✈️ TestFlight</button>
   </nav>
 
+  <!-- Shown only when the server process is older than the code on disk: the
+       dashboard is served from disk but the API is frozen at boot, so a failed
+       restart makes the two halves disagree and everything new answers 404. -->
+  <div id="stalebanner" class="stale-banner" role="alert" hidden></div>
+
   <div id="mainView">
     <div class="topbar">
       <div class="tasks">
@@ -942,12 +987,15 @@
         <div id="tasksMenu" class="filter-menu tasks-menu" role="dialog" aria-label="Running tasks">
           <h4>Running tasks</h4>
           <div id="tasksList" class="tasks-list"><div class="tasks-empty">nothing running</div></div>
+          <div id="tasksError" class="tasks-error" hidden></div>
           <h4>Automatic scheduler</h4>
           <label class="tasks-sched">
             <input type="checkbox" id="schedEnabled">
             <span>drive <strong>committed</strong> issues automatically</span>
           </label>
           <div class="settings-note" id="schedNote">off</div>
+          <!-- Per-repo opt-outs, only meaningful while the global switch is on. -->
+          <div id="schedRepos" class="sched-repos" hidden></div>
           <div class="filter-actions">
             <button id="schedRunNow" class="ghost sm">Run a sweep now</button>
           </div>
@@ -1474,8 +1522,10 @@ const tasksBtn = document.getElementById('tasksBtn');
 const tasksMenu = document.getElementById('tasksMenu');
 const tasksCount = document.getElementById('tasksCount');
 const tasksList = document.getElementById('tasksList');
+const tasksError = document.getElementById('tasksError');
 const schedEnabled = document.getElementById('schedEnabled');
 const schedNote = document.getElementById('schedNote');
+const schedRepos = document.getElementById('schedRepos');
 const schedRunNow = document.getElementById('schedRunNow');
 
 const TASK_LABEL = {
@@ -1583,19 +1633,110 @@ function renderTasks(data) {
 
   const sched = data.scheduler || {};
   schedEnabled.checked = Boolean(sched.enabled);
+  schedEnabled.disabled = false;
   const every = sched.intervalMs ? `${Math.round(sched.intervalMs / 60000)} min` : '10 min';
   schedNote.textContent = sched.enabled
     ? `on · sweeps every ${every}${sched.running ? ' · sweeping now' : ''}`
     : 'off — committed issues are not driven automatically';
   // A sweep is a no-op while the scheduler is off, so don't offer the button.
   schedRunNow.disabled = !sched.enabled || Boolean(sched.running);
+  renderSchedRepos(sched);
+}
+
+/**
+ * Per-repo opt-outs for the scheduler.
+ *
+ * Two states, not three: the server supports "follow the global switch" as a
+ * distinct value, but the only reason anyone reaches for this list is to keep
+ * the scheduler off ONE repo — so checked means "no override" and unchecked
+ * writes an explicit `false`. Hidden entirely while the global switch is off,
+ * where every row would be a no-op.
+ */
+function renderSchedRepos(sched) {
+  const repos = (window.__repos || []).filter((r) => r.github);
+  if (!sched.enabled || !repos.length) {
+    schedRepos.hidden = true;
+    schedRepos.dataset.sig = '';
+    return;
+  }
+  // Rebuilding on every 3s poll would fight the user's own click, so only
+  // redraw when something actually changed.
+  const sig = JSON.stringify([repos.map((r) => r.name), sched.repos || {}]);
+  schedRepos.hidden = false;
+  if (schedRepos.dataset.sig === sig) return;
+  schedRepos.dataset.sig = sig;
+
+  schedRepos.textContent = '';
+  for (const repo of repos) {
+    const on = Object.prototype.hasOwnProperty.call(sched.repos || {}, repo.name)
+      ? Boolean(sched.repos[repo.name])
+      : true;
+    const row = document.createElement('label');
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = on;
+    box.setAttribute('aria-label', `Drive committed issues in ${repo.name}`);
+    box.addEventListener('change', async () => {
+      const want = box.checked;
+      box.disabled = true;
+      try {
+        const r = await fetch('/api/settings/scheduler', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          // null clears the override, so the repo follows the global switch.
+          body: JSON.stringify({ repo: repo.name, repoEnabled: want ? null : false }),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        schedRepos.dataset.sig = ''; // force a redraw from the server's answer
+        await refreshTasks();
+      } catch (err) {
+        box.checked = !want;
+        setTasksError(`Could not change the scheduler for ${repo.name}: ${err.message}`);
+      } finally {
+        box.disabled = false;
+      }
+    });
+    row.append(box, document.createTextNode(repo.name));
+    schedRepos.append(row);
+  }
+}
+
+/**
+ * Show (or clear) a failure of the tasks panel itself.
+ *
+ * This used to be an empty `catch`, and that is precisely how one stale server
+ * process turned into three unexplained bugs: /api/jobs was answering 404, so
+ * the panel silently kept its last render and the scheduler checkbox snapped
+ * back to unchecked on every poll with no hint as to why.
+ */
+function setTasksError(message) {
+  tasksError.hidden = !message;
+  tasksError.textContent = message || '';
+  tasksBtn.classList.toggle('tasks-broken', Boolean(message));
 }
 
 async function refreshTasks() {
+  let data;
   try {
-    const data = await fetch('/api/jobs').then((r) => r.json());
-    renderTasks(data);
-  } catch { /* offline; keep the last render */ }
+    const r = await fetch('/api/jobs');
+    if (!r.ok) {
+      throw new Error(
+        r.status === 404
+          ? 'HTTP 404 — this server process predates /api/jobs; it needs a restart'
+          : `HTTP ${r.status}`,
+      );
+    }
+    data = await r.json();
+  } catch (err) {
+    // The switch reflects server state we can no longer read; leaving it
+    // clickable would let it lie about what it just did.
+    schedEnabled.disabled = true;
+    schedRunNow.disabled = true;
+    setTasksError(`Running tasks unavailable: ${err.message}`);
+    return;
+  }
+  setTasksError(null);
+  renderTasks(data);
 }
 
 function tasksOpen() { return tasksMenu.classList.contains('show'); }
@@ -1627,25 +1768,36 @@ schedEnabled.addEventListener('change', async () => {
   const enabled = schedEnabled.checked;
   schedEnabled.disabled = true;
   try {
-    const data = await fetch('/api/settings/scheduler', {
+    const r = await fetch('/api/settings/scheduler', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ enabled }),
-    }).then((r) => r.json());
-    renderTasks({ jobs: [], scheduler: data });
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    setTasksError(null);
+    // Let the follow-up poll paint the result: rendering the POST's answer with
+    // an empty job list would blank the running tasks for a beat.
     await refreshTasks();
-  } catch {
+  } catch (err) {
     schedEnabled.checked = !enabled;
+    setTasksError(`Could not ${enabled ? 'enable' : 'disable'} the scheduler: ${err.message}`);
   } finally {
     schedEnabled.disabled = false;
   }
 });
 schedRunNow.addEventListener('click', async () => {
-  await fetch('/api/settings/scheduler', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ runNow: true }),
-  }).catch(() => {});
+  schedRunNow.disabled = true;
+  try {
+    const r = await fetch('/api/settings/scheduler', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ runNow: true }),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    setTasksError(null);
+  } catch (err) {
+    setTasksError(`Could not start a sweep: ${err.message}`);
+  }
   refreshTasks();
 });
 // Poll faster while the panel is open; a slow background beat is enough to keep
@@ -1695,6 +1847,44 @@ function writeIssueCache(repoName, payload, localAt = Date.now()) {
     // just falls back to asking the server on every expand.
   }
   return entry;
+}
+
+/**
+ * Write a label change straight into the L1 cache.
+ *
+ * readIssueCache() re-parses localStorage from scratch on every call, so the
+ * `issue` objects a render holds are detached copies — mutating one does not
+ * survive the next render, and patchStatuses() would happily write the stale
+ * labels back over it. The cached payload is the thing that has to change.
+ * `localAt` is preserved: only one field moved, the GitHub half of this payload
+ * is exactly as old as it was.
+ */
+function patchCachedLabels(repoName, issueNumber, labels) {
+  const cached = readIssueCache(repoName);
+  if (!cached) return;
+  let hit = false;
+  const issues = cached.payload.issues.map((i) => {
+    if (i.number !== issueNumber) return i;
+    hit = true;
+    return { ...i, labels };
+  });
+  if (!hit) return;
+  writeIssueCache(repoName, { ...cached.payload, issues }, cached.localAt);
+}
+
+/** The scheduler's label name, as configured server-side. */
+function committedLabelName() {
+  return window.__committedLabel || 'committed';
+}
+
+/** Transient "the scheduler will pick this up now" hint next to the checkbox. */
+function setCommittedNote(labelEl, text) {
+  labelEl.querySelector('.committed-note')?.remove();
+  const note = document.createElement('span');
+  note.className = 'committed-note';
+  note.textContent = text;
+  labelEl.append(note);
+  setTimeout(() => note.remove(), 6000);
 }
 
 function getRepoOpen() {
@@ -1892,10 +2082,46 @@ restartMainBtn.addEventListener('click', async () => {
   setTimeout(() => location.reload(), 1500);
 });
 
+// ---- "is the API the same code as this page?" ------------------------------
+// public/ is read from disk on every request while server.js and lib/ are
+// frozen into the process at boot, so a deploy whose restart failed leaves this
+// page talking to an older API than the one it was written against. Everything
+// the newer UI knows about then 404s — which is unreadable as a symptom, so say
+// it plainly instead.
+const staleBanner = document.getElementById('stalebanner');
+
+async function checkServerVersion() {
+  let v;
+  try {
+    const r = await fetch('/api/version');
+    if (!r.ok) {
+      // The endpoint itself is missing, which is the strongest possible
+      // evidence of the very thing it exists to report.
+      staleBanner.hidden = false;
+      staleBanner.textContent =
+        '⚠ This server process is older than the dashboard it is serving ' +
+        '(it has no /api/version). Restart cloud-copilot — `npm run cc:restart` ' +
+        'in the repo — or buttons on this page will keep failing with 404.';
+      return;
+    }
+    v = await r.json();
+  } catch {
+    return; // offline: the browser already has its own way of saying so
+  }
+  if (v.committedLabel) window.__committedLabel = v.committedLabel;
+  staleBanner.hidden = !v.stale;
+  if (v.stale) {
+    staleBanner.textContent =
+      `⚠ The server is running older code than this page: ${v.reasons.join('; ')}. ` +
+      'Restart cloud-copilot (`npm run cc:restart`) — until then, newer buttons here may 404.';
+  }
+}
+
 // ---- repos ----------------------------------------------------------------
 async function loadRepos() {
   const r = await fetch('/api/repos').then((x) => x.json());
   window.__repos = r.repos;
+  if (r.committedLabel) window.__committedLabel = r.committedLabel;
   rootLine.textContent = `authorized root: ${r.root} · ${r.repos.length} repos`;
   reposEl.innerHTML = '';
   for (const repo of r.repos) reposEl.appendChild(renderRepo(repo));
@@ -2003,13 +2229,21 @@ async function patchStatuses(repo, body) {
 
   const merged = {
     ...cached.payload,
-    issues: cached.payload.issues.map((i) =>
-      (data.statuses[i.number] ? { ...i, status: data.statuses[i.number] } : i)),
+    issues: cached.payload.issues.map((i) => {
+      const next = data.statuses[i.number] ? { ...i, status: data.statuses[i.number] } : i;
+      // Labels ride along so the committed checkbox stops being up to half an
+      // hour behind reality (L1's 15 minutes on top of L2's). An issue missing
+      // from `labels` means the server has nothing cached for it — keep what we
+      // have rather than blanking it.
+      const labels = data.labels && data.labels[i.number];
+      return labels ? { ...next, labels } : next;
+    }),
     activeWorkIssues: data.activeWorkIssues || [],
   };
+  const sig = (payload) =>
+    JSON.stringify(payload.issues.map((i) => [i.status, i.labels || []]));
   const same =
-    JSON.stringify(merged.issues.map((i) => i.status)) ===
-      JSON.stringify(cached.payload.issues.map((i) => i.status)) &&
+    sig(merged) === sig(cached.payload) &&
     (merged.activeWorkIssues[0] ?? null) ===
       ((cached.payload.activeWorkIssues || [])[0] ?? null);
   if (same) return; // nothing moved — leave the DOM (and any live SSE panel) alone
@@ -2382,10 +2616,14 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   committedLabel.title =
     'Committed: the scheduler keeps this issue moving on its own — opens a PR, ' +
     'merges the base branch back in when it falls behind, then reviews and improves it.';
+  // The label name is server-side configuration (CC_COMMITTED_LABEL), so read
+  // it from there — hardcoding "committed" here made a customised deployment
+  // render every checkbox as unchecked, forever.
+  const labelName = committedLabelName();
   const committedBox = document.createElement('input');
   committedBox.type = 'checkbox';
-  committedBox.checked = (issue.labels || []).includes('committed');
-  committedBox.setAttribute('aria-label', `Mark issue #${issue.number} as committed`);
+  committedBox.checked = (issue.labels || []).includes(labelName);
+  committedBox.setAttribute('aria-label', `Mark issue #${issue.number} as ${labelName}`);
   committedBox.addEventListener('change', async () => {
     const want = committedBox.checked;
     committedBox.disabled = true;
@@ -2396,18 +2634,29 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         body: JSON.stringify({ committed: want }),
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
-      // Keep the in-memory issue in step so a re-render doesn't flip it back.
-      const labels = new Set(issue.labels || []);
-      if (want) labels.add('committed'); else labels.delete('committed');
-      issue.labels = [...labels];
+      const body = await r.json().catch(() => ({}));
+      // Prefer the server's own label set over a locally guessed patch.
+      let labels = Array.isArray(body.labels) ? body.labels : null;
+      if (!labels) {
+        const set = new Set(issue.labels || []);
+        if (want) set.add(labelName); else set.delete(labelName);
+        labels = [...set];
+      }
+      // Both halves matter: the in-memory object keeps THIS render honest, and
+      // the L1 write-through keeps the next one honest. Without the second, a
+      // reload inside the 15-minute TTL re-parsed the old payload from
+      // localStorage and the checkbox silently flipped back.
+      issue.labels = labels;
+      patchCachedLabels(repo.name, issue.number, labels);
+      if (body.scheduled) setCommittedNote(committedLabel, 'queued');
     } catch (err) {
       committedBox.checked = !want; // GitHub said no — don't pretend otherwise
-      alert(`Could not update the committed label: ${err.message}`);
+      alert(`Could not update the ${labelName} label: ${err.message}`);
     } finally {
       committedBox.disabled = false;
     }
   });
-  committedLabel.append(committedBox, document.createTextNode('committed'));
+  committedLabel.append(committedBox, document.createTextNode(labelName));
 
   icons.append(committedLabel, refreshPrsBtn, hideBtn, deleteBtn);
 
@@ -5634,6 +5883,10 @@ function initAdminTerminal() {
 loadRepos().then(route);
 loadModelSetting();
 loadSelfInfo();
+checkServerVersion();
+// Cheap (two `git rev-parse` calls) and only useful between a deploy and its
+// restart, so a slow beat is plenty.
+setInterval(checkServerVersion, 60000);
 </script>
 </body>
 </html>

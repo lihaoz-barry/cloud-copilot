@@ -204,6 +204,15 @@ rows simply render without their branch/commit annotations.
   and never touches `gh`; the list is repainted only if something actually
   moved. The 60-second sweep does the same for repos still inside the TTL, so a
   page left open notices a remote job within a minute.
+- **Labels ride along with that patch**, even though they are GitHub data. They
+  are the one part of the GitHub half that a person flips expecting an immediate
+  answer — the `committed` checkbox — and 15 minutes of L1 on top of 15 minutes
+  of L2 meant a label set on github.com could take half an hour to appear, which
+  reads as a checkbox that does not work. `/statuses` therefore also returns the
+  label names from the L2 cache (a memory read, not a `gh` call), and toggling
+  the checkbox writes the server's answer straight into L1. An issue missing
+  from that map means "nothing cached", not "no labels" — the client keeps what
+  it has rather than blanking it.
 - **Past the TTL**, the browser silently asks the server and updates the list in
   place. That request usually costs nothing beyond L2; only if the server's own
   copy has aged out does it reach for `gh`.
@@ -404,9 +413,23 @@ Deploy is dispatched per-repo. Drop a `.cloud-copilot.json` at a repo's root:
   `.xcodeproj`/`.xcworkspace` at its root is auto-detected as `ios-testflight`.
 - **`shell`** — checks out the PR's branch, then runs `command` directly (no
   agent involved — it's deterministic). cloud-copilot dogfoods this on itself: see
-  its own [`.cloud-copilot.json`](.cloud-copilot.json) and the `cc:restart` script
-  in [`package.json`](package.json), which kills the running `node server.js` and
-  starts a fresh one — the same restart done by hand during development.
+  its own [`.cloud-copilot.json`](.cloud-copilot.json) and `cc:restart` in
+  [`package.json`](package.json), which runs
+  [`scripts/restart.sh`](scripts/restart.sh) — the same restart done by hand
+  during development.
+
+  That script identifies the old process by **the port it holds**, not by a
+  `pkill -f 'node server.js'` pattern: a command-line match also hits the shell
+  running it and any unrelated project's server. It then waits for the port to
+  actually be released before starting the replacement, and exits non-zero with
+  the log if the new process does not answer. The version it replaced did none
+  of that, and the failure mode was nasty — the new process lost the port race,
+  died of `EADDRINUSE`, and the OLD one kept serving. Since `public/` is read
+  from disk per request while `server.js` and `lib/` are frozen at boot, the
+  browser then ran the *new* dashboard against the *old* API and every endpoint
+  the new UI knew about answered 404. `GET /api/version` now reports exactly
+  that condition (see below) so it can never again look like a dozen unrelated
+  bugs.
 - No config and no Xcode project detected → Deploy is disabled with a message
   pointing here. cloud-copilot never guesses a shell command for an unconfigured
   repo.
@@ -589,7 +612,12 @@ repo and, for each committed issue, does the highest-priority thing that is due:
 1. **Create PR** if the issue has no open PR (re-checked live against GitHub
    first, so a PR opened by hand is adopted instead of duplicated).
 2. **Update from base** if the PR is behind its base branch — this is what keeps
-   every committed PR continuously rebased on the newest `main`.
+   every committed PR continuously rebased on the newest `main`. A PR with no
+   comparison on record yet (typically the one this sweep just created) gets one
+   computed on the spot rather than being allowed to fall through to step 3:
+   reviewing a diff that is about to be rewritten by the base merge it actually
+   needs wastes a whole agent run. Fork PRs, which local git genuinely cannot
+   answer for, still fall through.
 3. **Review & improve** once per head commit, when nothing else is pending. A new
    push makes the PR eligible again; the reviewed SHA is read from git, not from
    the hourly PR cache, so a review can never loop on its own push.
@@ -601,9 +629,18 @@ back off exponentially and, after 3 attempts, the record is flagged
 up in the ⚡ panel, streams into the same log, and sends the same ntfy push
 (prefixed `自动 ·`).
 
-The switch is off by default and is **persisted**; on restart the scheduler
-restores it and re-checks GitHub before creating anything, so a server bounce
-never produces a duplicate PR.
+Ticking the checkbox **brings the next sweep forward** instead of waiting out
+the interval — committing something and watching nothing happen for ten minutes
+is indistinguishable from a broken button. The checkbox shows a short `queued`
+hint when that happens. Clicking repeatedly cannot start a burst of sweeps: it
+only reschedules the one timer.
+
+The global switch is off by default and is **persisted**; on restart the
+scheduler restores it and re-checks GitHub before creating anything, so a server
+bounce never produces a duplicate PR. Under it sits one checkbox per GitHub
+repo, for keeping the scheduler off a single repo while it runs everywhere else.
+Those are opt-*outs*: a repo with no entry follows the global switch, so
+enabling a newly cloned repo is never something you can forget to do.
 
 
 ## API
@@ -618,7 +655,7 @@ never produces a duplicate PR.
 | GET  | `/api/settings/self` | The cloud-copilot repo serving this app: `{ repo, branch, defaultBranch, dirty, busy }`, or `{ repo: null }`. |
 | POST | `/api/settings/self/restart-main` | **Restart main** — stash if dirty, check out the default branch, `pull --ff-only`, then restart detached. Takes the repo working-tree lock; `409` when it's held. |
 | GET  | `/api/repos/:name/issues[?refresh=1]` | List open issues merged with local status; includes `activeWorkIssues` (repo lock) and cache telemetry (`serverAt`, `ttlMs`, `nextSyncAt`) for the freshness pill. Served from the L2 cache (15 min TTL, persisted to `data/gh-cache.json`); `?refresh=1` forces a live `gh` read and rewrites it. Also auto-discovers and persists PRs referencing these issues (one whole-repo `gh pr list`, same cache). |
-| GET  | `/api/repos/:name/statuses?n=1,2,3` | Just the live half of the list above: `{ statuses, activeWorkIssues }` for the given issue numbers. Reads `state.json` + the in-memory job table only — never `gh`, never the L2 cache — so the client can call it on every cache-backed render and once a minute thereafter. |
+| GET  | `/api/repos/:name/statuses?n=1,2,3` | Just the live half of the list above: `{ statuses, labels, activeWorkIssues }` for the given issue numbers. Reads `state.json`, the in-memory job table and the in-memory L2 entry — never `gh` — so the client can call it on every cache-backed render and once a minute thereafter. `labels` is what keeps the `committed` checkbox from lagging half an hour behind GitHub. |
 | GET  | `/api/repos/:name/issues/:n/record` | Full stored record (work + per-PR deploy/merge, transcripts, `live` flags). |
 | GET  | `/api/repos/:name/issues/:n/prs` | Force-refresh the PR list for one issue from GitHub — always live, bypasses the whole-repo PR cache. |
 | POST | `/api/repos/:name/issues/:n/work` | **Create PR** — SSE stream. Body: `{ "mode": "allow-all" }`. |
@@ -634,7 +671,8 @@ never produces a duplicate PR.
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat/cancel` | Abort the running chat turn for that PR. |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/review` | **Review & improve a PR** — SSE stream. Starts a Copilot session in the PR's own worktree that reviews the diff, applies the fixes it deems worth making, and pushes. Records the reviewed head SHA so the same commit is never reviewed twice. |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/review/cancel` | Abort the running review for that PR. |
-| POST | `/api/repos/:name/issues/:n/committed` | Toggle the **committed** label on the issue. Body: `{ "committed": true }`. Writes the label on GitHub — that label *is* the state. |
+| POST | `/api/repos/:name/issues/:n/committed` | Toggle the **committed** label on the issue. Body: `{ "committed": true }`. Writes the label on GitHub — that label *is* the state. Answers `{ committed, label, scheduled, labels }`: `labels` is the issue's full label set as the server now knows it (the client writes that into its own cache rather than guessing a patch), and `scheduled` says whether the next sweep was brought forward. |
+| GET  | `/api/version` | What code this process is actually running: `{ boot, disk, stale, reasons, committedLabel }`. `stale` compares a **content hash** of `server.js` + `lib/` against the one taken at boot — not the commit sha, which would fire on every commit of already-running code. Polled every 60s; when it says `stale`, the dashboard shows a banner, because at that point the page is talking to an API older than itself. |
 | GET  | `/api/jobs` | Everything currently running: `{ jobs, worktrees, limits, scheduler }`. Backs the ⚡ task panel; polled every 3s while it is open. |
 | POST | `/api/jobs/cancel` | Stop one running job. Body: `{ "key": "<repo>#<n>:<action>" }`. |
 | GET  | `/api/settings/scheduler` | Scheduler state: `{ enabled, repos, running, intervalMs, nextRunAt, lastRunAt, lastSummary }`. |
@@ -892,6 +930,7 @@ session). The "running mode" selector here controls *tool approval policy*, not 
 cloud-copilot/
 ├── package.json        # express dependency, `npm start`, `cc:restart` (self deploy)
 ├── .cloud-copilot.json # this repo's own deploy config (shell -> cc:restart)
+├── scripts/restart.sh  # the restart itself: port-identified, waits, fails loudly
 ├── server.js           # Express app: repos/issues/work/deploy/merge routes + state machine
 ├── lib/
 │   ├── gh.js           # enumerate repos, list issues/PRs/single-PR via `gh` (cached)

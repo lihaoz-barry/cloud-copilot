@@ -59,6 +59,21 @@ test('drawer chrome respects the iOS status-bar and home-indicator insets', () =
   assert.match(ruleBody('.settings-drawer, .depth-drawer'), /flex-direction:\s*column/);
 });
 
+test('drawers are sized against the dynamic viewport and keep their scroll to themselves', () => {
+  for (const sel of ['.settings-drawer', '.depth-drawer']) {
+    const body = ruleBody(sel);
+    // A plain `height: 100%` on a fixed element resolves against the *large*
+    // viewport, so on iOS Safari the home-indicator padding added above — and
+    // the drawer's last button — end up under the collapsing URL bar.
+    assert.match(body, /height:\s*100dvh/, `${sel} must be sized in dvh`);
+    assert.match(body, /height:\s*100%/, `${sel} must keep a % fallback for browsers without dvh`);
+    assert.ok(body.indexOf('100%') < body.indexOf('100dvh'), `${sel}: the % fallback must come first`);
+  }
+  // Scrolling past the end of the drawer must not chain into the page behind
+  // the scrim, which reads as the drawer being broken.
+  assert.match(ruleBody('.drawer-body'), /overscroll-behavior:\s*contain/);
+});
+
 test('closed drawers are hidden from pointer, focus and assistive tech', () => {
   for (const sel of ['.settings-drawer', '.depth-drawer']) {
     assert.match(ruleBody(sel), /visibility:\s*hidden/, `${sel} must be visibility:hidden while closed`);

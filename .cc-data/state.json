@@ -1,0 +1,4921 @@
+{
+  "issues": {
+    "cloud-copilot#60": {
+      "repo": "cloud-copilot",
+      "issueNumber": 60,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "66": {
+          "prNumber": 66,
+          "prUrl": "https://github.com/lihaoz-barry/cloud-copilot/pull/66",
+          "title": "TestFlight 页面展示全部历史 Build 及详情",
+          "createdAt": "2026-08-02T15:45:25Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "feat-60-testflight-build-history",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "f9ff523c623b8c457f49a0c243c7c2c1d5cbeecf",
+            "abbrev": "f9ff523",
+            "committedDate": "2026-08-02T22:38:00Z",
+            "headline": "Merge remote-tracking branch 'origin/main' into feat-60-testflight-bu…",
+            "url": "https://github.com/lihaoz-barry/cloud-copilot/commit/f9ff523c623b8c457f49a0c243c7c2c1d5cbeecf"
+          },
+          "sync": {
+            "state": "clean",
+            "behindBy": 0,
+            "aheadBy": 6,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "baseRefName": "main",
+            "headRefName": "feat-60-testflight-build-history",
+            "crossRepository": false,
+            "at": 1785711616759,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "I'll start by reading the PR and its full diff.\n\n● Fetch and show diff stat (shell)\n  │ git fetch origin --quiet && git log --oneline -5 && echo \"---STAT---\" && git diff\n  │ origin/main...HEAD --stat\n  └ 15 lines…\n\n● View PR 66 (shell)\n  │ gh pr view 66 --repo lihaoz-barry/cloud-copilot 2>&1 | head -100\n  └ 73 lines…\n\n● Diff of lib and server (shell)\n  │ git diff origin/main...HEAD -- lib/ server.js | head -700\n  └ 20 lines…\n\n● View issue 60 and PR comments (shell)\n  │ gh issue view 60 --repo lihaoz-barry/cloud-copilot 2>&1 | head -60; echo \"===COMMENTS===\"; gh pr\n  │ view 66 --repo lihaoz-barry/cloud-copilot --comments 2>&1 | tail -60\n  └ 108 lines…\n\n● Check branch sync state (shell)\n  │ git status -sb && git log --oneline origin/feat-60-testflight-build-history -3 && echo \"---\n  │ ahead/behind ---\" && git rev-list --left-right --count\n  │ origin/feat-60-testflight-build-history...HEAD && wc -l lib/buildHistory.js lib/store.js\n  │ server.js public/index.html test/*.test.js\n  └ 19 lines…\n\n● List PR commits and grep annotateBuilds (shell)\n  │ git log --oneline origin/main..HEAD --no-merges && echo \"=== grep annotateBuilds ===\" && grep\n  │ -rn \"annotateBuilds\" --include=*.js . | head\n  └ 16 lines…\n\n● Read buildHistory.js\n  │ lib/buildHistory.js\n  └ 231 lines read\n\n● Diff store.js and server.js (shell)\n  │ git diff origin/main...HEAD -- lib/store.js server.js\n  └ 298 lines…\n\n● Check store helpers and package.json (shell)\n  │ grep -n \"function durationOf\\|function updateDeploy\\|function blankPr\\|deployHistory\"\n  │ lib/store.js | head -30 && echo \"=== pkg ===\" && cat package.json\n  └ 37 lines…\n\n● Save frontend diff (shell)\n  │ git diff origin/main...HEAD -- public/index.html > /tmp/fe.diff; wc -l /tmp/fe.diff\n  └ 2 lines…\n\n● Read fe.diff\n  │ /tmp/fe.diff\n  └ 420 lines read\n\n● Read store.js\n  │ lib/store.js\n  └ L300:400 (100 lines read)\n\n● Find listAllBuilds callers (shell)\n  │ grep -rn \"listAllBuilds\" --include=*.js . | grep -v node_modules\n  └ 15 lines…\n\n● Run test suite (shell)\n  │ npm test 2>&1 | tail -20\n  └ 21 lines…\n\n● Locate TF functions (shell)\n  │ grep -n \"renderTfCard\\|onTfMerge\\|loadTestflightBuilds\\|tfList\" public/index.html | head -40\n  └ 18 lines…\n\n● Read index.html\n  │ public/index.html\n  └ L4725:4840 (115 lines read)\n\n● Read index.html\n  │ public/index.html\n  └ L4425:4530 (106 lines read)\n\n● Read index.html\n  │ public/index.html\n  └ L4649:4700 (52 lines read)\n\n● View durationOf and updateDeploy (shell)\n  │ sed -n '100,125p' lib/store.js && echo \"=== updateDeploy ===\" && sed -n '555,600p' lib/store.js\n  └ 73 lines…\n\n● Check STATE_LABEL and escape (shell)\n  │ grep -n \"STATE_LABEL = \\|deploy: {\" public/index.html | head && sed -n '/const\n  │ STATE_LABEL/,/^};/p' public/index.html | head -30 && echo \"=== escape ===\" && grep -n \"function\n  │ escape\" public/index.html\n  └ 12 lines…\n\n● View iOS deploy function (shell)\n  │ sed -n '1540,1620p' server.js\n  └ 82 lines…\n\n● Find deploy call sites (shell)\n  │ grep -n \"startNewDeploy\\|resetForNewCommits\\|runIosTestflightDeploy\" server.js lib/*.js | head\n  │ -20\n  └ 11 lines…\n\n● Deploy route (shell)\n  │ sed -n '1760,1800p' server.js\n  └ 42 lines…\n\n● Read buildHistory.test.js\n  │ test/buildHistory.test.js\n  └ 246 lines read\n\n● Check headCommit/headRefName fields (shell)\n  │ grep -rn \"headCommit\" --include=*.js --include=*.html . | grep -v node_modules | head -20; echo\n  │ \"=== headRefName in store ===\"; grep -n \"headRefName\" lib/store.js | head\n  └ 26 lines…\n\n● Find server config env (shell)\n  │ grep -n \"REPOS_ROOT\\|process.env.PORT\\|function resolveRepo\\|function listRepos\" server.js\n  │ lib/*.js | head -20\n  └ 21 lines…\n\n● Create sandbox repos (shell)\n  │ set -e\n  │ SB=/tmp/cc-review66-sb\n  │ rm -rf $SB && mkdir -p $SB/repos $SB/data\n  │ cd $SB/repos\n  │ for r in iosapp shellapp brokenapp; do…\n  └ 13 lines…\n\n● Read repoConfig (shell)\n  │ sed -n '1,60p' lib/repoConfig.js 2>/dev/null | head -60\n  └ 61 lines…\n\nNow let me build a mock state and run the endpoint live on port 8002.\n\n● Write mock state.json (shell)\n  │ cat > /tmp/cc-review66-sb/data/state.json <<'EOF'\n  │ {\n  │ \"version\": 1,\n  │ \"issues\": {\n  │ \"iosapp#1\": {…\n  └ 49 lines…\n\n● Start server on 8002 and query endpoint (shell)\n  │ PORT=8002 REPOS_ROOT=/tmp/cc-review66-sb/repos CC_DATA_DIR=/tmp/cc-review66-sb/data node\n  │ server.js > /tmp/cc-review66-sb/server.log 2>&1 &\n  │ sleep 4; curl -s http://127.0.0.1:8002/api/testflight/builds | node -e \"let\n  │ s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s);console.log('total',\n  │ j.total);console.log('errors',JSON.stringify(j.errors));j.builds.forEach(b=>console.log(b.id,'…\n  └ 9 lines…\n\n● Check page loads (shell)\n  │ curl -s -o /dev/null -w \"%{http_code}\\n\" http://127.0.0.1:8002/\n  └ 2 lines…\n\n● Navigate to a URL (MCP: playwright) · http://127.0.0.1:8002/ · url: \"http://127.0.0.1:8002/\"\n  └ ### Ran Playwright code\n\n● Evaluate JavaScript (MCP: playwright) · function: \"async () => {   document.querySelectorAll('.na…\n  └ ### Result\n\n● Read store.js\n  │ lib/store.js\n  └ L736:800 (65 lines read)\n\n● Read store.js\n  │ lib/store.js\n  └ L840:880 (41 lines read)\n\n● Read escape() (shell)\n  │ sed -n '4018,4030p' public/index.html\n  └ 14 lines…\n\n● Find record deletion paths (shell)\n  │ grep -rn \"delete state.issues\\|deleteRecord\\|delete r.prs\" --include=*.js . | grep -v\n  │ node_modules\n  └ 4 lines…\n\n● Read store.js\n  │ lib/store.js\n  └ L505:535 (31 lines read)\n\n● Read store.js\n  │ lib/store.js\n  └ L958:975 (18 lines read)\n\n● Find prune callers (shell)\n  │ grep -n \"pruneStaleGhPrs\\|pruneClosedPrs\" server.js lib/*.js\n  └ 9 lines…\n\n● View issue refresh path (shell)\n  │ sed -n '875,920p' server.js\n  └ 46 lines…\n\n● Find how CLOSED prs are hidden (shell)\n  │ grep -n \"CLOSED\" server.js public/index.html lib/store.js | head -30\n  └ 14 lines…\n\n● View PR filtering in UI (shell)\n  │ sed -n '3805,3830p' public/index.html\n  └ 27 lines…\n\n● Read store.js\n  │ lib/store.js\n  └ L530:560 (31 lines read)\n\n● Inspect listAllPrs (shell)\n  │ grep -n \"listAllPrs\" -A 25 lib/gh.js | head -45\n  └ 46 lines…\n\n● Read storeBuilds.test.js\n  │ test/storeBuilds.test.js\n  └ L1:60 (60 lines read)\n\n● Check other store mutations (shell)\n  │ grep -n \"store\\.\" lib/mergeCleanup.js lib/schedulerCore.js | head -20\n  └ 1 line…\n\n● Evaluate JavaScript (MCP: playwright) · function: \"async () => {   const v = document.getElementB…\n  └ ### Result\n\n● Read storeBuilds.test.js\n  │ test/storeBuilds.test.js\n  └ L58:197 (140 lines read)\n\nFound real issues. Let me check the README section, then apply fixes.\n\n● README diff (shell)\n  │ git diff origin/main...HEAD -- README.md\n  └ 59 lines…\n\nNow appl",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "cloud-copilot#42": {
+      "repo": "cloud-copilot",
+      "issueNumber": 42,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "43": {
+          "prNumber": 43,
+          "prUrl": "https://github.com/lihaoz-barry/cloud-copilot/pull/43",
+          "title": "Deploy: salvage a dirty working tree into an issue + PR before checking out",
+          "createdAt": "2026-07-31T06:56:52Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "claude/app-bug-fixes-prs-42be87",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "ec12d19e14bb3a71f4f0514741ae8337be9a57ae",
+            "abbrev": "ec12d19",
+            "committedDate": "2026-08-02T22:37:02Z",
+            "headline": "Merge remote-tracking branch 'origin/main' into claude/app-bug-fixes-…",
+            "url": "https://github.com/lihaoz-barry/cloud-copilot/commit/ec12d19e14bb3a71f4f0514741ae8337be9a57ae"
+          },
+          "sync": {
+            "state": "clean",
+            "behindBy": 0,
+            "aheadBy": 6,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "baseRefName": "main",
+            "headRefName": "claude/app-bug-fixes-prs-42be87",
+            "crossRepository": false,
+            "at": 1785711616842,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "I'll start by fetching the PR details and reading the full diff.\n\n● Fetch and show diff stat (shell)\n  │ git fetch origin --quiet && git log --oneline -5 && echo \"---\" && git diff origin/main...HEAD\n  │ --stat\n  └ 17 lines…\n\n● View PR 43 (shell)\n  │ gh pr view 43 --repo lihaoz-barry/cloud-copilot 2>&1 | head -100\n  └ 90 lines…\n\n● View issue 42 (shell)\n  │ gh issue view 42 --repo lihaoz-barry/cloud-copilot 2>&1 | head -60\n  └ 61 lines…\n\n● PR comments (shell)\n  │ gh pr view 43 --repo lihaoz-barry/cloud-copilot --comments 2>&1 | tail -120\n  └ 120 lines…\n\nTwo prior review rounds exist. Let me read the actual current code to find what remains.\n\n● Read jobs.js\n  │ lib/jobs.js\n  └ 1 line read\n\n● File sizes and package.json (shell)\n  │ wc -l lib/*.js server.js test/*.js && echo \"---\" && cat package.json\n  └ 52 lines…\n\n● Read salvage.js\n  │ lib/salvage.js\n  └ 195 lines read\n\n● jobs.js diff (shell)\n  │ git diff origin/main...HEAD -- lib/jobs.js\n  └ 326 lines…\n\n● server.js and gh.js diff (shell)\n  │ git diff origin/main...HEAD -- lib/gh.js server.js\n  └ 21 lines…\n\n● Read 1785711298717-copilot-tool-output-46701-ef97db53-6bb8-489b-89c9-0e48b25dc807.txt\n  │ /var/folders/n3/b1dz1b1j79v3gz0zn5llpnyc0000gp/T/1785711298717-copilot-tool-output-46701-ef97db5\n  │ 3-6bb8-489b-89c9-0e48b25dc807.txt\n  └ 1 line read\n\n● Read 1785711298717-copilot-tool-output-46701-ef97db53-6bb8-489b-89c9-0e48b25dc807.txt\n  │ /var/folders/n3/b1dz1b1j79v3gz0zn5llpnyc0000gp/T/1785711298717-copilot-tool-output-46701-ef97db5\n  │ 3-6bb8-489b-89c9-0e48b25dc807.txt\n  └ L1:230 (230 lines read)\n\n● Read 1785711298717-copilot-tool-output-46701-ef97db53-6bb8-489b-89c9-0e48b25dc807.txt\n  │ /var/folders/n3/b1dz1b1j79v3gz0zn5llpnyc0000gp/T/1785711298717-copilot-tool-output-46701-ef97db5\n  │ 3-6bb8-489b-89c9-0e48b25dc807.txt\n  └ L230:560 (232 lines read)\n\n● Inspect getPr and git helper (shell)\n  │ sed -n '500,585p' lib/gh.js && echo \"=== git helper ===\" && grep -n \"^function git\\|^const git\"\n  │ server.js\n  └ 89 lines…\n\n● git helper + isDirty (shell)\n  │ sed -n '480,560p' server.js\n  └ 82 lines…\n\n● finishJob and follow (shell)\n  │ sed -n '200,340p' lib/jobs.js\n  └ 142 lines…\n\n● cancelJob + adoptRunning (shell)\n  │ sed -n '600,700p' lib/jobs.js\n  └ 102 lines…\n\n● Read jobs.js\n  │ lib/jobs.js\n  └ L370:512 (142 lines read)\n\n● Check supervisor 409 and abortByKey (shell)\n  │ grep -n \"409\\|already running\\|byKey\\|abortByKey\" lib/supervisor.js lib/supervisorClient.js |\n  │ head -40\n  └ 7 lines…\n\n● supervisor spawn/abortByKey (shell)\n  │ sed -n '405,440p;555,590p' lib/supervisor.js\n  └ 73 lines…\n\n● Read jobs.test.js\n  │ test/jobs.test.js\n  └ 237 lines read\n\n● Read salvage.test.js\n  │ test/salvage.test.js\n  └ 197 lines read\n\n● ios deploy onDone (shell)\n  │ sed -n '1740,1810p' server.js\n  └ 72 lines…\n\nFound several real issues. Let me verify a couple of assumptions before fixing.\n\n● gitignore and skill diff (shell)\n  │ git diff origin/main...HEAD -- .gitignore skills/salvage-local-changes/SKILL.md | head -120\n  └ 107 lines…\n\n● Check gh pr list headRefOid support (shell)\n  │ gh pr list --repo lihaoz-barry/cloud-copilot --head claude/app-bug-fixes-prs-42be87 --state all\n  │ --limit 3 --json number,url,state,headRefName,headRefOid 2>&1 | head -20\n  └ 2 lines…\n\n● Baseline test run (shell)\n  │ npm test 2>&1 | tail -20\n  └ 21 lines…\n\nNow applying fixes. First, the most serious: the iOS deploy success heuristic scans the salvage transcript too.\n\n● Edit jobs.js +1\n  └ lib/jobs.js\n\n● Edit jobs.js +15\n  └ lib/jobs.js\n\nNow the cancel race on the supervisor's success path:\n\n● Edit jobs.js +9\n  └ lib/jobs.js\n\n● Edit server.js +6 -1\n\n● Edit server.js +1 -1\n\n● Find salvage identifier uses (shell)\n  │ grep -n \"salvage\\b\" server.js | grep -v \"salvagePhaseSpec(\\|salvageChecks\\|salvageBanner\\|// \\|\n  │ \\* \" | head -30\n  └ 15 lines…\n\n● Rename salvage module import (shell)\n  │ sed -i '' \\\n  │ -e \"34s|const salvage = require('./lib/salvage');|const salvageLib = require('./lib/salvage');|\"\n  │ \\\n  │ server.js && grep -n \"salvageLib\\|salvage.createSalvageChecks\" server.js\n  └ 3 lines…\n\n● Edit gh.js +1 -1\n  └ lib/gh.js\n\n● Edit server.js +1 -1\n\n● Edit gh.js +3 -1\n  └ lib/gh.js\n\nNow fixing the SKILL.md contradiction (it tells the agent to exit 0 doing nothing, which the gate then rejects):\n\n● Edit SKILL.md +6 -2\n  └ skills/salvage-local-changes/SKILL.md\n\nNow adding regression tests for the two behaviour fixes.\n\n● Edit jobs.test.js +28\n  └ test/jobs.test.js\n\n● supervisorClient exports (shell)\n  │ sed -n '210,227p' lib/supervisorClient.js\n  └ 19 lines…\n\n● Edit jobs.test.js +48\n  └ test/jobs.test.js\n\n● Run jobs + salvage tests (shell)\n  │ node --test test/jobs.test.js test/salvage.test.js 2>&1 | tail -30\n  └ 31 lines…\n\n● Verify regression test fails without fix (shell)\n  │ cp lib/jobs.js /tmp/jobs.bak && python3 - <<'EOF'\n  │ import re\n  │ s=open('lib/jobs.js').read()\n  │ s=s.replace(\"\"\"      if (job.cancelled && job.status === 'running') {\n  │ supervisorClient.abortSession(session.id).catch(() => {…\n  └ 12 lines…\n\n● Find conversation-scraping verdicts (shell)\n  │ grep -n \"conversation\" server.js | sed -n '1,60p' && echo \"=== notifier ===\" && grep -n\n  │ \"conversation\" lib/notifier.js\n  └ 53 lines…\n\n● README diff (shell)\n  │ git diff origin/main...HEAD -- README.md | head -80\n  └ 81 lines…\n\n● Locate README multi-phase bullet (shell)\n  │ grep -n \"never advances to the next phase\" -A 4 README.md\n  └ 6 lines…\n\n● Edit README.md +5 -1\n\nRunning the full suite and a server smoke test on port 8001.\n\n● Syntax check + full test suite (shell)\n  │ node -c server.js 2>&1; node --check server.js && node --check lib/jobs.js && node --check\n  │ lib/gh.js && echo \"syntax ok\" && npm test 2>&1 | tail -10\n  └ 12 lines…\n\n● Boot server on 8001 and check health (shell)\n  │ PORT=8001 CC_DATA_DIR=\"$PWD/.cc-data-smoke\" node server.js > /tmp/cc-smoke.log 2>&1 &\n  │ sleep 6; curl -s -m 5 http://127.0.0.1:8001/api/health; echo; tail -5 /tmp/cc-smoke.log\n  └ 7 lines…\n\n● Stop smoke server and clean up (shell)\n  │ kill 90613 2>/dev/null; sleep 1; rm -rf .cc-data-smoke /tmp/cc-smoke.log /tmp/jobs.bak; git\n  │ status --porcelain\n  └ 7 lines…\n\n● Commit and push improvements (shell)\n  │ git add -A && git commit -q -F - <<'EOF' && git push -q origin\n  │ HEAD:claude/app-bug-fixes-prs-42be87 && git log --oneline -1\n  │ 评审改进：部署结论只读本阶段日志，修复 spawn 窗口内的取消竞态\n  │\n  │ - server.js：iOS 部署的成功判定改用 jobs.phaseLog(j)。salvage 阶段的…\n  └ 19 lines…\n\n● Verify push landed (shell)\n  │ git log --oneline origin/claude/app-bug-fixes-prs-42be87 -1\n  └ 2 lines…\n\nPush",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "cloud-copilot#21": {
+      "repo": "cloud-copilot",
+      "issueNumber": 21,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "67": {
+          "prNumber": 67,
+          "prUrl": "https://github.com/lihaoz-barry/cloud-copilot/pull/67",
+          "title": "修复移动端抽屉被浮动顶部导航遮挡",
+          "createdAt": "2026-08-02T17:02:37Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "fix/21-drawer-under-navbar",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "b7ca90ccfed73ff907e08fc895786e4c0dfb3fed",
+            "abbrev": "b7ca90c",
+            "committedDate": "2026-08-02T22:37:05Z",
+            "headline": "Merge remote-tracking branch 'origin/main' into fix/21-drawer-under-n…",
+            "url": "https://github.com/lihaoz-barry/cloud-copilot/commit/b7ca90ccfed73ff907e08fc895786e4c0dfb3fed"
+          },
+          "sync": {
+            "state": "clean",
+            "behindBy": 0,
+            "aheadBy": 5,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "baseRefName": "main",
+            "headRefName": "fix/21-drawer-under-navbar",
+            "crossRepository": false,
+            "at": 1785711616943,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "I'll start by reading the PR diff and its context.\n\n● Fetch and view PR diff stat and PR info (shell)\n  │ git fetch origin --quiet && git --no-pager diff origin/main...HEAD --stat && echo \"---\" && gh pr\n  │ view 67 --repo lihaoz-barry/cloud-copilot\n  └ 65 lines…\n\n● View full PR diff (shell)\n  │ git --no-pager diff origin/main...HEAD\n  └ 391 lines…\n\n● View issue 21, PR reviews, package.json (shell)\n  │ gh issue view 21 --repo lihaoz-barry/cloud-copilot && echo \"=== reviews ===\" && gh pr view 67\n  │ --repo lihaoz-barry/cloud-copilot --json reviews,comments --jq '.reviews[].body,\n  │ .comments[].body' && echo \"=== pkg ===\" && cat package.json && ls test/\n  └ 32 lines…\n\n● Read issue body (shell)\n  │ sed -n '1,120p' /var/folders/n3/b1dz1b1j79v3gz0zn5llpnyc0000gp/T/1785711302629-copilot-tool-outp\n  │ ut-46587-ba5c0019-e0d7-49cd-826e-2cab691fb95a.txt\n  └ 120 lines…\n\n● Read rest of reviews/comments (shell)\n  │ sed -n '120,400p' /var/folders/n3/b1dz1b1j79v3gz0zn5llpnyc0000gp/T/1785711302629-copilot-tool-ou\n  │ tput-46587-ba5c0019-e0d7-49cd-826e-2cab691fb95a.txt\n  └ 135 lines…\n\nTwo prior review passes exist on this PR. Let me examine the current code state directly to find what's still broken.\n\n● Locate drawer markup lines (shell)\n  │ grep -n 'notifyDrawer\\|depthDrawer\\|drawer-body\\|drawer-head\\|ntfy' public/index.html | head -80\n  └ 51 lines…\n\n● Read index.html\n  │ public/index.html\n  └ L1145:1210 (66 lines read)\n\n● Find style blocks and Escape handlers (shell)\n  │ grep -n '<style>\\|</style>\\|Escape' public/index.html\n  └ 8 lines…\n\n● List all z-index values (shell)\n  │ grep -n 'z-index' public/index.html\n  └ 16 lines…\n\n● Run test suite (shell)\n  │ npm test 2>&1 | tail -20\n  └ 21 lines…\n\n● Start app server on port 8000 (shell)\n  │ PORT=8000 node server.js > /tmp/cc-8000.log 2>&1 &\n  │ sleep 4; curl -s -o /dev/null -w \"%{http_code}\\n\" http://127.0.0.1:8000/; tail -5\n  │ /tmp/cc-8000.log\n  └ 7 lines…\n\n● Resize browser window (MCP: playwright) · width: 390, height: 844\n  └ ### Ran Playwright code\n\n● Navigate to a URL (MCP: playwright) · http://127.0.0.1:8000/ · url: \"http://127.0.0.1:8000/\"\n  └ ### Ran Playwright code\n\n● Evaluate JavaScript (MCP: playwright) · function: \"async () => {   const r = {};   const notifyFa…\n  └ ### Result\n\n● Find all drawer open/close call sites (shell)\n  │ grep -n \"openNotifyDrawer\\|closeNotifyDrawer\\|openDepthDrawer\\|closeDepthDrawer\\|notifyDrawer\\.\\\n  │ |depthDrawer\\.\" public/index.html public/*.js | grep -v '^public/index.html:13[0-9][0-9]'\n  └ 11 lines…\n\n● Evaluate JavaScript (MCP: playwright) · function: \"async () => {   const out = [];   const press …\n  └ ### Result\n\n● Run Playwright code (unsafe) (MCP: playwright) · code: \"async (page) => {   const seq = [];   con…\n  └ ### Result\n\n● Check FAB rules and media queries (shell)\n  │ grep -n 'notify-fab\\|depth-fab\\|@media' public/index.html | sed -n '1,60p'\n  └ 14 lines…\n\n● Read index.html\n  │ public/index.html\n  └ L976:992 (17 lines read)\n\n● Run Playwright code (unsafe) (MCP: playwright) · code: \"async (page) => {   await page.setViewpor…\n  └ ### Result\n\n● Run Playwright code (unsafe) (MCP: playwright) · code: \"async (page) => {   await page.setViewpor…\n  └ ### Result\n\n● Read index.html\n  │ public/index.html\n  └ L1300:1350 (51 lines read)\n\n● Read index.html\n  │ public/index.html\n  └ L1356:1465 (110 lines read)\n\n● Check viewport meta tag (shell)\n  │ grep -n 'viewport' public/index.html | head -5 && sed -n '1,16p' public/index.html\n  └ 21 lines…\n\n● Read index.html\n  │ public/index.html\n  └ L703:720 (18 lines read)\n\nFound real remaining defects. Applying fixes now.\n\n● Read index.html\n  │ public/index.html\n  └ L277:330 (54 lines read)\n\n● Edit index.html +1 -1\n  └ public/index.html\n\n● Edit index.html +4\n  └ public/index.html\n\n● Edit index.html +3\n  └ public/index.html\n\nNow the settings drawer height and the dead `seenGroups` set:\n\n● Read index.html\n  │ public/index.html\n  └ L855:866 (12 lines read)\n\n● Edit index.html +1 -1\n  └ public/index.html\n\n● Edit index.html +1 -6\n  └ public/index.html\n\n● Edit drawers.test.js +15\n  └ test/drawers.test.js\n\n● Run drawer tests (shell)\n  │ node --test test/drawers.test.js 2>&1 | tail -25\n  └ 26 lines…\n\nNow re-verifying in the browser that nothing regressed and the scroll leak is fixed:\n\n● Run Playwright code (unsafe) (MCP: playwright) · code: \"async (page) => {   await page.reload(); …\n  └ ### Result\n\n● Run Playwright code (unsafe) (MCP: playwright) · code: \"async (page) => {   await page.setViewpor…\n  └ ### Result\n\n● Evaluate JavaScript (MCP: playwright) · function: \"() => { localStorage.setItem('cc.pipelineDepth…\n  └ ### Result\n\n● Run full test suite (shell)\n  │ npm test 2>&1 | tail -8 && git --no-pager diff --stat\n  └ 12 lines…\n\n",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "cloud-copilot#61": {
+      "repo": "cloud-copilot",
+      "issueNumber": 61,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "62": {
+          "prNumber": 62,
+          "prUrl": "https://github.com/lihaoz-barry/cloud-copilot/pull/62",
+          "title": "Abort 对已中断的任务生效，并在启动时收敛幽灵状态",
+          "createdAt": "2026-08-02T05:10:35Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "fix-abort-stuck-jobs",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "86f507c13b33061f15eebbd4c659cf64eb93e4d2",
+            "abbrev": "86f507c",
+            "committedDate": "2026-08-02T21:33:38Z",
+            "headline": "Merge remote-tracking branch 'origin/main' into fix-abort-stuck-jobs",
+            "url": "https://github.com/lihaoz-barry/cloud-copilot/commit/86f507c13b33061f15eebbd4c659cf64eb93e4d2"
+          },
+          "sync": {
+            "state": "clean",
+            "behindBy": 0,
+            "aheadBy": 3,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "baseRefName": "main",
+            "headRefName": "fix-abort-stuck-jobs",
+            "crossRepository": false,
+            "at": 1785706728324,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "cloud-copilot#47": {
+      "repo": "cloud-copilot",
+      "issueNumber": 47,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "48": {
+          "prNumber": 48,
+          "prUrl": "https://github.com/lihaoz-barry/cloud-copilot/pull/48",
+          "title": "任务队列与调度器:带 label 的 issue 自动开 PR + 每日同步 main(worktree 隔离)",
+          "createdAt": "2026-08-01T17:41:25Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "worktree-feat-task-queue",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "7846e861774fe06661fd1d1434d278eb44803469",
+            "abbrev": "7846e86",
+            "committedDate": "2026-08-01T17:40:30Z",
+            "headline": "任务队列与调度器:带 label 的 issue 自动开 PR + 每日同步 main",
+            "url": "https://github.com/lihaoz-barry/cloud-copilot/commit/7846e861774fe06661fd1d1434d278eb44803469"
+          },
+          "sync": {
+            "state": "conflict",
+            "behindBy": 36,
+            "aheadBy": 1,
+            "mergeable": "CONFLICTING",
+            "mergeStateStatus": "DIRTY",
+            "baseRefName": "main",
+            "headRefName": "worktree-feat-task-queue",
+            "crossRepository": false,
+            "at": 1785711617047,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "cloud-copilot#29": {
+      "repo": "cloud-copilot",
+      "issueNumber": 29,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "18": {
+          "prNumber": 18,
+          "prUrl": "https://github.com/lihaoz-barry/cloud-copilot/pull/18",
+          "title": "点击运行中的任务即可跳转并滚动到对应的 issue / PR / PreIssue / Admin",
+          "createdAt": "2026-07-26T17:02:07Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "feature/task-deeplinks",
+          "baseRefName": "feature/action-queue-scheduler",
+          "headCommit": {
+            "sha": "868cc487830899abce9d485cde2f71b5d4562d26",
+            "abbrev": "868cc48",
+            "committedDate": "2026-08-02T17:10:12Z",
+            "headline": "Fix deep-link routing bugs found in review",
+            "url": "https://github.com/lihaoz-barry/cloud-copilot/commit/868cc487830899abce9d485cde2f71b5d4562d26"
+          },
+          "sync": {
+            "state": "clean",
+            "behindBy": 0,
+            "aheadBy": 2,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "baseRefName": "feature/action-queue-scheduler",
+            "headRefName": "feature/task-deeplinks",
+            "crossRepository": false,
+            "at": 1785711617170,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "cloud-copilot#28": {
+      "repo": "cloud-copilot",
+      "issueNumber": 28,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "30": {
+          "prNumber": 30,
+          "prUrl": "https://github.com/lihaoz-barry/cloud-copilot/pull/30",
+          "title": "为 web 项目增加基于 Playwright 的 UI 验证工作流，并修复 Admin 聊天被误取消",
+          "createdAt": "2026-07-26T18:24:46Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "feat-ui-test-playwright",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "eb0ab59c32631479b69f5d8e5b09ecddd888e36d",
+            "abbrev": "eb0ab59",
+            "committedDate": "2026-07-26T18:22:36Z",
+            "headline": "feat: 新增 ui-test skill（Playwright 无头 UI 验证）并修复 Admin 聊天被误取消的问题",
+            "url": "https://github.com/lihaoz-barry/cloud-copilot/commit/eb0ab59c32631479b69f5d8e5b09ecddd888e36d"
+          },
+          "sync": {
+            "state": "conflict",
+            "behindBy": 50,
+            "aheadBy": 2,
+            "mergeable": "CONFLICTING",
+            "mergeStateStatus": "DIRTY",
+            "baseRefName": "main",
+            "headRefName": "feat-ui-test-playwright",
+            "crossRepository": false,
+            "at": 1785711617262,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "cloud-copilot#26": {
+      "repo": "cloud-copilot",
+      "issueNumber": 26,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "33": {
+          "prNumber": 33,
+          "prUrl": "https://github.com/lihaoz-barry/cloud-copilot/pull/33",
+          "title": "支持同一 repo 下多个 Create PR 并发运行（基于 git worktree）",
+          "createdAt": "2026-07-27T00:58:39Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "feat-26-worktree-concurrent-work",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "1a236fe985f42e8512cb1edc189e622217eae04b",
+            "abbrev": "1a236fe",
+            "committedDate": "2026-07-27T00:57:59Z",
+            "headline": "feat: 基于 git worktree 的并发 Create PR + 持久化队列 (closes #26)",
+            "url": "https://github.com/lihaoz-barry/cloud-copilot/commit/1a236fe985f42e8512cb1edc189e622217eae04b"
+          },
+          "sync": {
+            "state": "conflict",
+            "behindBy": 48,
+            "aheadBy": 1,
+            "mergeable": "CONFLICTING",
+            "mergeStateStatus": "DIRTY",
+            "baseRefName": "main",
+            "headRefName": "feat-26-worktree-concurrent-work",
+            "crossRepository": false,
+            "at": 1785711617381,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "cloud-copilot#20": {
+      "repo": "cloud-copilot",
+      "issueNumber": 20,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "23": {
+          "prNumber": 23,
+          "prUrl": "https://github.com/lihaoz-barry/cloud-copilot/pull/23",
+          "title": "Add a per-PR \"Merge main\" button (base branch → PR branch)",
+          "createdAt": "2026-07-26T17:20:18Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "fix-20-merge-main-button",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "d03bc3c43ad831147b604ba79f4dcc47b7b0dd8b",
+            "abbrev": "d03bc3c",
+            "committedDate": "2026-07-26T17:22:21Z",
+            "headline": "Add a per-PR \"Merge main\" action (base branch -> PR branch) (closes #20)",
+            "url": "https://github.com/lihaoz-barry/cloud-copilot/commit/d03bc3c43ad831147b604ba79f4dcc47b7b0dd8b"
+          },
+          "sync": {
+            "state": "conflict",
+            "behindBy": 50,
+            "aheadBy": 1,
+            "mergeable": "CONFLICTING",
+            "mergeStateStatus": "DIRTY",
+            "baseRefName": "main",
+            "headRefName": "fix-20-merge-main-button",
+            "crossRepository": false,
+            "at": 1785711617542,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        },
+        "31": {
+          "prNumber": 31,
+          "prUrl": "https://github.com/lihaoz-barry/cloud-copilot/pull/31",
+          "title": "为每个 PR 添加 “Merge main” 按钮：一键把 main 合并到当前 PR 分支",
+          "createdAt": "2026-07-27T00:27:18Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "fix-20-merge-main-btn",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "0bbb61ff608ed4f34707cf9d00e6f06b6438b13b",
+            "abbrev": "0bbb61f",
+            "committedDate": "2026-07-27T00:31:21Z",
+            "headline": "Merge remote-tracking branch 'origin/main' into fix-20-merge-main-btn",
+            "url": "https://github.com/lihaoz-barry/cloud-copilot/commit/0bbb61ff608ed4f34707cf9d00e6f06b6438b13b"
+          },
+          "sync": {
+            "state": "conflict",
+            "behindBy": 48,
+            "aheadBy": 3,
+            "mergeable": "CONFLICTING",
+            "mergeStateStatus": "DIRTY",
+            "baseRefName": "main",
+            "headRefName": "fix-20-merge-main-btn",
+            "crossRepository": false,
+            "at": 1785711617699,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "cloud-copilot#12": {
+      "repo": "cloud-copilot",
+      "issueNumber": 12,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "19": {
+          "prNumber": 19,
+          "prUrl": "https://github.com/lihaoz-barry/cloud-copilot/pull/19",
+          "title": "Queue Create PR / Deploy / Merge instead of blocking",
+          "createdAt": "2026-07-26T17:02:37Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "fix-12-action-queue",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "f61ddfbd6091f63f56cf11b356b70473d3f5c2d8",
+            "abbrev": "f61ddfb",
+            "committedDate": "2026-07-26T17:02:05Z",
+            "headline": "Queue Create PR / Deploy / Merge instead of blocking (closes #12)",
+            "url": "https://github.com/lihaoz-barry/cloud-copilot/commit/f61ddfbd6091f63f56cf11b356b70473d3f5c2d8"
+          },
+          "sync": {
+            "state": "conflict",
+            "behindBy": 52,
+            "aheadBy": 1,
+            "mergeable": "CONFLICTING",
+            "mergeStateStatus": "DIRTY",
+            "baseRefName": "main",
+            "headRefName": "fix-12-action-queue",
+            "crossRepository": false,
+            "at": 1785711617821,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "ios-diet-expert#87": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 87,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "105": {
+          "prNumber": 105,
+          "prUrl": "https://github.com/lihaoz-barry/ios-diet-expert/pull/105",
+          "title": "docs: add project README",
+          "createdAt": "2026-07-22T15:47:26Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "readme-issue-87",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "cf4fc64cc8d93a486c81769f43c4bb651b382f13",
+            "abbrev": "cf4fc64",
+            "committedDate": "2026-07-22T15:47:19Z",
+            "headline": "docs: add project README (closes #87)",
+            "url": "https://github.com/lihaoz-barry/ios-diet-expert/commit/cf4fc64cc8d93a486c81769f43c4bb651b382f13"
+          },
+          "sync": {
+            "state": "behind",
+            "behindBy": 14,
+            "aheadBy": 1,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "BEHIND",
+            "baseRefName": "main",
+            "headRefName": "readme-issue-87",
+            "crossRepository": false,
+            "at": 1785711619191,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "ios-diet-expert#84": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 84,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "85": {
+          "prNumber": 85,
+          "prUrl": "https://github.com/lihaoz-barry/ios-diet-expert/pull/85",
+          "title": "Align shared components with Nibble primitives (Chip/Tag/type/macros)",
+          "createdAt": "2026-07-12T05:32:17Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "codex/nibble-component-pass",
+          "baseRefName": "codex/nibble-design-tokens",
+          "headCommit": {
+            "sha": "89f68032f78fe91bb0437e1483484af21f4470d9",
+            "abbrev": "89f6803",
+            "committedDate": "2026-07-12T05:31:55Z",
+            "headline": "Align shared components with Nibble primitives (#84)",
+            "url": "https://github.com/lihaoz-barry/ios-diet-expert/commit/89f68032f78fe91bb0437e1483484af21f4470d9"
+          },
+          "sync": {
+            "state": "clean",
+            "behindBy": 0,
+            "aheadBy": 1,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "baseRefName": "codex/nibble-design-tokens",
+            "headRefName": "codex/nibble-component-pass",
+            "crossRepository": false,
+            "at": 1785711619252,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "ios-diet-expert#82": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 82,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "106": {
+          "prNumber": 106,
+          "prUrl": "https://github.com/lihaoz-barry/ios-diet-expert/pull/106",
+          "title": "Add immersive hands-free cooking mode",
+          "createdAt": "2026-07-22T15:57:21Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "feature/cooking-mode-82",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "6571b972756b2fdf17c16af005621211d292155b",
+            "abbrev": "6571b97",
+            "committedDate": "2026-07-22T15:56:52Z",
+            "headline": "feat: add immersive hands-free cooking mode (closes #82)",
+            "url": "https://github.com/lihaoz-barry/ios-diet-expert/commit/6571b972756b2fdf17c16af005621211d292155b"
+          },
+          "sync": {
+            "state": "behind",
+            "behindBy": 14,
+            "aheadBy": 1,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "BEHIND",
+            "baseRefName": "main",
+            "headRefName": "feature/cooking-mode-82",
+            "crossRepository": false,
+            "at": 1785711619306,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "ios-diet-expert#81": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 81,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#80": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 80,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#79": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 79,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "112": {
+          "prNumber": 112,
+          "prUrl": "https://github.com/lihaoz-barry/ios-diet-expert/pull/112",
+          "title": "将 Cook Now 改造为可复用的做饭任务流程 / Cook Now as a reusable cooking task flow (closes #79)",
+          "createdAt": "2026-07-26T16:56:57Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "feature/issue-79-cooking-task-flow",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "5d4d0fec348f8b4c4300452d2672b9515bf2609d",
+            "abbrev": "5d4d0fe",
+            "committedDate": "2026-07-26T16:55:38Z",
+            "headline": "feat: 做饭作为可复用任务流程 / reusable cooking task flow (closes #79)",
+            "url": "https://github.com/lihaoz-barry/ios-diet-expert/commit/5d4d0fec348f8b4c4300452d2672b9515bf2609d"
+          },
+          "sync": {
+            "state": "conflict",
+            "behindBy": 9,
+            "aheadBy": 1,
+            "mergeable": "CONFLICTING",
+            "mergeStateStatus": "DIRTY",
+            "baseRefName": "main",
+            "headRefName": "feature/issue-79-cooking-task-flow",
+            "crossRepository": false,
+            "at": 1785711619366,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "ios-diet-expert#78": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 78,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#77": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 77,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "88": {
+          "prNumber": 88,
+          "prUrl": "https://github.com/lihaoz-barry/ios-diet-expert/pull/88",
+          "title": "fix: resolve issue #77 - 重新设计今日首页,突出主推荐与一键做饭",
+          "createdAt": "2026-07-15T04:06:17Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "feature/issue-77-today-primary-recommendation",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "44f9a803aacf1f6defc5b61a104d4c6e988cbb2c",
+            "abbrev": "44f9a80",
+            "committedDate": "2026-07-15T04:05:37Z",
+            "headline": "feat: redesign Today with primary recommendation and one-tap cooking …",
+            "url": "https://github.com/lihaoz-barry/ios-diet-expert/commit/44f9a803aacf1f6defc5b61a104d4c6e988cbb2c"
+          },
+          "sync": {
+            "state": "conflict",
+            "behindBy": 18,
+            "aheadBy": 1,
+            "mergeable": "CONFLICTING",
+            "mergeStateStatus": "DIRTY",
+            "baseRefName": "main",
+            "headRefName": "feature/issue-77-today-primary-recommendation",
+            "crossRepository": false,
+            "at": 1785711619425,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "ios-diet-expert#75": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 75,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "104": {
+          "prNumber": 104,
+          "prUrl": "https://github.com/lihaoz-barry/ios-diet-expert/pull/104",
+          "title": "feat: add first-launch onboarding flow (closes #75)",
+          "createdAt": "2026-07-22T08:53:37Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "feat/issue-75-onboarding",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "3f254c81371f87700a16453ee6b5b2f9e2dd0fef",
+            "abbrev": "3f254c8",
+            "committedDate": "2026-07-22T08:53:05Z",
+            "headline": "feat: add first-launch onboarding flow with tab walkthrough (closes #75)",
+            "url": "https://github.com/lihaoz-barry/ios-diet-expert/commit/3f254c81371f87700a16453ee6b5b2f9e2dd0fef"
+          },
+          "sync": {
+            "state": "behind",
+            "behindBy": 14,
+            "aheadBy": 1,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "BEHIND",
+            "baseRefName": "main",
+            "headRefName": "feat/issue-75-onboarding",
+            "crossRepository": false,
+            "at": 1785711619482,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        },
+        "107": {
+          "prNumber": 107,
+          "prUrl": "https://github.com/lihaoz-barry/ios-diet-expert/pull/107",
+          "title": "Add first-launch onboarding flow",
+          "createdAt": "2026-07-22T17:51:22Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "fix-75-onboarding-flow",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "9bdb0df76a0588fa628c2f70ba18a9429c31a976",
+            "abbrev": "9bdb0df",
+            "committedDate": "2026-07-22T17:51:09Z",
+            "headline": "Add first-launch onboarding flow (closes #75)",
+            "url": "https://github.com/lihaoz-barry/ios-diet-expert/commit/9bdb0df76a0588fa628c2f70ba18a9429c31a976"
+          },
+          "sync": {
+            "state": "conflict",
+            "behindBy": 14,
+            "aheadBy": 1,
+            "mergeable": "CONFLICTING",
+            "mergeStateStatus": "DIRTY",
+            "baseRefName": "main",
+            "headRefName": "fix-75-onboarding-flow",
+            "crossRepository": false,
+            "at": 1785711619545,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "ios-diet-expert#69": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 69,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#66": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 66,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#47": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 47,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#43": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 43,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#42": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 42,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "45": {
+          "prNumber": 45,
+          "prUrl": "https://github.com/lihaoz-barry/ios-diet-expert/pull/45",
+          "title": "[WIP] Add AI-generated per-step cooking images with consistent style",
+          "createdAt": "2026-07-04T22:46:11Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "codex/add-ai-generated-cooking-images",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "7fb347d1e2b4fc4e4c749ddf42365647e2d156b0",
+            "abbrev": "7fb347d",
+            "committedDate": "2026-07-04T22:50:01Z",
+            "headline": "Add explicit per-step OpenAI cooking images with fixed style and disk…",
+            "url": "https://github.com/lihaoz-barry/ios-diet-expert/commit/7fb347d1e2b4fc4e4c749ddf42365647e2d156b0"
+          },
+          "sync": {
+            "state": "conflict",
+            "behindBy": 55,
+            "aheadBy": 2,
+            "mergeable": "CONFLICTING",
+            "mergeStateStatus": "DIRTY",
+            "baseRefName": "main",
+            "headRefName": "codex/add-ai-generated-cooking-images",
+            "crossRepository": false,
+            "at": 1785711619608,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "ios-diet-expert#39": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 39,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "109": {
+          "prNumber": 109,
+          "prUrl": "https://github.com/lihaoz-barry/ios-diet-expert/pull/109",
+          "title": "Add household size, goal, and servings preferences to Settings (closes #39)",
+          "createdAt": "2026-07-23T03:36:59Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "fix-39-settings-preferences",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "da3e99544bbd34ddc42df4eadc8a45cdb1a4a325",
+            "abbrev": "da3e995",
+            "committedDate": "2026-07-23T03:36:27Z",
+            "headline": "Add household size, default goal, and servings preferences to Setting…",
+            "url": "https://github.com/lihaoz-barry/ios-diet-expert/commit/da3e99544bbd34ddc42df4eadc8a45cdb1a4a325"
+          },
+          "sync": {
+            "state": "behind",
+            "behindBy": 10,
+            "aheadBy": 1,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "BEHIND",
+            "baseRefName": "main",
+            "headRefName": "fix-39-settings-preferences",
+            "crossRepository": false,
+            "at": 1785711619668,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        },
+        "110": {
+          "prNumber": 110,
+          "prUrl": "https://github.com/lihaoz-barry/ios-diet-expert/pull/110",
+          "title": "Add household size, default goal, and servings preferences to Settings (closes #39)",
+          "createdAt": "2026-07-23T03:41:19Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "feature/issue-39-settings-preferences",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "da3e99544bbd34ddc42df4eadc8a45cdb1a4a325",
+            "abbrev": "da3e995",
+            "committedDate": "2026-07-23T03:36:27Z",
+            "headline": "Add household size, default goal, and servings preferences to Setting…",
+            "url": "https://github.com/lihaoz-barry/ios-diet-expert/commit/da3e99544bbd34ddc42df4eadc8a45cdb1a4a325"
+          },
+          "sync": {
+            "state": "behind",
+            "behindBy": 10,
+            "aheadBy": 1,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "BEHIND",
+            "baseRefName": "main",
+            "headRefName": "feature/issue-39-settings-preferences",
+            "crossRepository": false,
+            "at": 1785711619730,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "ios-diet-expert#30": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 30,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#29": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 29,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "67": {
+          "prNumber": 67,
+          "prUrl": "https://github.com/lihaoz-barry/ios-diet-expert/pull/67",
+          "title": "[WIP] Add AI meal suggestions from pantry",
+          "createdAt": "2026-07-05T07:07:42Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "codex/feature-cook-from-my-pantry",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "87647ef846d6282b7013cc8d5d0d51fb5e8274b3",
+            "abbrev": "87647ef",
+            "committedDate": "2026-07-06T05:42:27Z",
+            "headline": "Add AI top-3 pantry combos with advanced preferences and saved collec…",
+            "url": "https://github.com/lihaoz-barry/ios-diet-expert/commit/87647ef846d6282b7013cc8d5d0d51fb5e8274b3"
+          },
+          "sync": {
+            "state": "conflict",
+            "behindBy": 35,
+            "aheadBy": 1,
+            "mergeable": "CONFLICTING",
+            "mergeStateStatus": "DIRTY",
+            "baseRefName": "main",
+            "headRefName": "codex/feature-cook-from-my-pantry",
+            "crossRepository": false,
+            "at": 1785711619793,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "ios-diet-expert#28": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 28,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#27": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 27,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#26": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 26,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#25": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 25,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#24": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 24,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#23": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 23,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "111": {
+          "prNumber": 111,
+          "prUrl": "https://github.com/lihaoz-barry/ios-diet-expert/pull/111",
+          "title": "计时器实时活动 + 灵动岛显示烹饪倒计时 (closes #23)",
+          "createdAt": "2026-07-23T04:21:42Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "feature/issue-23-live-activity-timer",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "4187942696d52e94f21a586bb06bba1a04eff58f",
+            "abbrev": "4187942",
+            "committedDate": "2026-07-23T04:21:28Z",
+            "headline": "Add Live Activity + Dynamic Island for step timer (closes #23)",
+            "url": "https://github.com/lihaoz-barry/ios-diet-expert/commit/4187942696d52e94f21a586bb06bba1a04eff58f"
+          },
+          "sync": {
+            "state": "behind",
+            "behindBy": 10,
+            "aheadBy": 1,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "BEHIND",
+            "baseRefName": "main",
+            "headRefName": "feature/issue-23-live-activity-timer",
+            "crossRepository": false,
+            "at": 1785711619860,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "ios-diet-expert#20": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 20,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#19": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 19,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#18": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 18,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#17": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 17,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#16": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 16,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#15": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 15,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#14": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 14,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#13": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 13,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#12": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 12,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#11": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 11,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#10": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 10,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#9": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 9,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "ios-diet-expert#6": {
+      "repo": "ios-diet-expert",
+      "issueNumber": 6,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118212": {
+      "repo": "openclaw",
+      "issueNumber": 118212,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118208": {
+      "repo": "openclaw",
+      "issueNumber": 118208,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "118209": {
+          "prNumber": 118209,
+          "prUrl": "https://github.com/openclaw/openclaw/pull/118209",
+          "title": "fix(release): keep npm 12 pack checks working",
+          "createdAt": "2026-08-02T21:11:53Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "codex/qa-npm12-pack-json",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "a0cb9b692b9756f6128742f0f56596f768758e2b",
+            "abbrev": "a0cb9b6",
+            "committedDate": "2026-08-02T21:35:07Z",
+            "headline": "fix(release): share npm pack normalizer in plugin workflow",
+            "url": "https://github.com/openclaw/openclaw/commit/a0cb9b692b9756f6128742f0f56596f768758e2b"
+          },
+          "sync": {
+            "state": "clean",
+            "behindBy": 0,
+            "aheadBy": 2,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "baseRefName": "main",
+            "headRefName": "codex/qa-npm12-pack-json",
+            "crossRepository": false,
+            "at": 1785706735928,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "openclaw#118185": {
+      "repo": "openclaw",
+      "issueNumber": 118185,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118156": {
+      "repo": "openclaw",
+      "issueNumber": 118156,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118153": {
+      "repo": "openclaw",
+      "issueNumber": 118153,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118125": {
+      "repo": "openclaw",
+      "issueNumber": 118125,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118059": {
+      "repo": "openclaw",
+      "issueNumber": 118059,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118050": {
+      "repo": "openclaw",
+      "issueNumber": 118050,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118044": {
+      "repo": "openclaw",
+      "issueNumber": 118044,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118043": {
+      "repo": "openclaw",
+      "issueNumber": 118043,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118039": {
+      "repo": "openclaw",
+      "issueNumber": 118039,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118035": {
+      "repo": "openclaw",
+      "issueNumber": 118035,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118030": {
+      "repo": "openclaw",
+      "issueNumber": 118030,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118028": {
+      "repo": "openclaw",
+      "issueNumber": 118028,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118027": {
+      "repo": "openclaw",
+      "issueNumber": 118027,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118018": {
+      "repo": "openclaw",
+      "issueNumber": 118018,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118016": {
+      "repo": "openclaw",
+      "issueNumber": 118016,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118007": {
+      "repo": "openclaw",
+      "issueNumber": 118007,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118006": {
+      "repo": "openclaw",
+      "issueNumber": 118006,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118005": {
+      "repo": "openclaw",
+      "issueNumber": 118005,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118002": {
+      "repo": "openclaw",
+      "issueNumber": 118002,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117994": {
+      "repo": "openclaw",
+      "issueNumber": 117994,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117984": {
+      "repo": "openclaw",
+      "issueNumber": 117984,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117965": {
+      "repo": "openclaw",
+      "issueNumber": 117965,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117956": {
+      "repo": "openclaw",
+      "issueNumber": 117956,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117950": {
+      "repo": "openclaw",
+      "issueNumber": 117950,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117941": {
+      "repo": "openclaw",
+      "issueNumber": 117941,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117929": {
+      "repo": "openclaw",
+      "issueNumber": 117929,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117899": {
+      "repo": "openclaw",
+      "issueNumber": 117899,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "118261": {
+          "prNumber": 118261,
+          "prUrl": "https://github.com/openclaw/openclaw/pull/118261",
+          "title": "fix(ui): eliminate 500ms grace-window race in Talk mode empty-final fallback",
+          "createdAt": "2026-08-02T22:23:05Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "fix/117899-control-ui-talk-grace-race",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "c40710d03661326da8b89d7a2b5c9f575a88abb1",
+            "abbrev": "c40710d",
+            "committedDate": "2026-08-02T22:52:49Z",
+            "headline": "test(ui): verify tick deferral for queued talk final text",
+            "url": "https://github.com/openclaw/openclaw/commit/c40710d03661326da8b89d7a2b5c9f575a88abb1"
+          },
+          "sync": null,
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "openclaw#117872": {
+      "repo": "openclaw",
+      "issueNumber": 117872,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117793": {
+      "repo": "openclaw",
+      "issueNumber": 117793,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117770": {
+      "repo": "openclaw",
+      "issueNumber": 117770,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117763": {
+      "repo": "openclaw",
+      "issueNumber": 117763,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117742": {
+      "repo": "openclaw",
+      "issueNumber": 117742,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117741": {
+      "repo": "openclaw",
+      "issueNumber": 117741,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117708": {
+      "repo": "openclaw",
+      "issueNumber": 117708,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117703": {
+      "repo": "openclaw",
+      "issueNumber": 117703,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117688": {
+      "repo": "openclaw",
+      "issueNumber": 117688,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117669": {
+      "repo": "openclaw",
+      "issueNumber": 117669,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117644": {
+      "repo": "openclaw",
+      "issueNumber": 117644,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117635": {
+      "repo": "openclaw",
+      "issueNumber": 117635,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117633": {
+      "repo": "openclaw",
+      "issueNumber": 117633,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117628": {
+      "repo": "openclaw",
+      "issueNumber": 117628,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117609": {
+      "repo": "openclaw",
+      "issueNumber": 117609,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117596": {
+      "repo": "openclaw",
+      "issueNumber": 117596,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117593": {
+      "repo": "openclaw",
+      "issueNumber": 117593,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117575": {
+      "repo": "openclaw",
+      "issueNumber": 117575,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117564": {
+      "repo": "openclaw",
+      "issueNumber": 117564,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117552": {
+      "repo": "openclaw",
+      "issueNumber": 117552,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#117510": {
+      "repo": "openclaw",
+      "issueNumber": 117510,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "cloud-copilot#70": {
+      "repo": "cloud-copilot",
+      "issueNumber": 70,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "cloud-copilot#68": {
+      "repo": "cloud-copilot",
+      "issueNumber": 68,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "69": {
+          "prNumber": 69,
+          "prUrl": "https://github.com/lihaoz-barry/cloud-copilot/pull/69",
+          "title": "feat: 已 review 且已合入 main 的 issue 显示 ✨ 徽章",
+          "createdAt": "2026-08-02T22:43:57Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "feat/68-spark-badge",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "6459abdf639c07bee5a0b68e18c3fe522e094a19",
+            "abbrev": "6459abd",
+            "committedDate": "2026-08-02T22:43:25Z",
+            "headline": "feat: 已 review 且已合入 main 的 issue 显示 ✨ 徽章",
+            "url": "https://github.com/lihaoz-barry/cloud-copilot/commit/6459abdf639c07bee5a0b68e18c3fe522e094a19"
+          },
+          "sync": {
+            "state": "clean",
+            "behindBy": 0,
+            "aheadBy": 1,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "baseRefName": "main",
+            "headRefName": "feat/68-spark-badge",
+            "crossRepository": false,
+            "at": 1785711617921,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "openclaw#118284": {
+      "repo": "openclaw",
+      "issueNumber": 118284,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118279": {
+      "repo": "openclaw",
+      "issueNumber": 118279,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118274": {
+      "repo": "openclaw",
+      "issueNumber": 118274,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118244": {
+      "repo": "openclaw",
+      "issueNumber": 118244,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118242": {
+      "repo": "openclaw",
+      "issueNumber": 118242,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "118282": {
+          "prNumber": 118282,
+          "prUrl": "https://github.com/openclaw/openclaw/pull/118282",
+          "title": "fix(doctor): import legacy exec approvals with null usage metadata",
+          "createdAt": "2026-08-02T22:55:38Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "clawsweeper/issue-openclaw-openclaw-118242",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "c3e731b0b34789e47fb02b9d4556aa791016446e",
+            "abbrev": "c3e731b",
+            "committedDate": "2026-08-02T22:50:45Z",
+            "headline": "fix(doctor): import legacy exec approvals with null usage metadata",
+            "url": "https://github.com/openclaw/openclaw/commit/c3e731b0b34789e47fb02b9d4556aa791016446e"
+          },
+          "sync": {
+            "state": "clean",
+            "behindBy": 0,
+            "aheadBy": 1,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "baseRefName": "main",
+            "headRefName": "clawsweeper/issue-openclaw-openclaw-118242",
+            "crossRepository": false,
+            "at": 1785711622005,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "openclaw#118237": {
+      "repo": "openclaw",
+      "issueNumber": 118237,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    },
+    "openclaw#118236": {
+      "repo": "openclaw",
+      "issueNumber": 118236,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {
+        "118272": {
+          "prNumber": 118272,
+          "prUrl": "https://github.com/openclaw/openclaw/pull/118272",
+          "title": "fix(cron): reject ambiguous multi-channel announce jobs",
+          "createdAt": "2026-08-02T22:40:31Z",
+          "source": "gh",
+          "state": "OPEN",
+          "headRefName": "codex/cron-delivery-create-validation",
+          "baseRefName": "main",
+          "headCommit": {
+            "sha": "7e5321dee6986137edfa5ce3990cc9240bc7a523",
+            "abbrev": "7e5321d",
+            "committedDate": "2026-08-02T22:39:45Z",
+            "headline": "fix(cron): reject ambiguous announce delivery (#118236)",
+            "url": "https://github.com/openclaw/openclaw/commit/7e5321dee6986137edfa5ce3990cc9240bc7a523"
+          },
+          "sync": {
+            "state": "behind",
+            "behindBy": 29,
+            "aheadBy": 1,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "BEHIND",
+            "baseRefName": "main",
+            "headRefName": "codex/cron-delivery-create-validation",
+            "crossRepository": false,
+            "at": 1785711622053,
+            "source": "git"
+          },
+          "deploy": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "buildNumber": null,
+            "version": null,
+            "changelog": null
+          },
+          "merge": {
+            "status": "idle",
+            "method": "merge",
+            "forced": false,
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "recoveryAttempted": false,
+            "conflictResolved": false,
+            "recoveryMessage": null,
+            "cleanup": null
+          },
+          "update": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "baseRefName": null,
+            "message": null
+          },
+          "review": {
+            "status": "idle",
+            "sessionId": null,
+            "conversation": "",
+            "exitCode": null,
+            "startedAt": null,
+            "finishedAt": null,
+            "durationMs": null,
+            "reviewedSha": null,
+            "lastReviewedSha": null,
+            "message": null
+          },
+          "deployHistory": [],
+          "chat": {
+            "sessionId": null,
+            "messages": []
+          }
+        }
+      }
+    },
+    "openclaw#118222": {
+      "repo": "openclaw",
+      "issueNumber": 118222,
+      "work": {
+        "status": "idle",
+        "sessionId": null,
+        "prNumber": null,
+        "prUrl": null,
+        "conversation": "",
+        "exitCode": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "durationMs": null
+      },
+      "auto": {
+        "attempts": 0,
+        "lastAction": null,
+        "lastError": null,
+        "lastRunAt": null,
+        "nextAttemptAt": null,
+        "needsAttention": false
+      },
+      "prs": {}
+    }
+  },
+  "dismissed": {},
+  "adminChats": {},
+  "preIssues": {},
+  "adminPending": {},
+  "settings": {
+    "model": "claude-opus-4.8"
+  }
+}

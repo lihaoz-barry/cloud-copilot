@@ -434,6 +434,44 @@ Deploy is dispatched per-repo. Drop a `.cloud-copilot.json` at a repo's root:
   pointing here. cloud-copilot never guesses a shell command for an unconfigured
   repo.
 
+### Deploy preflight: dirty working trees
+
+Every action shares **one clone per repo**, so Deploy's `git checkout <pr-branch>`
+used to abort with *"Your local changes would be overwritten by checkout"* whenever
+anything was uncommitted — killing the deploy and leaving a bare `Command failed:
+git checkout …` in the log.
+
+Deploy now runs a **salvage preflight** instead. When the tree is dirty it becomes
+a two-phase job, streaming into the same deploy log:
+
+1. **Salvage** — a Copilot session driven by the `salvage-local-changes` skill:
+   summarize the working-tree changes, open a GitHub issue, cut a branch from the
+   latest default branch, carry the changes over (resolving conflicts), commit,
+   push, and open a PR that closes the issue. It does **not** merge that PR.
+2. **Deploy** — the salvage is verified before anything is checked out: the tree
+   must be clean (`git status --porcelain` empty), `HEAD` must be contained in an
+   `origin/*` ref **other than the default branch** (so a commit really was made
+   from those changes *and* pushed — a tree that went clean without a commit
+   leaves `HEAD` where `origin/main` already has it), and an **open** pull request
+   whose head commit contains that `HEAD` must exist on GitHub (each URL printed
+   by the session is looked up, with PRs on the leftover branch as a fallback).
+   A URL the agent prints but never created therefore does not pass, and neither
+   does an unrelated PR — once `HEAD` is known to be a commit the default branch
+   does not have, "contains `HEAD`" can only be true of the salvage's own PR.
+   Only then does the PR's branch get checked out and the normal deploy proceed.
+   The gate itself lives in `lib/salvage.js` and is unit-tested.
+
+If the salvage session fails, or the tree is still dirty afterwards, or the work
+never reached GitHub, the deploy fails **without** checking anything out — local
+work is never discarded to make a deploy go through. Aborting mid-salvage stops
+there too, and never rolls on into the deploy. A clean tree skips phase 1
+entirely, so nothing changes for a well-behaved repo. If the dashboard restarts
+*during* the salvage the deploy phase is not resumed — the run is reported as
+interrupted rather than as a deploy that never happened.
+
+This is deliberately not an auto-stash: a stash is invisible in the UI and gets
+forgotten. An issue plus a reviewable PR is the durable form of the same rescue.
+
 ### Base-branch sync badge (⇣N / ⚠) — update a PR with Copilot
 
 Every open PR's workflow line starts with a small round badge, left of the PR
@@ -773,9 +811,12 @@ is never something you can forget to do.
 ### SSE events
 
 `meta` (command) → `chunk` (`{stream,text}` streamed output) → `session`
-(`{sessionId}`) → `result` (`{action,status,prUrl?,prNumber?}`, where `status` is
+(`{sessionId}`) → `phase` (`{phase,bin,args,cwd}`, only for multi-phase jobs — see
+[Deploy preflight](#deploy-preflight-dirty-working-trees)) → `result`
+(`{action,status,prUrl?,prNumber?}`, where `status` is
 `success`/`failed`/`aborted`, or `blocked` when the working-tree lock rejects
-an overlapping Deploy/Merge/Restart, or Merge is attempted before Deploy has succeeded) → `done` (`{exitCode}`).
+an overlapping Deploy/Merge/Restart, or Merge is attempted before Deploy has
+succeeded) → `done` (`{exitCode}`).
 
 ---
 
@@ -844,6 +885,8 @@ The script is idempotent and prints a ✓/✗ summary. Flags:
 **Bundled skills** (`skills/`):
 - `create-pr` — implement an issue end-to-end and open a PR (the Create PR flow).
 - `testflight-deploy` — build + upload to TestFlight via fastlane (the Deploy flow).
+- `salvage-local-changes` — rescue a dirty working tree into an issue + PR (the
+  Deploy preflight; see [Deploy preflight](#deploy-preflight-dirty-working-trees)).
 - `cloud-copilot-setup` — a step-by-step guide an agent can read to do the setup
   interactively, if you'd rather not run the script.
 
@@ -926,6 +969,18 @@ the HTTP connection that started them:
 - **Success detection**: a PR URL printed by *this* run's transcript is treated as success
   even if the process was later killed (exit code `null`), with a `gh pr list` fallback that
   still requires a clean exit to avoid matching a stale PR.
+- **Multi-phase jobs**: a job can run several children back-to-back under one key via
+  `nextPhase(job, exitCode)`, which returns the next `{bin,args,cwd,phase}` or `null` to
+  finish. Subscribers, the transcript and the abort handle carry across phases, so the
+  browser sees one continuous log and one final `done`. Used by the
+  [deploy preflight](#deploy-preflight-dirty-working-trees) (salvage → deploy). Throwing
+  from `nextPhase` surfaces the message on the stream and ends the job; a cancelled job
+  never advances to the next phase — including a cancel that lands while `nextPhase` is
+  still awaiting, or while the supervisor is still answering the spawn request, when in
+  both cases there is no live child to kill. A verdict read out of the transcript must use
+  `jobs.phaseLog(job)` (the current phase's slice) rather than `job.conversation`, or an
+  earlier phase's prose can satisfy the later phase's success markers. Covered by
+  `test/jobs.test.js`.
 
 ### SSE event types
 

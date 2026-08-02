@@ -31,6 +31,7 @@ const { runCopilotSSE, writeSseHead } = require('./lib/runner');
 const jobs = require('./lib/jobs');
 const notifier = require('./lib/notifier');
 const changelogLib = require('./lib/changelog');
+const salvageLib = require('./lib/salvage');
 const { UPLOADS_DIR, saveUploadedImages, cleanupOldUploads } = require('./lib/attachments');
 const { cleanupAfterMerge } = require('./lib/mergeCleanup');
 const worktrees = require('./lib/worktrees');
@@ -487,11 +488,16 @@ function findSelfRepo() {
 }
 
 // Argument-array git (never a shell string) against a specific repo.
+// stderr is captured rather than inherited: callers need it on `err.stderr`
+// (that is the whole point of routing the deploy checkout through here), but
+// letting it also reach this process's console would spray `git fetch` progress
+// into the server log on every deploy.
 function git(repoPath, args, timeout = 20000) {
   return execFileSync('git', ['-C', repoPath, ...args], {
     encoding: 'utf8',
     timeout,
     maxBuffer: 4 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
   }).trim();
 }
 
@@ -536,14 +542,19 @@ function isDirty(repoPath) {
 // on failure. Argument-array form (never a shell string) so branch names, which
 // come from GitHub, are never interpreted by a shell.
 function checkoutBranchCwd(repoPath, branch) {
-  execFileSync('git', ['fetch', 'origin', branch], { cwd: repoPath, stdio: 'ignore', timeout: 30000 });
+  // Via git() (which pipes stdout/stderr) rather than stdio:'ignore': on
+  // failure execFileSync only carries git's real message ("Your local changes
+  // to the following files would be overwritten by checkout: …") on
+  // `err.stderr`, and 'ignore' throws that away, leaving callers with a bare
+  // "Command failed: git checkout <branch>". See checkoutFailureMessage().
+  git(repoPath, ['fetch', 'origin', branch], 30000);
   const released = worktrees.releaseBranchWorktree(repoPath, branch, { fetch: false });
   if (released.status === 'kept') {
     // The worktree carries local work — deploy it where it lives rather than
     // deleting it or failing the job.
     return released.path;
   }
-  execFileSync('git', ['checkout', branch], { cwd: repoPath, stdio: 'ignore', timeout: 15000 });
+  git(repoPath, ['checkout', branch], 15000);
   return repoPath;
 }
 
@@ -1526,6 +1537,106 @@ function refuseIfPrClosed(repo, n, prNumber, pr) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Deploy preflight: salvage a dirty working tree.
+//
+// Every action shares ONE clone per repo, so `git checkout <pr-branch>` aborts
+// with "Your local changes would be overwritten by checkout" whenever anything
+// is uncommitted — which used to fail the deploy outright. Instead, run a
+// Copilot session (the `salvage-local-changes` skill) as phase 1 of the deploy
+// job: it summarizes the changes, opens an issue, puts them on a branch cut
+// from the latest default branch as a PR (resolving conflicts), and leaves the
+// tree clean. Phase 2 then checks out the target branch and deploys as usual.
+//
+// Deliberately NOT an auto-stash: stashes are invisible in the UI and get
+// forgotten. An issue + PR is the durable, reviewable form of the same rescue.
+// ---------------------------------------------------------------------------
+
+// The verification gate between the two phases lives in lib/salvage.js, with
+// git and gh injected so it can be unit-tested (test/salvage.test.js) instead of
+// only ever exercised by a live deploy.
+const salvageChecks = salvageLib.createSalvageChecks({ git, gh });
+
+// A one-line-per-file digest of the dirty tree, for the prompt and the log.
+const dirtySummary = (repoPath) => salvageChecks.statusPorcelain(repoPath);
+
+// Phase-1 spec when the tree is dirty, or null when it is already clean.
+function salvagePhaseSpec(repo, prNumber) {
+  if (!isDirty(repo.path)) return null;
+  const base = defaultBranchOf(repo.path);
+  const prompt =
+    `This repository (${repo.ownerRepo}) has uncommitted local changes that are blocking ` +
+    `checkout of the branch for PR #${prNumber}, which is about to be deployed. ` +
+    `Use the salvage-local-changes skill to rescue that work: summarize the working-tree ` +
+    `changes, open a GitHub issue describing them, cut a branch from the latest ` +
+    `origin/${base}, carry the changes over (resolving any conflicts — never discard a ` +
+    `stashed hunk), commit, push, and open a pull request that closes the issue. ` +
+    `Do NOT merge that pull request, and do NOT touch the branch for PR #${prNumber}. ` +
+    `The changes must not be lost: never run git reset --hard, git checkout -- ., or git clean. ` +
+    `Leave the working tree completely clean — \`git status --porcelain\` must print nothing when ` +
+    `you finish, because the deploy checks out another branch immediately afterwards. ` +
+    `Print the issue URL and the pull request URL each on its own line.`;
+  return {
+    bin: COPILOT_BIN,
+    args: ['-p', prompt, '--allow-all', ...modelFlags()],
+    cwd: repo.path,
+    phase: 'salvage',
+  };
+}
+
+// Guards the transition from the salvage phase into the deploy phase. Throws
+// (which jobs.js surfaces on the stream and turns into a failed deploy) rather
+// than deploying from a tree whose local work was not safely captured. See
+// lib/salvage.js for what "safely captured" is made to mean.
+async function assertSalvaged(exitCode, repo, job, deployPrNumber, deployBranch) {
+  const pr = await salvageChecks.assertSalvaged({
+    exitCode,
+    repoPath: repo.path,
+    ownerRepo: repo.ownerRepo,
+    // Only the salvage session's own output: the URLs that count are the ones
+    // THIS phase printed, not anything the preflight banner or an earlier phase
+    // happens to contain.
+    conversation: jobs.phaseLog(job),
+    deployPrNumber,
+    deployBranch,
+    defaultBranch: defaultBranchOf(repo.path),
+  });
+  jobs.note(job, `\n[preflight] local changes salvaged into ${pr.url || `PR #${pr.number}`}\n`);
+}
+
+// Opening lines of a salvaged deploy's log, so the user sees WHY an extra
+// Copilot session is running before that session prints anything of its own.
+function salvageBanner(repo, prNumber) {
+  return (
+    `\n[preflight] ${repo.name} has uncommitted local changes, which would block ` +
+    `checking out the branch for PR #${prNumber}:\n${dirtySummary(repo.path)}\n` +
+    `[preflight] salvaging them into an issue + PR (salvage-local-changes skill) before deploying…\n\n`
+  );
+}
+
+// git's own stderr is the useful part ("Your local changes to the following
+// files would be overwritten by checkout"), and execFileSync buries it on the
+// error object. Surface it instead of a bare "Command failed: git checkout".
+function checkoutFailureMessage(branch, err) {
+  const detail = (err.stderr || err.stdout || err.message || '').toString().trim();
+  return `Failed to check out branch "${branch}":\n${detail}`;
+}
+
+// Terminal state for a deploy that never got past its preflight. The salvage
+// phase's exit code says nothing about the deploy, so mark it failed (or
+// aborted) explicitly rather than letting the usual success heuristics run.
+function failedPreflight(repo, n, prNumber, j) {
+  const status = j.cancelled ? 'aborted' : 'failed';
+  store.updateDeploy(repo.name, n, prNumber, (d) => {
+    d.status = status;
+    d.exitCode = j.exitCode;
+    d.conversation = j.conversation;
+    d.sessionId = j.sessionId || d.sessionId;
+    d.finishedAt = new Date().toISOString();
+  });
+  return { action: 'deploy', prNumber, status, sessionId: j.sessionId };
+}
+
 function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
   gh.getPr(repo.ownerRepo, prNumber).then(async (pr) => {
     if (!pr || !pr.headRefName) {
@@ -1545,74 +1656,119 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
     // exact commit being shipped — never inferred afterward from the agent's
     // free-form report. build = commit count (same source `fastlane beta`
     // itself defaults to); version = the Xcode project's own MARKETING_VERSION.
-    let buildNumber, version, workCwd;
-    try {
-      workCwd = checkoutBranchCwd(repo.path, pr.headRefName);
-      buildNumber = Number(
-        execFileSync('git', ['rev-list', '--count', 'HEAD'], { cwd: workCwd, encoding: 'utf8', timeout: 15000 }).trim(),
-      );
+    // Assigned by prepareDeployPhase(), which runs either immediately (clean
+    // tree) or after the salvage phase — and is read back in onDone.
+    let buildNumber, version, changelog, workCwd;
+
+    // Checks out the PR branch — releasing a linked worktree that still holds
+    // it when that can be done without losing work, otherwise deploying from
+    // inside that worktree — and builds the deploy phase spec. Throws with
+    // git's own stderr on failure.
+    const prepareDeployPhase = async () => {
+      // Argument-array form — branch names come from GitHub and are never
+      // interpreted by a shell. git's own stderr is preserved on failure; the
+      // rest of this function fails with its own (already specific) message.
+      try {
+        workCwd = checkoutBranchCwd(repo.path, pr.headRefName);
+      } catch (err) {
+        throw new Error(checkoutFailureMessage(pr.headRefName, err));
+      }
+      buildNumber = Number(git(workCwd, ['rev-list', '--count', 'HEAD'], 15000));
       version = repoConfig.readMarketingVersion(workCwd); // null if not found — fastlane then uses its own default
-    } catch (err) {
-      const message = `Failed to check out branch "${pr.headRefName}" / compute build number: ${err.message}`;
-      store.updateDeploy(repo.name, n, prNumber, (d) => {
-        d.status = 'failed';
-        d.finishedAt = new Date().toISOString();
-        d.conversation = message;
+
+      const versionArg = version ? ` version:${version}` : '';
+      // "What to Test" text testers see in TestFlight — one short Chinese
+      // sentence derived from the PR title, so builds are self-describing
+      // instead of shipping the raw (often English, prefixed, issue-tagged)
+      // title. Best-effort translation with a deterministic fallback; see
+      // lib/changelog.js. Awaited before the deploy phase starts so the pinned
+      // text is in the prompt.
+      changelog = await changelogLib.resolveChangelog({
+        pr,
+        version,
+        buildNumber,
+        copilotBin: COPILOT_BIN,
       });
-      return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
+      const prompt =
+        `The branch for PR #${prNumber} is already checked out. Deploy the current ` +
+        `${repo.name} app to TestFlight using the testflight-deploy skill, running ` +
+        `\`fastlane beta build:${buildNumber}${versionArg} changelog:'${changelog}'\` (do not ` +
+        `change the build/version numbers or the changelog text — they're already pinned; ` +
+        `the changelog becomes testers' "What to Test" note in TestFlight, so it must be passed ` +
+        `through exactly as given). When finished, clearly state whether the build succeeded and ` +
+        `whether the upload to TestFlight succeeded. Note: Xcode's export step can silently ` +
+        `reassign the build number, so grep the fastlane log for its own "finished processing ` +
+        `the build" line and quote that line verbatim (exact numbers, no paraphrasing) — that's ` +
+        `the number Apple actually assigned, which may differ from what was requested.`;
+      // Deploy must reach files outside the repo (/tmp, ~/Library, keychain) and the
+      // network, so grant full path + URL + tool access.
+      return {
+        bin: COPILOT_BIN,
+        args: ['-p', prompt, '--allow-all', ...modelFlags()],
+        cwd: workCwd,
+        phase: 'deploy',
+      };
+    };
+
+    // Dirty tree? Salvage it first (phase 1), then deploy (phase 2). Clean tree?
+    // Check out and deploy right away, exactly as before.
+    const salvage = salvagePhaseSpec(repo, prNumber);
+    let reachedDeploy = false;
+    let firstPhase;
+    if (!salvage) {
+      try {
+        firstPhase = await prepareDeployPhase();
+        reachedDeploy = true;
+      } catch (err) {
+        const message = err.message;
+        store.updateDeploy(repo.name, n, prNumber, (d) => {
+          d.status = 'failed';
+          d.finishedAt = new Date().toISOString();
+          d.conversation = message;
+        });
+        return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
+      }
     }
 
-    const versionArg = version ? ` version:${version}` : '';
-    // "What to Test" text testers see in TestFlight — one short Chinese
-    // sentence derived from the PR title, so builds are self-describing
-    // instead of shipping the raw (often English, prefixed, issue-tagged)
-    // title. Best-effort translation with a deterministic fallback; see
-    // lib/changelog.js. Awaited before the deploy job starts so the pinned
-    // text is in the prompt.
-    const changelog = await changelogLib.resolveChangelog({
-      pr,
-      version,
-      buildNumber,
-      copilotBin: COPILOT_BIN,
-    });
-    const prompt =
-      `The branch for PR #${prNumber} is already checked out. Deploy the current ` +
-      `${repo.name} app to TestFlight using the testflight-deploy skill, running ` +
-      `\`fastlane beta build:${buildNumber}${versionArg} changelog:'${changelog}'\` (do not ` +
-      `change the build/version numbers or the changelog text — they're already pinned; ` +
-      `the changelog becomes testers' "What to Test" note in TestFlight, so it must be passed ` +
-      `through exactly as given). When finished, clearly state whether the build succeeded and ` +
-      `whether the upload to TestFlight succeeded. Note: Xcode's export step can silently ` +
-      `reassign the build number, so grep the fastlane log for its own "finished processing ` +
-      `the build" line and quote that line verbatim (exact numbers, no paraphrasing) — that's ` +
-      `the number Apple actually assigned, which may differ from what was requested.`;
-    // Deploy must reach files outside the repo (/tmp, ~/Library, keychain) and the
-    // network, so grant full path + URL + tool access.
-    const args = ['-p', prompt, '--allow-all', ...modelFlags()];
-
     const job = jobs.startJob(key, {
-      bin: COPILOT_BIN,
-      args,
-      cwd: workCwd,
+      ...(salvage || firstPhase),
       meta: {
         action: 'deploy',
         prNumber,
         repo: repo.name,
         issueNumber: n,
         subject: pr.title || `PR #${prNumber}`,
+        phase: salvage ? 'salvage' : 'deploy',
       },
+      nextPhase: salvage
+        ? async (j, code) => {
+            await assertSalvaged(code, repo, j, prNumber, pr.headRefName);
+            jobs.note(j, `\n[preflight] working tree clean — checking out ${pr.headRefName} and deploying…\n`);
+            const spec = await prepareDeployPhase();
+            reachedDeploy = true;
+            return spec;
+          }
+        : undefined,
       onSession: (id) =>
         store.updateDeploy(repo.name, n, prNumber, (d) => {
           d.sessionId = id;
         }),
       onDone: async (j) => {
+        // Never reached the deploy phase — the salvage preflight failed, or the
+        // checkout after it did. Report that, not a bogus deploy verdict.
+        if (!reachedDeploy) return failedPreflight(repo, n, prNumber, j);
+        // ONLY the deploy phase's own output. A salvaged deploy's transcript
+        // also holds the salvage session, whose prose ("finished successfully",
+        // "uploaded…") would otherwise satisfy these markers and report a
+        // shipped build for an upload that never happened.
+        const deployLog = jobs.phaseLog(j);
         // Success markers emitted by fastlane / the skill's final report.
         // "finished processing the build" is fastlane's own real completion
         // line (confirmed against a live deploy) — the earlier patterns alone
         // missed it and mis-marked a genuinely successful upload as failed.
         const success =
           /successfully uploaded|finished successfully|finished processing the build|uploaded to testflight|build \d+ .*uploaded/i.test(
-            j.conversation,
+            deployLog,
           );
         const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
         // Xcode's export step can silently bump the build number past what we
@@ -1625,7 +1781,7 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
               // Tolerate markdown emphasis (**68**) around the numbers — this
               // matches the agent's own summary line, not fastlane's raw log
               // (which Copilot CLI collapses in the stored transcript).
-              const m = j.conversation.match(
+              const m = deployLog.match(
                 /finished processing the build\s+\**([\d.]+)\**\s*-\s*\**(\d+)\**\s*for/i,
               );
               return m ? { version: m[1], buildNumber: Number(m[2]) } : null;
@@ -1656,6 +1812,7 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
       },
     });
 
+    if (salvage) jobs.note(job, salvageBanner(repo, prNumber));
     jobs.subscribe(job, res);
   });
 }
@@ -1675,35 +1832,68 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
     const closed = refuseIfPrClosed(repo, n, prNumber, pr);
     if (closed) return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'blocked', message: closed });
 
+    // Argument-array form (never a shell string) so the branch name — which
+    // comes from GitHub and could in principle contain shell metacharacters —
+    // is never interpreted by a shell. Releases a linked worktree still holding
+    // the branch when that loses no work, otherwise deploys from inside it.
+    // Throws with git's stderr on failure; sets the directory to deploy from.
     let workCwd;
-    try {
-      workCwd = checkoutBranchCwd(repo.path, pr.headRefName);
-    } catch (err) {
-      const message = `Failed to check out branch "${pr.headRefName}": ${err.message}`;
-      store.updateDeploy(repo.name, n, prNumber, (d) => {
-        d.status = 'failed';
-        d.finishedAt = new Date().toISOString();
-        d.conversation = message;
-      });
-      return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
-    }
+    const checkout = () => {
+      try {
+        workCwd = checkoutBranchCwd(repo.path, pr.headRefName);
+      } catch (err) {
+        throw new Error(checkoutFailureMessage(pr.headRefName, err));
+      }
+    };
 
     // The deploy command itself is trusted repo-local config (from
     // `.cloud-copilot.json`, authored by whoever owns the repo under
     // REPOS_ROOT) — not attacker-controlled input, so a shell string is fine
     // here (same trust boundary as REPOS_ROOT itself).
+    const deployPhaseSpec = () => ({ bin: 'bash', args: ['-lc', command], cwd: workCwd, phase: 'deploy' });
+
+    // Dirty tree? Salvage it into an issue + PR first (phase 1), then check out
+    // and deploy (phase 2). Clean tree? Check out and deploy immediately.
+    const salvage = salvagePhaseSpec(repo, prNumber);
+    let reachedDeploy = false;
+    let firstPhase;
+    if (!salvage) {
+      try {
+        checkout();
+        firstPhase = deployPhaseSpec();
+        reachedDeploy = true;
+      } catch (err) {
+        const message = err.message;
+        store.updateDeploy(repo.name, n, prNumber, (d) => {
+          d.status = 'failed';
+          d.finishedAt = new Date().toISOString();
+          d.conversation = message;
+        });
+        return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
+      }
+    }
+
     const job = jobs.startJob(key, {
-      bin: 'bash',
-      args: ['-lc', command],
-      cwd: workCwd,
+      ...(salvage || firstPhase),
       meta: {
         action: 'deploy',
         prNumber,
         repo: repo.name,
         issueNumber: n,
         subject: pr.title || `PR #${prNumber}`,
+        phase: salvage ? 'salvage' : 'deploy',
       },
+      nextPhase: salvage
+        ? async (j, code) => {
+            await assertSalvaged(code, repo, j, prNumber, pr.headRefName);
+            jobs.note(j, `\n[preflight] working tree clean — checking out ${pr.headRefName} and deploying…\n`);
+            checkout();
+            reachedDeploy = true;
+            return deployPhaseSpec();
+          }
+        : undefined,
       onDone: async (j) => {
+        if (!reachedDeploy) return failedPreflight(repo, n, prNumber, j);
         const success = j.exitCode === 0;
         const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
         store.updateDeploy(repo.name, n, prNumber, (d) => {
@@ -1716,6 +1906,7 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
       },
     });
 
+    if (salvage) jobs.note(job, salvageBanner(repo, prNumber));
     jobs.subscribe(job, res);
   });
 }
@@ -3227,6 +3418,24 @@ function adoptedCallbacksFor(session) {
     onSession: () => {},
     onProgress: (j) => flush(j, null),
     onDone: async (j) => {
+      // A deploy adopted mid-salvage is NOT a deploy: this process has no
+      // `nextPhase` for it, so the deploy phase never runs. Without this, a
+      // salvage session that exits 0 would be recorded as a successful deploy
+      // of a build that was never made.
+      if ((session.meta || {}).phase === 'salvage') {
+        const interrupted = j.cancelled ? 'aborted' : 'failed';
+        j.conversation +=
+          '\n[preflight] The dashboard restarted during the salvage preflight, so the deploy ' +
+          'phase never ran. The salvaged work is unaffected — re-run Deploy when ready.\n';
+        flush(j, interrupted);
+        return {
+          action: parts.action,
+          prNumber: parts.prNumber,
+          status: interrupted,
+          sessionId: j.sessionId,
+          adopted: true,
+        };
+      }
       const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
       // A Create PR that finished while we were away has a PR on GitHub and
       // nothing pointing at it; without this the issue would look untouched and

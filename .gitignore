@@ -21,3 +21,6 @@ setup/deploy.env
 # playwright-mcp scratch output
 .playwright-mcp/
 setup/notify.env
+
+# per-run isolated data dir (lib/worktreePool.js leases, local smoke runs)
+.cc-data/

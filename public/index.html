@@ -2417,6 +2417,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       const ex = st.prs.find((x) => x.prNumber === p.prNumber);
       return {
         prNumber: p.prNumber, prUrl: p.prUrl, title: p.title, createdAt: p.createdAt,
+        state: p.state || (ex && ex.state) || null,
         headRefName: p.headRefName || (ex && ex.headRefName) || null,
         headCommit: p.headCommit || (ex && ex.headCommit) || null,
         deploy: ex ? ex.deploy : (p.deploy || { status: 'idle' }),
@@ -2773,11 +2774,17 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     return fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/record`).then((x) => x.json());
   }
 
+  // The /record endpoint deliberately returns EVERY tracked PR (a closed one's
+  // detail page must still open, and its deploy history must still render), so
+  // the pipeline list filters closed-unmerged rows out here — same rule the
+  // server's prsArray() applies to /prs and /statuses.
   function syncPrsFromRecord(rec) {
     const arr = Object.values(rec.prs || {})
+      .filter((p) => p.state !== 'CLOSED')
       .sort((a, b) => b.prNumber - a.prNumber)
       .map((p) => ({
         prNumber: p.prNumber, prUrl: p.prUrl, title: p.title, createdAt: p.createdAt,
+        state: p.state || null,
         deploy: { ...p.deploy }, merge: { ...p.merge },
       }));
     st.prs = arr;

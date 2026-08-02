@@ -133,6 +133,17 @@ every workflow bar starts at the same x whichever icons a line has.
   by such a worktree, it runs inside that directory instead of failing. What was
   removed or kept, and why, is appended to the run's transcript as
   `[worktree] released … / kept … — reason`.
+- **Closed PRs drop out of the local pipeline** — a PR closed *without* being
+  merged has no branch left on GitHub, so Deploy/Merge/chat on it could only ever
+  die on `git fetch` with an opaque `Command failed`. Each sync records every
+  tracked PR's GitHub state (including ones cloud-copilot created itself, which
+  the per-issue body match may not return), and `CLOSED` rows stop being listed —
+  `↻ PRs` is the manual sweep. **`MERGED` is never hidden**: that is the
+  pipeline's successful end state. A closed PR that was never deployed, merged or
+  chatted is forgotten entirely; one that *does* carry local history keeps its
+  record (just hidden) so the builds overview never loses past attempts. If you
+  click Deploy on a PR that closed since the page loaded, you get a plain-language
+  `Blocked: PR #N is closed…` instead of a checkout failure.
 - **Merge is gated on Deploy succeeding** — the Merge cell stays a dimmed, locked
   `🔒 Merge` until then. You can still click it early; it asks you to confirm a
   **force-merge** that skips the gate.

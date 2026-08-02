@@ -557,6 +557,11 @@ async function syncRepoFromGitHub(repo, { force = false } = {}) {
   // Best-effort branch + tip-commit annotations; an empty map just means the
   // rows render without them.
   const headCommits = await gh.listPrHeadCommits(repo.ownerRepo, { force });
+  // Whole-repo PR state, so a PR cloud-copilot created itself (which the
+  // per-issue body match may not find) still learns it was closed.
+  const stateByNumber = {};
+  for (const p of allPrs) stateByNumber[String(p.number)] = p.state;
+
   for (const issue of visible) {
     const matched = gh.matchPrsForIssue(allPrs, issue.number);
     for (const p of matched) {
@@ -567,6 +572,7 @@ async function syncRepoFromGitHub(repo, { force = false } = {}) {
         title: p.title,
         createdAt: p.createdAt,
         source: 'gh',
+        state: p.state,
         headRefName: p.headRefName || (head && head.headRefName) || null,
         headCommit: head
           ? { sha: head.sha, abbrev: head.abbrev, committedDate: head.committedDate, headline: head.headline, url: head.url }
@@ -577,6 +583,10 @@ async function syncRepoFromGitHub(repo, { force = false } = {}) {
     // match heuristic got stricter, or a PR body was edited) — never
     // touches PRs cloud-copilot itself created for this issue.
     store.pruneStaleGhPrs(repo.name, issue.number, matched.map((p) => p.number));
+    // Forget PRs GitHub closed without merging: their branch is gone, so every
+    // pipeline action on them would fail. Records carrying local history are
+    // kept (just hidden) so the builds overview keeps its data.
+    store.pruneClosedPrs(repo.name, issue.number, store.refreshPrStates(repo.name, issue.number, stateByNumber));
   }
   return { visible, cached, at };
 }
@@ -688,6 +698,7 @@ app.get('/api/repos/:name/issues/:n/prs', async (req, res) => {
     // automatic discovery on repo expand, this is an explicit "check again now".
     const prs = await gh.findPrsForIssue(repo.ownerRepo, n, { force: true });
     const headCommits = await gh.listPrHeadCommits(repo.ownerRepo, { force: true });
+    const { prs: allPrs } = await gh.listAllPrs(repo.ownerRepo, { force: true });
     for (const p of prs) {
       const head = headCommits[String(p.number)] || null;
       store.upsertPr(repo.name, n, {
@@ -696,12 +707,19 @@ app.get('/api/repos/:name/issues/:n/prs', async (req, res) => {
         title: p.title,
         createdAt: p.createdAt,
         source: 'gh',
+        state: p.state,
         headRefName: p.headRefName || (head && head.headRefName) || null,
         headCommit: head
           ? { sha: head.sha, abbrev: head.abbrev, committedDate: head.committedDate, headline: head.headline, url: head.url }
           : undefined,
       });
     }
+    // An explicit "check again now" is also the user's manual way to sweep
+    // closed PRs out of this issue's pipeline — including ones cloud-copilot
+    // created itself, which the body-match scan above may not return.
+    const stateByNumber = {};
+    for (const p of allPrs) stateByNumber[String(p.number)] = p.state;
+    store.pruneClosedPrs(repo.name, n, store.refreshPrStates(repo.name, n, stateByNumber));
     const record = store.getRecord(repo.name, n);
     res.json({ prs: store.prsArray(record) });
   } catch (err) {
@@ -1029,6 +1047,8 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
           prUrl,
           createdAt: new Date().toISOString(),
           source: 'work',
+          state: 'OPEN',
+          headRefName: headBranch || undefined,
         });
       }
 
@@ -1082,6 +1102,21 @@ function buildChangelog(pr, issueNumber, version, buildNumber) {
   return text.slice(0, 500); // TestFlight "What to Test" is short; keep it well under Apple's limit
 }
 
+// A PR closed without being merged has, in practice, no branch left: GitHub
+// deletes it, so the very first `git fetch origin <branch>` of any pipeline
+// action dies with an opaque "Command failed". Detect it up front and say so
+// in words, and record the state so the row also disappears from the pipeline.
+// Returns a message when the action must be refused, or null to proceed.
+function refuseIfPrClosed(repo, n, prNumber, pr) {
+  if (!pr || pr.state !== 'CLOSED') return null;
+  store.upsertPr(repo.name, n, { prNumber, state: 'CLOSED' });
+  return (
+    `Blocked: PR #${prNumber} is closed without having been merged, so its branch ` +
+    `("${pr.headRefName || 'unknown'}") no longer exists on GitHub. There is nothing to run against. ` +
+    `Reopen the PR, or start a new one for this issue.`
+  );
+}
+
 function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
   gh.getPr(repo.ownerRepo, prNumber).then((pr) => {
     if (!pr || !pr.headRefName) {
@@ -1093,6 +1128,9 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
       });
       return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
     }
+
+    const closed = refuseIfPrClosed(repo, n, prNumber, pr);
+    if (closed) return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'blocked', message: closed });
 
     // Build number / version are computed HERE, deterministically, from the
     // exact commit being shipped — never inferred afterward from the agent's
@@ -1215,6 +1253,9 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
       });
       return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
     }
+
+    const closed = refuseIfPrClosed(repo, n, prNumber, pr);
+    if (closed) return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'blocked', message: closed });
 
     let workCwd;
     try {
@@ -1560,6 +1601,10 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
   if (!prInfo || !prInfo.headRefName) {
     const message2 = `Could not resolve the branch for PR #${prNumber} via gh.`;
     return sendSseBlocked(res, { action: 'chat', prNumber, mode, status: 'failed', message: message2 });
+  }
+  const closed = refuseIfPrClosed(repo, n, prNumber, prInfo);
+  if (closed) {
+    return sendSseBlocked(res, { action: 'chat', prNumber, mode, status: 'blocked', message: closed });
   }
   let workCwd;
   try {

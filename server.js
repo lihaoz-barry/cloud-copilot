@@ -148,6 +148,17 @@ function resolveRepo(name) {
   return repos.find((r) => r.name === name) || null;
 }
 
+/**
+ * The project type of a repo (issue #70) — a manual override from the badge's
+ * long-press first, then auto-detection from what is on disk. Everything that
+ * needs to know "is this iOS or Web?" goes through here so there is exactly one
+ * answer: /api/repos, the `commit and deploy` tag, and the per-type test
+ * guidance handed to Create PR.
+ */
+function projectTypeOf(repo) {
+  return repoConfig.resolveProjectType(repo.path, store.getProjectTypeOverride(repo.name));
+}
+
 // Actions that run in the repo's ONE shared working tree, and must therefore
 // stay mutually exclusive per repo.
 //
@@ -284,6 +295,31 @@ function portNote(lease) {
   );
 }
 
+/**
+ * How this repo is verified, in the words the run itself gets to read.
+ *
+ * iOS repos are told to build and test through Xcode, Web repos through npm,
+ * and a repo we can't classify is told nothing at all — inventing a command for
+ * an unknown project is exactly the mistake the deploy stage already refuses to
+ * make. `.cloud-copilot.json` -> `test.command` overrides all of it.
+ */
+function testNote(repo, projectType) {
+  const cfg = repoConfig.loadTestConfig(repo.path, { projectType });
+  if (!cfg.commands.length) {
+    return (
+      ` This repository has no known verification command (project type: ` +
+      `${cfg.type}); do not invent one — inspect the repo and only run commands ` +
+      `it actually defines.`
+    );
+  }
+  const list = cfg.commands.map((c) => `\`${c}\``).join(' then ');
+  const origin =
+    cfg.source === 'config'
+      ? `declared in ${repoConfig.CONFIG_FILENAME}`
+      : `the default for a ${cfg.type} project`;
+  return ` Before opening the pull request, verify your change with ${list} (${origin}), and fix what it reports.`;
+}
+
 // Human-readable description of what's holding a repo's working-tree lock,
 // for the "blocked" message shown when a second action tries to start.
 function describeBusyKey(repoName, busyKey) {
@@ -399,16 +435,60 @@ function modelFlags(override) {
 // ---------------------------------------------------------------------------
 
 app.get('/api/repos', (req, res) => {
-  const repos = gh.listRepos(REPOS_ROOT).map((r) => ({
-    name: r.name,
-    branch: r.branch,
-    // Tip commit of the local checkout, so the repo header can say which code
-    // this machine would actually deploy right now.
-    headCommit: r.headCommit,
-    ownerRepo: r.ownerRepo,
-    github: r.github,
-  }));
-  res.json({ root: REPOS_ROOT, repos, committedLabel: gh.COMMITTED_LABEL });
+  const repos = gh.listRepos(REPOS_ROOT).map((r) => {
+    const pt = projectTypeOf(r);
+    return {
+      name: r.name,
+      branch: r.branch,
+      // Tip commit of the local checkout, so the repo header can say which code
+      // this machine would actually deploy right now.
+      headCommit: r.headCommit,
+      ownerRepo: r.ownerRepo,
+      github: r.github,
+      // iOS / Web / unknown, plus where that answer came from, so the badge can
+      // say "manual override" instead of silently disagreeing with the disk.
+      projectType: pt.type,
+      projectTypeSource: pt.source,
+      projectTypeDetected: pt.detected,
+      projectTypeOverridden: pt.overridden,
+    };
+  });
+  res.json({
+    root: REPOS_ROOT,
+    repos,
+    committedLabel: gh.COMMITTED_LABEL,
+    commitDeployLabel: gh.COMMIT_DEPLOY_LABEL,
+    projectTypes: repoConfig.PROJECT_TYPES,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Project type (issue #70): auto-detected, manually overridable.
+//
+// The override is persisted server-side so it survives a reload and follows the
+// user to another device — the whole reason it isn't localStorage.
+// ---------------------------------------------------------------------------
+app.get('/api/repos/:name/project-type', (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const pt = projectTypeOf(repo);
+  res.json({ repo: repo.name, ...pt, test: repoConfig.loadTestConfig(repo.path, { projectType: pt.type }) });
+});
+
+app.post('/api/repos/:name/project-type', (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const raw = req.body ? req.body.projectType : undefined;
+  // Only ever ios / web / null (clear). Anything else is a client bug and is
+  // rejected rather than stored, so the state file can't grow junk types.
+  const type = raw === null || raw === '' || raw === undefined ? null : raw;
+  if (type !== null && !repoConfig.isProjectType(type)) {
+    return res.status(400).json({
+      error: `projectType must be one of ${repoConfig.PROJECT_TYPES.join(', ')} or null`,
+    });
+  }
+  store.setProjectTypeOverride(repo.name, type);
+  res.json({ repo: repo.name, ...projectTypeOf(repo) });
 });
 
 // ---------------------------------------------------------------------------
@@ -661,6 +741,7 @@ app.get('/api/version', (req, res) => {
     // The dashboard renders the committed checkbox against this rather than a
     // hardcoded string, so CC_COMMITTED_LABEL cannot desync the two halves.
     committedLabel: gh.COMMITTED_LABEL,
+    commitDeployLabel: gh.COMMIT_DEPLOY_LABEL,
   });
 });
 
@@ -1358,6 +1439,7 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
     `Create a new branch, implement the change end-to-end until it is complete, ` +
     `commit, push, and open a pull request that closes #${n}. ` +
     `When finished, print the pull request URL on its own line.` +
+    testNote(repo, projectTypeOf(repo).type) +
     portNote(lease);
   const args = ['-p', prompt, ...approvalFlags(mode), ...modelFlags()];
 
@@ -2808,6 +2890,47 @@ app.post('/api/repos/:name/issues/:n/committed', async (req, res) => {
     scheduled,
     // The full label set as the server now knows it, so the client can write
     // the truth into its cache instead of guessing at a patch.
+    labels: gh.cachedIssueLabels(repo.ownerRepo, n),
+  });
+});
+
+/**
+ * "commit and deploy" (c+d, issue #70): the per-issue upgrade of `committed`.
+ * Same GitHub-label mechanism, so it is visible on github.com and survives a
+ * reinstall — the difference is what the dashboard does after the PR exists: it
+ * keeps going into Deploy for this one issue, whatever the global Auto-run
+ * depth says.
+ *
+ * Only offered for iOS repos. TestFlight accepts parallel uploads; a Web
+ * service cannot have two builds live at once, so allowing it there would let
+ * two PRs fight over the same deploy.
+ */
+app.post('/api/repos/:name/issues/:n/commit-deploy', async (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  if (!repo.ownerRepo) return res.status(400).json({ error: 'repo has no github.com remote' });
+  const n = Number(req.params.n);
+  if (!Number.isInteger(n) || n <= 0) return res.status(400).json({ error: 'invalid issue number' });
+  const projectType = projectTypeOf(repo).type;
+  const on = Boolean(req.body?.commitDeploy);
+  // Turning it OFF stays allowed on any repo: a label set while the repo looked
+  // like iOS must always be removable, even after the type changed.
+  if (on && projectType !== 'ios') {
+    return res.status(400).json({
+      error: `"${gh.COMMIT_DEPLOY_LABEL}" is only available for iOS repos (${repo.name} is ${projectType})`,
+    });
+  }
+  try {
+    await gh.setIssueLabel(repo.ownerRepo, n, gh.COMMIT_DEPLOY_LABEL, on, {
+      color: '1D76DB',
+      description: 'cloud-copilot deploys this issue to TestFlight once its PR exists',
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  res.json({
+    commitDeploy: on,
+    label: gh.COMMIT_DEPLOY_LABEL,
     labels: gh.cachedIssueLabels(repo.ownerRepo, n),
   });
 });

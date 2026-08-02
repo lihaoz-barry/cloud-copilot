@@ -413,6 +413,9 @@
       padding: 2px 5px; border-radius: 6px; touch-action: manipulation;
     }
     .committed:hover { opacity: 1; background: #8881; }
+    /* `hidden` has to beat the inline-flex above, or a Web repo would still
+       show the iOS-only c+d tag. */
+    .committed[hidden] { display: none; }
     .committed input { margin: 0; accent-color: #16a34a; }
     .committed:has(input:checked) { opacity: 1; color: #16a34a; font-weight: 700; }
     /* "the sweep is coming now" — otherwise ticking the box looks like nothing
@@ -420,6 +423,54 @@
     .committed-note {
       font-weight: 400; font-size: .66rem; opacity: .8;
       padding: 0 4px; border-radius: 5px; background: #16a34a22;
+    }
+
+    /* "commit and deploy" (c+d, issue #70) — iOS only. Rendered abbreviated so
+       two checkboxes still fit on one phone-width row; the full name lives in
+       title/aria-label. */
+    .commit-deploy input { accent-color: #2563eb; }
+    .commit-deploy:has(input:checked) { color: #2563eb; }
+
+    /* project-type badge (issue #70) — auto-detected iOS/Web, changeable only
+       through a deliberate 5-second long press. --p is the press progress 0..1,
+       painted as a ring so you can see the press is being counted. */
+    .ptype {
+      flex: none; font: inherit; font-size: .62rem; font-weight: 700;
+      letter-spacing: .03em; line-height: 1; cursor: pointer;
+      padding: 3px 6px; border-radius: 999px; border: 1px solid #8884;
+      background: #8881; color: inherit; opacity: .75;
+      user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+      touch-action: none; position: relative;
+    }
+    .ptype:hover { opacity: 1; }
+    .ptype[data-type="ios"] { color: #2563eb; border-color: #2563eb55; background: #2563eb1a; }
+    .ptype[data-type="web"] { color: #16a34a; border-color: #16a34a55; background: #16a34a1a; }
+    .ptype[data-overridden="1"] { border-style: dashed; font-style: italic; }
+    .ptype.pressing::after {
+      content: ''; position: absolute; inset: -3px; border-radius: 999px;
+      background: conic-gradient(currentColor calc(var(--p, 0) * 360deg), transparent 0);
+      opacity: .45; pointer-events: none;
+    }
+    .ptype-menu {
+      position: absolute; z-index: 60; min-width: 160px; padding: 6px;
+      border-radius: 10px; border: 1px solid #8884; background: #1b1b1b;
+      box-shadow: 0 10px 30px #0007; display: flex; flex-direction: column; gap: 2px;
+    }
+    @media (prefers-color-scheme: light) { .ptype-menu { background: #fff; } }
+    .ptype-menu button {
+      font: inherit; font-size: .78rem; text-align: left; cursor: pointer;
+      padding: 7px 9px; border-radius: 7px; border: none;
+      background: transparent; color: inherit;
+    }
+    .ptype-menu button:hover { background: #8882; }
+    .ptype-menu .cur { font-weight: 700; }
+
+    /* Below iPhone-SE width even the wrapped cluster is tight: drop the word
+       "committed" (the checkbox keeps its title/aria-label) and keep the
+       already-abbreviated c+d. */
+    @media (max-width: 420px) {
+      .committed .tagtext { display: none; }
+      .commit-deploy .tagtext { display: inline; }
     }
 
     /* "the API you are talking to is not the code on disk" warning. Deliberately
@@ -624,6 +675,9 @@
         display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
       }
       .labels { order: 4; max-width: 100%; }
+      /* Two tags plus three icon buttons no longer fit on one phone-width
+         line — let the cluster wrap instead of pushing the row out of shape. */
+      .issue-icons { flex-wrap: wrap; justify-content: flex-end; }
       .wfnum { width: 34px; }
       .chevtools { margin-left: 77px; }
       /* On a phone the commit headline says more than the branch name, and
@@ -1877,6 +1931,21 @@ function committedLabelName() {
   return window.__committedLabel || 'committed';
 }
 
+/** The "commit and deploy" label name, as configured server-side (issue #70). */
+function commitDeployLabelName() {
+  return window.__commitDeployLabel || 'commit and deploy';
+}
+
+/**
+ * The project type the server resolved for a repo ('ios' | 'web' | 'unknown').
+ * Always read from the live repo list rather than a captured copy: a long-press
+ * override has to take effect on rows that were rendered before it happened.
+ */
+function repoProjectType(repoName) {
+  const live = (window.__repos || []).find((r) => r.name === repoName);
+  return (live && live.projectType) || 'unknown';
+}
+
 /** Transient "the scheduler will pick this up now" hint next to the checkbox. */
 function setCommittedNote(labelEl, text) {
   labelEl.querySelector('.committed-note')?.remove();
@@ -2109,6 +2178,7 @@ async function checkServerVersion() {
     return; // offline: the browser already has its own way of saying so
   }
   if (v.committedLabel) window.__committedLabel = v.committedLabel;
+  if (v.commitDeployLabel) window.__commitDeployLabel = v.commitDeployLabel;
   staleBanner.hidden = !v.stale;
   if (v.stale) {
     staleBanner.textContent =
@@ -2122,12 +2192,157 @@ async function loadRepos() {
   const r = await fetch('/api/repos').then((x) => x.json());
   window.__repos = r.repos;
   if (r.committedLabel) window.__committedLabel = r.committedLabel;
+  if (r.commitDeployLabel) window.__commitDeployLabel = r.commitDeployLabel;
   rootLine.textContent = `authorized root: ${r.root} · ${r.repos.length} repos`;
   reposEl.innerHTML = '';
   for (const repo of r.repos) reposEl.appendChild(renderRepo(repo));
   renderFilterMenu(r.repos);
   applyRepoVisibility();
   renderPinnedSection();
+}
+
+// ---- project-type badge (issue #70) ---------------------------------------
+// Auto-detected iOS/Web, shown next to the repo name. Changing it is behind a
+// deliberate five-second press: it decides which verification commands a run is
+// told to use and whether the c+d tag exists, so a stray tap must never do it.
+const PTYPE_HOLD_MS = 5000;
+const PTYPE_TEXT = { ios: 'iOS', web: 'Web', unknown: '?' };
+
+function projectTypeTitle(repo) {
+  const t = PTYPE_TEXT[repo.projectType] || '?';
+  const how = repo.projectTypeOverridden
+    ? 'manual override'
+    : repo.projectTypeSource === 'config'
+      ? 'declared in .cloud-copilot.json'
+      : 'auto-detected';
+  return `Project type: ${t} (${how}).\nLong-press 5 seconds to change it${repo.projectTypeOverridden ? ' or go back to auto' : ''}.`;
+}
+
+function paintProjectTypeBadge(badge, repo) {
+  badge.dataset.type = repo.projectType || 'unknown';
+  badge.dataset.overridden = repo.projectTypeOverridden ? '1' : '0';
+  badge.textContent = (PTYPE_TEXT[repo.projectType] || '?') + (repo.projectTypeOverridden ? '·' : '');
+  badge.title = projectTypeTitle(repo);
+  badge.setAttribute('aria-label', projectTypeTitle(repo).replace(/\n/g, ' '));
+}
+
+/** Show the iOS / Web / Auto picker anchored under the badge. */
+function openProjectTypeMenu(badge, repo, onPick) {
+  document.querySelectorAll('.ptype-menu').forEach((m) => m.remove());
+  const menu = document.createElement('div');
+  menu.className = 'ptype-menu';
+  const rect = badge.getBoundingClientRect();
+  menu.style.left = `${Math.max(6, Math.min(rect.left + window.scrollX, window.scrollX + window.innerWidth - 180))}px`;
+  menu.style.top = `${rect.bottom + window.scrollY + 6}px`;
+  const options = [
+    { value: 'ios', text: 'iOS' },
+    { value: 'web', text: 'Web' },
+    { value: null, text: `Auto-detect (${PTYPE_TEXT[repo.projectTypeDetected] || '?'})` },
+  ];
+  for (const opt of options) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = opt.text;
+    const current = repo.projectTypeOverridden ? repo.projectType : null;
+    if (current === opt.value) b.classList.add('cur');
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      close();
+      onPick(opt.value);
+    });
+    menu.append(b);
+  }
+  function close() {
+    menu.remove();
+    document.removeEventListener('pointerdown', onAway, true);
+  }
+  function onAway(ev) { if (!menu.contains(ev.target)) close(); }
+  document.body.append(menu);
+  setTimeout(() => document.addEventListener('pointerdown', onAway, true), 0);
+}
+
+function makeProjectTypeBadge(repo) {
+  const badge = document.createElement('button');
+  badge.type = 'button';
+  badge.className = 'ptype';
+  paintProjectTypeBadge(badge, repo);
+
+  let raf = null;
+  let timer = null;
+  const stop = () => {
+    if (raf) cancelAnimationFrame(raf);
+    if (timer) clearTimeout(timer);
+    raf = null; timer = null;
+    badge.classList.remove('pressing');
+    badge.style.removeProperty('--p');
+  };
+
+  async function apply(value) {
+    const prev = { ...repo };
+    try {
+      const r = await fetch(`/api/repos/${enc(repo.name)}/project-type`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectType: value }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+      const d = await r.json();
+      Object.assign(repo, {
+        projectType: d.type,
+        projectTypeSource: d.source,
+        projectTypeDetected: d.detected,
+        projectTypeOverridden: d.overridden,
+      });
+      // Keep the live repo list (what every issue row reads) in step, then let
+      // rows already on screen show/hide their c+d tag without a full reload.
+      const live = (window.__repos || []).find((x) => x.name === repo.name);
+      if (live) Object.assign(live, {
+        projectType: d.type,
+        projectTypeSource: d.source,
+        projectTypeDetected: d.detected,
+        projectTypeOverridden: d.overridden,
+      });
+      paintProjectTypeBadge(badge, repo);
+      syncCommitDeployVisibility(repo.name);
+    } catch (err) {
+      Object.assign(repo, prev);
+      paintProjectTypeBadge(badge, repo);
+      alert(`Could not change the project type: ${err.message}`);
+    }
+  }
+
+  badge.addEventListener('pointerdown', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation(); // never toggle the repo card open/closed
+    try { badge.setPointerCapture(ev.pointerId); } catch { /* not fatal */ }
+    const started = Date.now();
+    badge.classList.add('pressing');
+    const tick = () => {
+      badge.style.setProperty('--p', String(Math.min(1, (Date.now() - started) / PTYPE_HOLD_MS)));
+      raf = requestAnimationFrame(tick);
+    };
+    tick();
+    timer = setTimeout(() => {
+      stop();
+      if (navigator.vibrate) { try { navigator.vibrate(30); } catch { /* ignore */ } }
+      openProjectTypeMenu(badge, repo, apply);
+    }, PTYPE_HOLD_MS);
+  });
+  for (const evt of ['pointerup', 'pointercancel', 'pointerleave']) {
+    badge.addEventListener(evt, (ev) => { ev.stopPropagation(); stop(); });
+  }
+  // A short press must do nothing at all — including not opening the card.
+  badge.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); });
+  badge.addEventListener('contextmenu', (ev) => ev.preventDefault());
+  return badge;
+}
+
+/** Show/hide every rendered c+d tag of a repo after its type changed. */
+function syncCommitDeployVisibility(repoName) {
+  const ios = repoProjectType(repoName) === 'ios';
+  document
+    .querySelectorAll(`.commit-deploy[data-repo="${CSS.escape(repoName)}"]`)
+    .forEach((el) => { el.hidden = !ios; });
 }
 
 function renderRepo(repo) {
@@ -2168,6 +2383,7 @@ function renderRepo(repo) {
     <div class="repo-body"><div class="muted" style="padding:8px 4px">Click to load issues…</div></div>`;
   const head = el.querySelector('.repo-head');
   const body = el.querySelector('.repo-body');
+  head.querySelector('.repo-name').after(makeProjectTypeBadge(repo));
   const startOpen = repo.github && Boolean(getRepoOpen()[repo.name]);
   head.addEventListener('click', async () => {
     el.classList.toggle('open');
@@ -2656,9 +2872,61 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       committedBox.disabled = false;
     }
   });
-  committedLabel.append(committedBox, document.createTextNode(labelName));
+  const committedText = document.createElement('span');
+  committedText.className = 'tagtext';
+  committedText.textContent = labelName;
+  committedLabel.append(committedBox, committedText);
 
-  icons.append(committedLabel, refreshPrsBtn, hideBtn, deleteBtn);
+  // "commit and deploy" (issue #70): committed, plus ship it. Shown only for
+  // iOS repos — TestFlight takes parallel uploads, a Web service cannot. The
+  // checkbox renders as "c+d" so two tags still fit on a phone-width row.
+  const cdName = commitDeployLabelName();
+  const cdLabel = document.createElement('label');
+  cdLabel.className = 'committed commit-deploy';
+  cdLabel.dataset.repo = repo.name;
+  cdLabel.title =
+    `${cdName}: after the PR is created, keep going and deploy it from its ` +
+    `worktree to TestFlight — a per-issue upgrade of the global Auto-run depth.`;
+  cdLabel.hidden = repoProjectType(repo.name) !== 'ios';
+  const cdBox = document.createElement('input');
+  cdBox.type = 'checkbox';
+  cdBox.checked = (issue.labels || []).includes(cdName);
+  cdBox.setAttribute('aria-label', `Mark issue #${issue.number} as "${cdName}"`);
+  cdBox.addEventListener('change', async () => {
+    const want = cdBox.checked;
+    cdBox.disabled = true;
+    try {
+      const r = await fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/commit-deploy`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ commitDeploy: want }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+      const body = await r.json().catch(() => ({}));
+      let labels = Array.isArray(body.labels) ? body.labels : null;
+      if (!labels) {
+        const set = new Set(issue.labels || []);
+        if (want) set.add(cdName); else set.delete(cdName);
+        labels = [...set];
+      }
+      issue.labels = labels;
+      patchCachedLabels(repo.name, issue.number, labels);
+    } catch (err) {
+      cdBox.checked = !want; // GitHub said no — don't pretend otherwise
+      alert(`Could not update the "${cdName}" label: ${err.message}`);
+    } finally {
+      cdBox.disabled = false;
+    }
+  });
+  const cdText = document.createElement('span');
+  cdText.className = 'tagtext';
+  cdText.textContent = 'c+d';
+  cdLabel.append(cdBox, cdText);
+
+  /** Does this issue want its PR deployed as soon as it exists? */
+  const wantsCommitDeploy = () => cdBox.checked;
+
+  icons.append(committedLabel, cdLabel, refreshPrsBtn, hideBtn, deleteBtn);
 
   renderPrs(); // also paints the Create PR segment, which now lives inside it
 
@@ -3361,7 +3629,14 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       repoCtx.clearActive(issue.number);
       // Auto-run depth: a successful Create PR keeps going into Deploy (and
       // from there possibly Merge) unless depth is "Create PR only".
-      if (finalStatus === 'success' && resultData && resultData.prNumber && pipelineDepth() !== 'pr') {
+      // c+d upgrades this one issue to depth "deploy" without touching the
+      // global default.
+      if (
+        finalStatus === 'success' &&
+        resultData &&
+        resultData.prNumber &&
+        (pipelineDepth() !== 'pr' || wantsCommitDeploy())
+      ) {
         onDeploy(resultData.prNumber);
       }
     } else {
@@ -3380,7 +3655,9 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         appendWork(`\n[work] finished: ${s}\n`, s === 'success' ? 'ok' : 'err');
         repoCtx.clearActive(issue.number);
         if (window.CCNotify) CCNotify.jobFinished(notifyWork({ status: s, replayed: true }));
-        if (s === 'success' && rec.work.prNumber && pipelineDepth() !== 'pr') onDeploy(rec.work.prNumber);
+        if (s === 'success' && rec.work.prNumber && (pipelineDepth() !== 'pr' || wantsCommitDeploy())) {
+          onDeploy(rec.work.prNumber);
+        }
         return;
       }
       if (rec.live && rec.live.work) { repoCtx.setActive(issue.number, 'work'); return streamWork(true); }

@@ -397,6 +397,39 @@ until a *different* `startedAt` answers (120s timeout), then reloads.
 It takes the same per-repo working-tree lock as Create PR / Deploy / Chat (it
 switches branches), so a conflict is reported with the usual blocked message.
 
+### Project type (iOS / Web) and the type badge
+
+Every repo card carries a small badge next to its name — `iOS`, `Web`, or `?` —
+because the two kinds of project are verified and shipped differently. The type
+is resolved once per repo (cached, one `readdir` each) in
+[`lib/repoConfig.js`](lib/repoConfig.js):
+
+1. an explicit `"projectType": "ios" | "web"` in `.cloud-copilot.json` wins —
+   the repo has the final say about itself;
+2. otherwise the layout on disk decides: `*.xcodeproj` / `*.xcworkspace` /
+   `Package.swift` at the root → `ios`, a `package.json` (and no Xcode project)
+   → `web`;
+3. neither → `unknown`.
+
+**What the type changes**
+
+- **Verification.** Create PR is told how this repo is checked: `ios` gets
+  `xcodebuild build` then `xcodebuild test` against a simulator, aimed at the
+  workspace/project actually on disk; `web` gets `npm test`; `unknown` is told
+  *not* to invent a command — the same conservative rule Deploy already follows.
+  `{ "test": { "command": "npm run ci" } }` in `.cloud-copilot.json` overrides
+  all of it.
+- **The `c+d` tag** (below) only exists on iOS repos.
+
+**Changing it: long-press the badge for 5 seconds.** A short tap does nothing —
+the entry point is deliberately hard to hit, because the type decides what runs.
+While pressing, a ring fills around the badge; letting go early cancels. After
+five seconds a picker offers `iOS`, `Web`, and `Auto-detect (…)`. The choice is
+stored **server-side** (`settings.projectTypes` in `data/state.json`, via
+`POST /api/repos/:name/project-type`, which only accepts `ios` / `web` / `null`),
+so it survives a reload and follows you to another browser. An overridden badge
+is dashed and marked with a `·`.
+
 ### Per-repo deploy config (`.cloud-copilot.json`)
 
 Deploy is dispatched per-repo. Drop a `.cloud-copilot.json` at a repo's root:
@@ -717,6 +750,24 @@ scheduler off a single repo while it runs everywhere else. Those are opt-*outs*:
 a repo with no entry follows the global switch, so enabling a newly cloned repo
 is never something you can forget to do.
 
+### `c+d` — commit and deploy (iOS only)
+
+Next to `committed`, an **iOS** repo's issue rows carry a second, abbreviated tag:
+`c+d` (`commit and deploy`, spelled out in its `title`/`aria-label` — two full
+labels do not fit on a phone-width row). It is backed by its own GitHub label,
+so like `committed` it is visible on github.com and survives a reinstall.
+
+It means *"don't stop at the PR"*: once Create PR succeeds for that issue, the
+dashboard keeps going into **Deploy**, exactly as if the global Auto-run depth
+were set to `deploy` — but scoped to this one issue. The global depth is
+unchanged and still the default for everything else.
+
+It is offered on iOS repos only, and the server refuses to set the label
+anywhere else. TestFlight accepts several builds in parallel, so shipping a test
+build while other PRs are in flight is safe; a Web service can only have one
+build live at a time, and two PRs racing to deploy it is not a feature.
+(Removing the label is always allowed, whatever the repo's current type.)
+
 
 ## API
 
@@ -735,6 +786,9 @@ is never something you can forget to do.
 | GET  | `/api/repos/:name/issues/:n/prs` | Force-refresh the PR list for one issue from GitHub — always live, bypasses the whole-repo PR cache. |
 | POST | `/api/repos/:name/issues/:n/work` | **Create PR** — SSE stream. Body: `{ "mode": "allow-all" }`. |
 | POST | `/api/repos/:name/issues/:n/work/cancel` | Abort the running PR creation. |
+| GET  | `/api/repos/:name/project-type` | Resolved project type of a repo: `{ type, source, detected, overridden, test }`. |
+| POST | `/api/repos/:name/project-type` | Set or clear the manual override. Body: `{ "projectType": "ios" \| "web" \| null }`; anything else is `400`. Persisted in `data/state.json`. |
+| POST | `/api/repos/:name/issues/:n/commit-deploy` | Add/remove the `commit and deploy` (c+d) label on an issue. Body: `{ "commitDeploy": true }`. Turning it **on** is `400` unless the repo's project type is `ios`. |
 | POST | `/api/repos/:name/issues/:n/deploy/:pr` | **Deploy a specific PR** — SSE stream. Dispatched per the repo's `.cloud-copilot.json`. |
 | POST | `/api/repos/:name/issues/:n/deploy/:pr/cancel` | Abort the running deploy for that PR. |
 | POST | `/api/repos/:name/issues/:n/merge/:pr` | **Merge a specific PR** — SSE stream. Body: `{ "force": false }`. Blocked unless Deploy succeeded, unless `force: true`. A failed `gh pr merge` automatically starts Copilot to investigate, resolve conflicts, retry, and verify the merge. On success the issue and the issue's other open PRs are closed automatically (`MERGE_AUTO_CLEANUP=0` disables it). |
@@ -1070,7 +1124,7 @@ cloud-copilot/
 │   ├── worktreePool.js # leases one throwaway worktree per run (concurrency limits + cleanup)
 │   ├── portPool.js     # leases a free port (8000-8888) to each worktree
 │   ├── scheduler.js    # 10-min sweep that drives committed issues by itself
-│   └── repoConfig.js   # loads a repo's .cloud-copilot.json (or auto-detects iOS)
+│   └── repoConfig.js   # project type (iOS/Web), test commands, deploy config
 ├── public/
 │   ├── index.html      # repos → issues → Create PR / Deploy / Merge pipeline console
 │   ├── chat-render.js  # CCChat: streamed markdown renderer shared by every chat surface

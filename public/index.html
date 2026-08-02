@@ -132,6 +132,48 @@
     a.wfnum { font-weight: 700; color: inherit; }
     a.wfnum:hover { text-decoration: underline; }
     .wfnum.empty { opacity: .4; }
+    /* Base-branch sync indicator (issue #58), pinned at the very left of the
+       lead: a circular status dot in the same visual family as the pipeline
+       chevrons. ✓ = in sync, ⇣N = behind by N commits, ⚠ = would conflict,
+       ○ = not compared yet (never faked as clean), ⟳ = a Copilot update is
+       running. Fixed width so the chevron bar starts at the same x on every
+       row, badge or no badge. */
+    .wfsync {
+      flex: none; width: 26px; height: 26px; padding: 0; border-radius: 50%;
+      display: inline-flex; align-items: center; justify-content: center;
+      position: relative;
+      font-size: .78rem; font-weight: 700; font-variant-numeric: tabular-nums;
+      border: 1.5px solid #d0d0d0; background: transparent; color: #999;
+      font-family: inherit; line-height: 1; touch-action: manipulation;
+      transition: filter .12s ease, box-shadow .12s ease;
+    }
+    button.wfsync { cursor: pointer; }
+    button.wfsync:hover { filter: brightness(1.06); box-shadow: 0 0 0 3px #8884; }
+    button.wfsync:disabled { cursor: default; }
+    /* Behind-by-N: the count rides on the ring as a superscript so the glyph
+       inside stays legible at 26px even at N = 3 digits. */
+    .wfsync[data-behind]::after {
+      content: attr(data-behind);
+      position: absolute; top: -4px; right: -6px;
+      min-width: 13px; padding: 0 3px; border-radius: 7px;
+      font-size: .58rem; line-height: 13px; font-weight: 700;
+      background: #eab308; color: #3b2f00; border: 1px solid #fff8;
+    }
+    /* Legend in the Settings drawer reuses the badge classes verbatim, so it
+       can never drift from what the rows actually render. */
+    .synclegend { display: flex; flex-direction: column; gap: 6px; }
+    .synclegend > span { display: flex; align-items: center; gap: 8px; }
+    .synclegend .wfsync { position: relative; }
+    .synclegend em { opacity: .8; line-height: 1.4; }
+    .wfsync-clean { color: #16a34a; border-color: #16a34a99; background: #16a34a14; }
+    .wfsync-unknown { color: #9aa0a6; border-color: #9aa0a666; background: transparent; }
+    .wfsync-behind { color: #a16207; border-color: #eab308; background: #eab30822; }
+    .wfsync-conflict { color: #dc2626; border-color: #dc2626; background: #dc262622; }
+    .wfsync-updating { color: #2563eb; border-color: #2563eb; background: #2563eb1f; animation: pulse 1s infinite; }
+    .wfsync-failed { color: #dc2626; border-color: #dc2626; background: #dc262622; }
+    /* Its log/abort controls sit at the left end of the tools line, under the
+       badge itself — `flex: none` so the three stage columns keep their widths. */
+    .chevtool-update { flex: none; gap: 4px; margin-right: 6px; }
     /* "⋯" reveals the per-stage log/abort/timing line, which is collapsed by
        default and force-opened while a stage is running. */
     .wfmore {
@@ -152,7 +194,7 @@
        the chevron bar above it. */
     .wfcommit {
       display: flex; align-items: baseline; gap: 6px; min-width: 0;
-      margin: 1px 0 2px 62px; font-size: .68rem; color: #888;
+      margin: 1px 0 2px 89px; font-size: .68rem; color: #888;
     }
     .wfcommit[hidden] { display: none; }
     .wfbranch {
@@ -223,7 +265,7 @@
     .chev-failed, .chev-aborted { background: #dc2626; }
     .chev-locked   { background: #93a3b8; color: #eef2f7; opacity: .85; }
     .chevtools {
-      display: flex; margin: 3px 0 3px 62px; font-size: .74rem; color: #888;
+      display: flex; margin: 3px 0 3px 89px; font-size: .74rem; color: #888;
     }
     .chevtool { flex: 1; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
     .chevtool:first-child { justify-content: flex-start; }
@@ -279,6 +321,34 @@
     .topbar h1 { overflow-wrap: anywhere; }
     .topctrls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; flex: none; }
     .filter { position: relative; }
+
+    /* Running-task panel (issue #64): several agents can now work at once, so
+       the top-left icon is the one place that answers "what is this machine
+       doing right now?". The badge counts running jobs and pulses while any
+       are alive, which is deliberately hard to miss. */
+    .tasks { position: relative; flex: none; }
+    .tasks-trigger { position: relative; font-size: 1rem; line-height: 1; padding: 7px 10px; }
+    .tasks-trigger.busy { border-color: #16a34a88; animation: taskspulse 1.6s ease-in-out infinite; }
+    @keyframes taskspulse { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
+    @media (prefers-reduced-motion: reduce) { .tasks-trigger.busy { animation: none; } }
+    .tasks-badge {
+      position: absolute; top: -5px; right: -5px; min-width: 16px; height: 16px;
+      padding: 0 4px; box-sizing: border-box; border-radius: 8px; background: #16a34a;
+      color: #fff; font-size: .65rem; font-weight: 700; line-height: 16px; text-align: center;
+      box-shadow: 0 0 0 2px Canvas;
+    }
+    .tasks-menu { right: auto; left: 0; width: min(360px, calc(100vw - 24px)); }
+    .tasks-list { display: flex; flex-direction: column; gap: 6px; }
+    .tasks-empty { color: #888; font-size: .8rem; padding: 4px 6px; }
+    .task-row {
+      display: flex; align-items: center; gap: 8px; padding: 6px;
+      border: 1px solid #8883; border-radius: 8px;
+    }
+    .task-row .grow { flex: 1; min-width: 0; }
+    .task-what { font-size: .82rem; font-weight: 600; overflow-wrap: anywhere; }
+    .task-meta { font-size: .72rem; color: #888; overflow-wrap: anywhere; }
+    .task-auto { color: #16a34a; font-weight: 700; }
+    .tasks-sched { display: flex; align-items: center; gap: 8px; font-size: .82rem; padding: 0 6px; }
     .settings-trigger { position: relative; white-space: nowrap; }
     /* badge shown when a setting is non-default (e.g. repos are hidden), so
        collapsing the controls doesn't hide active state */
@@ -333,6 +403,58 @@
       color: inherit; opacity: .5; flex: none; touch-action: manipulation;
     }
     .hidebtn:hover { opacity: 1; color: #dc2626; background: #dc262622; }
+
+    /* "committed" toggle (issue #64) — the promise that the scheduler keeps
+       this issue moving on its own. Checked state is deliberately loud: it
+       means an agent may start work here with nobody watching. */
+    .committed {
+      display: inline-flex; align-items: center; gap: 4px; flex: none;
+      font-size: .7rem; opacity: .55; cursor: pointer; user-select: none;
+      padding: 2px 5px; border-radius: 6px; touch-action: manipulation;
+    }
+    .committed:hover { opacity: 1; background: #8881; }
+    .committed input { margin: 0; accent-color: #16a34a; }
+    .committed:has(input:checked) { opacity: 1; color: #16a34a; font-weight: 700; }
+    /* "the sweep is coming now" — otherwise ticking the box looks like nothing
+       happened for up to a full scheduler interval. */
+    .committed-note {
+      font-weight: 400; font-size: .66rem; opacity: .8;
+      padding: 0 4px; border-radius: 5px; background: #16a34a22;
+    }
+
+    /* "the API you are talking to is not the code on disk" warning. Deliberately
+       across the full width and above everything: while it is up, half the
+       dashboard's buttons silently do nothing. */
+    .stale-banner {
+      margin: 0 0 10px; padding: 10px 12px; border-radius: 10px;
+      border: 1px solid #f59e0b88; background: #f59e0b22; color: #b45309;
+      font-size: .82rem; line-height: 1.45;
+    }
+    @media (prefers-color-scheme: dark) { .stale-banner { color: #fcd34d; } }
+
+    /* The ⚡ trigger carries the failure too — the panel it opens is where the
+       explanation lives, but it is closed most of the time. */
+    .tasks-broken { color: #dc2626; border-color: #dc262666 !important; }
+
+    /* A failed /api/jobs poll used to be swallowed, which made a dead API look
+       like a checkbox that would not stay checked. */
+    .tasks-error {
+      margin: 6px 0 2px; padding: 6px 8px; border-radius: 8px;
+      background: #dc262618; border: 1px solid #dc262655; color: #dc2626;
+      font-size: .72rem; line-height: 1.4;
+    }
+
+    /* Per-repo scheduler opt-outs, indented under the global switch. */
+    .sched-repos {
+      margin: 4px 0 2px 18px; display: flex; flex-direction: column; gap: 2px;
+      border-left: 2px solid #8883; padding-left: 8px;
+    }
+    .sched-repos label {
+      display: flex; align-items: center; gap: 6px; font-size: .74rem;
+      cursor: pointer; user-select: none; padding: 2px 0; opacity: .85;
+    }
+    .sched-repos label:hover { opacity: 1; }
+    .sched-repos input { margin: 0; accent-color: #16a34a; }
 
     /* pin-to-top toggle — sized for tapping, like the other icon buttons */
     .pinbtn {
@@ -503,10 +625,10 @@
       }
       .labels { order: 4; max-width: 100%; }
       .wfnum { width: 34px; }
-      .chevtools { margin-left: 50px; }
+      .chevtools { margin-left: 77px; }
       /* On a phone the commit headline says more than the branch name, and
          there is only room for one — the branch is still in the ↗ target. */
-      .wfcommit { margin-left: 52px; }
+      .wfcommit { margin-left: 79px; }
       .wfbranch { display: none; }
       /* The header line already wraps on a phone; a commit chip there would
          push the repo name onto a third row. */
@@ -850,8 +972,35 @@
     <button class="nav-tab" data-tab="testflight">✈️ TestFlight</button>
   </nav>
 
+  <!-- Shown only when the server process is older than the code on disk: the
+       dashboard is served from disk but the API is frozen at boot, so a failed
+       restart makes the two halves disagree and everything new answers 404. -->
+  <div id="stalebanner" class="stale-banner" role="alert" hidden></div>
+
   <div id="mainView">
     <div class="topbar">
+      <div class="tasks">
+        <button id="tasksBtn" class="ghost sm tasks-trigger" aria-haspopup="true"
+                aria-expanded="false" aria-controls="tasksMenu" title="Running tasks">
+          ⚡<span id="tasksCount" class="tasks-badge" hidden>0</span>
+        </button>
+        <div id="tasksMenu" class="filter-menu tasks-menu" role="dialog" aria-label="Running tasks">
+          <h4>Running tasks</h4>
+          <div id="tasksList" class="tasks-list"><div class="tasks-empty">nothing running</div></div>
+          <div id="tasksError" class="tasks-error" hidden></div>
+          <h4>Automatic scheduler</h4>
+          <label class="tasks-sched">
+            <input type="checkbox" id="schedEnabled">
+            <span>drive <strong>committed</strong> issues automatically</span>
+          </label>
+          <div class="settings-note" id="schedNote">off</div>
+          <!-- Per-repo opt-outs, only meaningful while the global switch is on. -->
+          <div id="schedRepos" class="sched-repos" hidden></div>
+          <div class="filter-actions">
+            <button id="schedRunNow" class="ghost sm">Run a sweep now</button>
+          </div>
+        </div>
+      </div>
       <div class="grow">
         <h1>☁️ cloud-copilot</h1>
         <p class="sub" id="rootline">loading…</p>
@@ -878,6 +1027,15 @@
                 <button id="restartMainBtn" class="ghost sm">🔄 Restart main</button>
               </div>
               <div id="restartNote" class="settings-note" hidden></div>
+            </div>
+            <h4>Sync badge</h4>
+            <div class="settings-note synclegend">
+              <span><span class="wfsync wfsync-clean">✓</span> in sync with base</span>
+              <span><span class="wfsync wfsync-behind" data-behind="3">⇣</span> behind by N commits</span>
+              <span><span class="wfsync wfsync-conflict">⚠</span> would conflict</span>
+              <span><span class="wfsync wfsync-unknown">○</span> not compared yet</span>
+              <span><span class="wfsync wfsync-updating">⟳</span> Copilot is updating it</span>
+              <em>Compared against the base branch with local git every 3 minutes. Clicking a badge starts a Copilot session that merges the base branch <strong>into</strong> the PR &mdash; it never merges the PR.</em>
             </div>
             <h4>Show repositories</h4>
             <div id="filterList"></div>
@@ -1044,6 +1202,66 @@ const CHEV_CLASS = {
   idle: 'chev-idle', working: 'chev-working', deploying: 'chev-deploying', merging: 'chev-merging',
   success: 'chev-success', failed: 'chev-failed', aborted: 'chev-aborted',
 };
+
+// ---- base-branch sync badge (issue #58) ------------------------------------
+// One place decides what the little box left of a PR number says, so the issue
+// list and any future view can never disagree about what "clean" means.
+// `sync` is the server-collected { state, behindBy, aheadBy, mergeable, ... }
+// (null until the first collection) and `update` is the local update job.
+function syncBadgeView(sync, update) {
+  const us = (update && update.status) || 'idle';
+  if (us === 'updating') {
+    return {
+      text: '\u27f3', cls: 'wfsync-updating', clickable: true, behind: null,
+      title: 'Copilot is merging the base branch into this PR \u2014 click to show the log',
+    };
+  }
+  const s = (sync && sync.state) || 'unknown';
+  const behind = sync && typeof sync.behindBy === 'number' ? sync.behindBy : null;
+  const ahead = sync && typeof sync.aheadBy === 'number' ? sync.aheadBy : null;
+  const base = (sync && sync.baseRefName) || 'base';
+  const head = (sync && sync.headRefName) || 'this branch';
+  // Where the answer came from matters: git compared the real commits on this
+  // disk, GitHub only reported what it had already computed.
+  const via = sync && sync.source === 'github' ? 'via GitHub' : sync ? 'via git' : null;
+  // fmtAgo takes an elapsed duration, not a timestamp.
+  const ago = sync && sync.at ? fmtAgo(Date.now() - sync.at) : null;
+  const lines = [
+    `${base} \u2192 ${head}`,
+    behind != null ? `${behind} behind` + (ahead != null ? `, ${ahead} ahead` : '') : 'ahead/behind unknown',
+    ago
+      ? `compared ${ago === 'just now' ? 'just now' : `${ago} ago`}${via ? ` \u00b7 ${via}` : ''}`
+      : 'not compared yet \u2014 the next sweep runs within 3 minutes',
+  ];
+  if (us === 'failed' || us === 'aborted') lines.push(`last update ${us}${update.message ? `: ${update.message}` : ''}`);
+  const failedRun = us === 'failed' || us === 'aborted';
+  if (s === 'conflict') {
+    return {
+      text: '\u26a0', cls: 'wfsync-conflict', clickable: true, behind: behind || null,
+      title: `Conflicts with ${base} \u2014 click to let Copilot merge ${base} in and resolve them on this branch\n${lines.join('\n')}`,
+    };
+  }
+  if (s === 'behind') {
+    return {
+      text: '\u21e3', cls: 'wfsync-behind', clickable: true, behind,
+      title: `${behind} commit(s) behind ${base} \u2014 click to merge ${base} into this branch\n${lines.join('\n')}`,
+    };
+  }
+  if (s === 'clean') {
+    return {
+      text: failedRun ? '!' : '\u2713',
+      cls: failedRun ? 'wfsync-failed' : 'wfsync-clean',
+      clickable: failedRun, behind: null,
+      title: `In sync with ${base}\n${lines.join('\n')}`,
+    };
+  }
+  return {
+    text: failedRun ? '!' : '\u25cb',
+    cls: failedRun ? 'wfsync-failed' : 'wfsync-unknown',
+    clickable: true, behind: null,
+    title: `Not compared yet \u2014 click to merge ${base} into this branch anyway.\n${lines.join('\n')}`,
+  };
+}
 
 // ---- pipeline auto-run depth (persisted in localStorage) -------------------
 const LS_DEPTH = 'cc.pipelineDepth';
@@ -1290,6 +1508,303 @@ document.addEventListener('keydown', (e) => {
   }
 });
 window.addEventListener('resize', () => { if (settingsOpen()) clampSettingsMenu(); });
+
+// ---------------------------------------------------------------------------
+// Running-task panel (issue #64)
+//
+// Concurrency made the issue list a bad answer to "what is running?": several
+// agents can be working at once, some of them started by the scheduler rather
+// than by anyone at this screen. This panel polls one cheap endpoint that reads
+// only in-memory job state — no `gh`, no git — so a 3s interval costs nothing.
+// ---------------------------------------------------------------------------
+
+const tasksBtn = document.getElementById('tasksBtn');
+const tasksMenu = document.getElementById('tasksMenu');
+const tasksCount = document.getElementById('tasksCount');
+const tasksList = document.getElementById('tasksList');
+const tasksError = document.getElementById('tasksError');
+const schedEnabled = document.getElementById('schedEnabled');
+const schedNote = document.getElementById('schedNote');
+const schedRepos = document.getElementById('schedRepos');
+const schedRunNow = document.getElementById('schedRunNow');
+
+const TASK_LABEL = {
+  work: 'Create PR',
+  update: 'Sync with base',
+  review: 'Review & improve',
+  chat: 'PR chat',
+  deploy: 'Deploy',
+  merge: 'Merge',
+  admin: 'Admin chat',
+  'preissue-chat': 'Issue draft',
+};
+
+function humanDuration(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+function taskWhere(job) {
+  if (job.repo && job.prNumber) return `${job.repo} PR #${job.prNumber}`;
+  if (job.repo && job.issueNumber) return `${job.repo}#${job.issueNumber}`;
+  return job.repo || '—';
+}
+
+function taskHref(job) {
+  if (job.action === 'admin') return job.sessionId ? `#/admin/chat/${enc(job.sessionId)}` : '#/admin';
+  if (job.action === 'preissue-chat' && job.repo && job.id) return `#/preissue/${enc(job.repo)}/${enc(job.id)}`;
+  if (job.repo && job.prNumber && job.issueNumber) return `#/pr/${enc(job.repo)}/${job.issueNumber}/${job.prNumber}`;
+  // A Create PR run has no page of its own yet — its transcript streams into
+  // the issue card on Home, which is already where the user is.
+  return null;
+}
+
+function renderTasks(data) {
+  const list = data.jobs || [];
+  tasksCount.hidden = list.length === 0;
+  tasksCount.textContent = String(list.length);
+  tasksBtn.classList.toggle('busy', list.length > 0);
+  tasksBtn.title = list.length ? `${list.length} task(s) running` : 'Running tasks';
+
+  tasksList.textContent = '';
+  if (!list.length) {
+    const empty = document.createElement('div');
+    empty.className = 'tasks-empty';
+    empty.textContent = 'nothing running';
+    tasksList.append(empty);
+  }
+  for (const job of list) {
+    const row = document.createElement('div');
+    row.className = 'task-row';
+
+    const grow = document.createElement('div');
+    grow.className = 'grow';
+    const what = document.createElement('div');
+    what.className = 'task-what';
+    what.textContent = `${TASK_LABEL[job.action] || job.action} · ${taskWhere(job)}`;
+    if (job.auto) {
+      const tag = document.createElement('span');
+      tag.className = 'task-auto';
+      tag.textContent = ' · auto';
+      what.append(tag);
+    }
+    const meta = document.createElement('div');
+    meta.className = 'task-meta';
+    const bits = [humanDuration(job.elapsedMs)];
+    if (job.port) bits.push(`:${job.port}`);
+    if (job.subject) bits.push(job.subject);
+    meta.textContent = bits.join(' · ');
+    grow.append(what, meta);
+    row.append(grow);
+
+    const href = taskHref(job);
+    if (href) {
+      const view = document.createElement('a');
+      view.className = 'btnlink';
+      view.textContent = 'View';
+      view.href = href;
+      view.addEventListener('click', () => closeTasks());
+      row.append(view);
+    }
+
+    const stop = document.createElement('button');
+    stop.className = 'ghost sm';
+    stop.textContent = 'Stop';
+    stop.title = 'Terminate this task';
+    stop.addEventListener('click', async () => {
+      stop.disabled = true;
+      try {
+        await fetch('/api/jobs/cancel', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ key: job.key }),
+        });
+        await refreshTasks();
+      } catch { /* the next poll will tell the truth */ } finally {
+        stop.disabled = false;
+      }
+    });
+    row.append(stop);
+    tasksList.append(row);
+  }
+
+  const sched = data.scheduler || {};
+  schedEnabled.checked = Boolean(sched.enabled);
+  schedEnabled.disabled = false;
+  const every = sched.intervalMs ? `${Math.round(sched.intervalMs / 60000)} min` : '10 min';
+  schedNote.textContent = sched.enabled
+    ? `on · sweeps every ${every}${sched.running ? ' · sweeping now' : ''}`
+    : 'off — committed issues are not driven automatically';
+  // A sweep is a no-op while the scheduler is off, so don't offer the button.
+  schedRunNow.disabled = !sched.enabled || Boolean(sched.running);
+  renderSchedRepos(sched);
+}
+
+/**
+ * Per-repo opt-outs for the scheduler.
+ *
+ * Two states, not three: the server supports "follow the global switch" as a
+ * distinct value, but the only reason anyone reaches for this list is to keep
+ * the scheduler off ONE repo — so checked means "no override" and unchecked
+ * writes an explicit `false`. Hidden entirely while the global switch is off,
+ * where every row would be a no-op.
+ */
+function renderSchedRepos(sched) {
+  const repos = (window.__repos || []).filter((r) => r.github);
+  if (!sched.enabled || !repos.length) {
+    schedRepos.hidden = true;
+    schedRepos.dataset.sig = '';
+    return;
+  }
+  // Rebuilding on every 3s poll would fight the user's own click, so only
+  // redraw when something actually changed.
+  const sig = JSON.stringify([repos.map((r) => r.name), sched.repos || {}]);
+  schedRepos.hidden = false;
+  if (schedRepos.dataset.sig === sig) return;
+  schedRepos.dataset.sig = sig;
+
+  schedRepos.textContent = '';
+  for (const repo of repos) {
+    const on = Object.prototype.hasOwnProperty.call(sched.repos || {}, repo.name)
+      ? Boolean(sched.repos[repo.name])
+      : true;
+    const row = document.createElement('label');
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = on;
+    box.setAttribute('aria-label', `Drive committed issues in ${repo.name}`);
+    box.addEventListener('change', async () => {
+      const want = box.checked;
+      box.disabled = true;
+      try {
+        const r = await fetch('/api/settings/scheduler', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          // null clears the override, so the repo follows the global switch.
+          body: JSON.stringify({ repo: repo.name, repoEnabled: want ? null : false }),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        schedRepos.dataset.sig = ''; // force a redraw from the server's answer
+        await refreshTasks();
+      } catch (err) {
+        box.checked = !want;
+        setTasksError(`Could not change the scheduler for ${repo.name}: ${err.message}`);
+      } finally {
+        box.disabled = false;
+      }
+    });
+    row.append(box, document.createTextNode(repo.name));
+    schedRepos.append(row);
+  }
+}
+
+/**
+ * Show (or clear) a failure of the tasks panel itself.
+ *
+ * This used to be an empty `catch`, and that is precisely how one stale server
+ * process turned into three unexplained bugs: /api/jobs was answering 404, so
+ * the panel silently kept its last render and the scheduler checkbox snapped
+ * back to unchecked on every poll with no hint as to why.
+ */
+function setTasksError(message) {
+  tasksError.hidden = !message;
+  tasksError.textContent = message || '';
+  tasksBtn.classList.toggle('tasks-broken', Boolean(message));
+}
+
+async function refreshTasks() {
+  let data;
+  try {
+    const r = await fetch('/api/jobs');
+    if (!r.ok) {
+      throw new Error(
+        r.status === 404
+          ? 'HTTP 404 — this server process predates /api/jobs; it needs a restart'
+          : `HTTP ${r.status}`,
+      );
+    }
+    data = await r.json();
+  } catch (err) {
+    // The switch reflects server state we can no longer read; leaving it
+    // clickable would let it lie about what it just did.
+    schedEnabled.disabled = true;
+    schedRunNow.disabled = true;
+    setTasksError(`Running tasks unavailable: ${err.message}`);
+    return;
+  }
+  setTasksError(null);
+  renderTasks(data);
+}
+
+function tasksOpen() { return tasksMenu.classList.contains('show'); }
+function openTasks() {
+  tasksMenu.classList.add('show');
+  tasksBtn.setAttribute('aria-expanded', 'true');
+  refreshTasks();
+}
+function closeTasks({ focusTrigger = false } = {}) {
+  if (!tasksOpen()) return;
+  tasksMenu.classList.remove('show');
+  tasksBtn.setAttribute('aria-expanded', 'false');
+  if (focusTrigger) tasksBtn.focus();
+}
+tasksBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (tasksOpen()) closeTasks(); else openTasks();
+});
+document.addEventListener('click', (e) => {
+  if (!tasksMenu.contains(e.target) && !tasksBtn.contains(e.target)) closeTasks();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && tasksOpen()) {
+    e.stopPropagation();
+    closeTasks({ focusTrigger: true });
+  }
+});
+schedEnabled.addEventListener('change', async () => {
+  const enabled = schedEnabled.checked;
+  schedEnabled.disabled = true;
+  try {
+    const r = await fetch('/api/settings/scheduler', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    setTasksError(null);
+    // Let the follow-up poll paint the result: rendering the POST's answer with
+    // an empty job list would blank the running tasks for a beat.
+    await refreshTasks();
+  } catch (err) {
+    schedEnabled.checked = !enabled;
+    setTasksError(`Could not ${enabled ? 'enable' : 'disable'} the scheduler: ${err.message}`);
+  } finally {
+    schedEnabled.disabled = false;
+  }
+});
+schedRunNow.addEventListener('click', async () => {
+  schedRunNow.disabled = true;
+  try {
+    const r = await fetch('/api/settings/scheduler', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ runNow: true }),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    setTasksError(null);
+  } catch (err) {
+    setTasksError(`Could not start a sweep: ${err.message}`);
+  }
+  refreshTasks();
+});
+// Poll faster while the panel is open; a slow background beat is enough to keep
+// the badge honest when it is closed.
+setInterval(() => refreshTasks(), 3000);
+refreshTasks();
+
 document.getElementById('filterAll').addEventListener('click', () => {
   saveHidden(new Set());
   renderFilterMenu(window.__repos || []);
@@ -1332,6 +1847,44 @@ function writeIssueCache(repoName, payload, localAt = Date.now()) {
     // just falls back to asking the server on every expand.
   }
   return entry;
+}
+
+/**
+ * Write a label change straight into the L1 cache.
+ *
+ * readIssueCache() re-parses localStorage from scratch on every call, so the
+ * `issue` objects a render holds are detached copies — mutating one does not
+ * survive the next render, and patchStatuses() would happily write the stale
+ * labels back over it. The cached payload is the thing that has to change.
+ * `localAt` is preserved: only one field moved, the GitHub half of this payload
+ * is exactly as old as it was.
+ */
+function patchCachedLabels(repoName, issueNumber, labels) {
+  const cached = readIssueCache(repoName);
+  if (!cached) return;
+  let hit = false;
+  const issues = cached.payload.issues.map((i) => {
+    if (i.number !== issueNumber) return i;
+    hit = true;
+    return { ...i, labels };
+  });
+  if (!hit) return;
+  writeIssueCache(repoName, { ...cached.payload, issues }, cached.localAt);
+}
+
+/** The scheduler's label name, as configured server-side. */
+function committedLabelName() {
+  return window.__committedLabel || 'committed';
+}
+
+/** Transient "the scheduler will pick this up now" hint next to the checkbox. */
+function setCommittedNote(labelEl, text) {
+  labelEl.querySelector('.committed-note')?.remove();
+  const note = document.createElement('span');
+  note.className = 'committed-note';
+  note.textContent = text;
+  labelEl.append(note);
+  setTimeout(() => note.remove(), 6000);
 }
 
 function getRepoOpen() {
@@ -1529,10 +2082,46 @@ restartMainBtn.addEventListener('click', async () => {
   setTimeout(() => location.reload(), 1500);
 });
 
+// ---- "is the API the same code as this page?" ------------------------------
+// public/ is read from disk on every request while server.js and lib/ are
+// frozen into the process at boot, so a deploy whose restart failed leaves this
+// page talking to an older API than the one it was written against. Everything
+// the newer UI knows about then 404s — which is unreadable as a symptom, so say
+// it plainly instead.
+const staleBanner = document.getElementById('stalebanner');
+
+async function checkServerVersion() {
+  let v;
+  try {
+    const r = await fetch('/api/version');
+    if (!r.ok) {
+      // The endpoint itself is missing, which is the strongest possible
+      // evidence of the very thing it exists to report.
+      staleBanner.hidden = false;
+      staleBanner.textContent =
+        '⚠ This server process is older than the dashboard it is serving ' +
+        '(it has no /api/version). Restart cloud-copilot — `npm run cc:restart` ' +
+        'in the repo — or buttons on this page will keep failing with 404.';
+      return;
+    }
+    v = await r.json();
+  } catch {
+    return; // offline: the browser already has its own way of saying so
+  }
+  if (v.committedLabel) window.__committedLabel = v.committedLabel;
+  staleBanner.hidden = !v.stale;
+  if (v.stale) {
+    staleBanner.textContent =
+      `⚠ The server is running older code than this page: ${v.reasons.join('; ')}. ` +
+      'Restart cloud-copilot (`npm run cc:restart`) — until then, newer buttons here may 404.';
+  }
+}
+
 // ---- repos ----------------------------------------------------------------
 async function loadRepos() {
   const r = await fetch('/api/repos').then((x) => x.json());
   window.__repos = r.repos;
+  if (r.committedLabel) window.__committedLabel = r.committedLabel;
   rootLine.textContent = `authorized root: ${r.root} · ${r.repos.length} repos`;
   reposEl.innerHTML = '';
   for (const repo of r.repos) reposEl.appendChild(renderRepo(repo));
@@ -1640,13 +2229,21 @@ async function patchStatuses(repo, body) {
 
   const merged = {
     ...cached.payload,
-    issues: cached.payload.issues.map((i) =>
-      (data.statuses[i.number] ? { ...i, status: data.statuses[i.number] } : i)),
+    issues: cached.payload.issues.map((i) => {
+      const next = data.statuses[i.number] ? { ...i, status: data.statuses[i.number] } : i;
+      // Labels ride along so the committed checkbox stops being up to half an
+      // hour behind reality (L1's 15 minutes on top of L2's). An issue missing
+      // from `labels` means the server has nothing cached for it — keep what we
+      // have rather than blanking it.
+      const labels = data.labels && data.labels[i.number];
+      return labels ? { ...next, labels } : next;
+    }),
     activeWorkIssues: data.activeWorkIssues || [],
   };
+  const sig = (payload) =>
+    JSON.stringify(payload.issues.map((i) => [i.status, i.labels || []]));
   const same =
-    JSON.stringify(merged.issues.map((i) => i.status)) ===
-      JSON.stringify(cached.payload.issues.map((i) => i.status)) &&
+    sig(merged) === sig(cached.payload) &&
     (merged.activeWorkIssues[0] ?? null) ===
       ((cached.payload.activeWorkIssues || [])[0] ?? null);
   if (same) return; // nothing moved — leave the DOM (and any live SSE panel) alone
@@ -1836,6 +2433,35 @@ setInterval(() => {
   }
 }, 60000);
 
+// ---- base-branch sync badges (issue #58) ----------------------------------
+// The server recompares every open PR against its base branch every three
+// minutes using local git. This poller only READS that result and repaints the
+// badges in place — no re-render, so it is safe while a log panel is streaming,
+// and it costs one state.json read on the server (never `gh`, never git).
+const PR_SYNC_POLL_MS = 3 * 60 * 1000;
+
+async function pollSyncBadges() {
+  if (document.hidden) return;
+  for (const [name, m] of mountedRepos) {
+    if (!m.body.isConnected || !m.body.closest('.repo.open')) continue;
+    let data;
+    try {
+      data = await fetch(`/api/repos/${enc(name)}/prsync`).then((x) => x.json());
+    } catch { continue; }
+    if (!data || data.error || !data.sync || !m.body.isConnected) continue;
+    m.body.querySelectorAll('.issue').forEach((el) => {
+      if (typeof el.applySyncMap === 'function') el.applySyncMap(data.sync);
+    });
+  }
+}
+
+setInterval(pollSyncBadges, PR_SYNC_POLL_MS);
+// A tab that was hidden for an hour is showing hour-old badges the moment it
+// comes back, so catch up immediately instead of waiting out the interval.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) pollSyncBadges();
+});
+
 // Shared per-repo lock context: only one working-tree action (Create PR,
 // Deploy, or Chat) may be active per repo at a time; every other issue/PR in
 // that repo gets greyed out (`setBlocked`) while one is running. Used by the
@@ -1843,6 +2469,17 @@ setInterval(() => {
 // the same `activeWorkIssues` field the server already returns — so a
 // pinned/detail card correctly starts greyed out if something else in that
 // repo is already busy, instead of the old no-op stub that never blocked.
+/**
+ * Per-repo context that greys out issues while an action holds the repo's ONE
+ * shared working tree.
+ *
+ * Since issue #64 that is only Deploy and Merge: Create PR, Update, Review and
+ * Chat each run in their own worktree and are free to run side by side, so
+ * locking the whole repo for them would now be a lie — it would hide exactly
+ * the concurrency this feature exists to provide.
+ */
+const LOCKING_ACTIONS = new Set(['deploy', 'merge']);
+
 function createRepoCtx(initialBusyIssue) {
   return {
     activeWorkIssue: initialBusyIssue ?? null,
@@ -1852,7 +2489,11 @@ function createRepoCtx(initialBusyIssue) {
         ic.setBlocked(this.activeWorkIssue != null && ic.issueNumber !== this.activeWorkIssue);
       }
     },
-    setActive(n) { this.activeWorkIssue = n; this.update(); },
+    setActive(n, action) {
+      if (!LOCKING_ACTIONS.has(action)) return;
+      this.activeWorkIssue = n;
+      this.update();
+    },
     clearActive(n) { if (this.activeWorkIssue === n) { this.activeWorkIssue = null; this.update(); } },
   };
 }
@@ -1875,7 +2516,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       </span>
     </div>
     <div class="worklog panel"></div>
-    <div class="blocked-note">⏸ Waiting — another PR creation is running in this repo…</div>
+    <div class="blocked-note">⏸ Waiting — a Deploy or Merge is using this repo's working tree…</div>
     <div class="prlist"></div>`;
 
   const icons = el.querySelector('.issue-icons');
@@ -1966,7 +2607,58 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   deleteBtn.setAttribute('aria-label', 'Permanently delete this issue on GitHub');
   deleteBtn.addEventListener('click', onDelete);
 
-  icons.append(refreshPrsBtn, hideBtn, deleteBtn);
+  // "Committed" (issue #64): a promise that cloud-copilot keeps driving this
+  // issue on its own — create the PR, keep it in sync with its base branch,
+  // then review and improve it. Backed by a GitHub label, so the flag is
+  // visible on github.com and survives a reinstall.
+  const committedLabel = document.createElement('label');
+  committedLabel.className = 'committed';
+  committedLabel.title =
+    'Committed: the scheduler keeps this issue moving on its own — opens a PR, ' +
+    'merges the base branch back in when it falls behind, then reviews and improves it.';
+  // The label name is server-side configuration (CC_COMMITTED_LABEL), so read
+  // it from there — hardcoding "committed" here made a customised deployment
+  // render every checkbox as unchecked, forever.
+  const labelName = committedLabelName();
+  const committedBox = document.createElement('input');
+  committedBox.type = 'checkbox';
+  committedBox.checked = (issue.labels || []).includes(labelName);
+  committedBox.setAttribute('aria-label', `Mark issue #${issue.number} as ${labelName}`);
+  committedBox.addEventListener('change', async () => {
+    const want = committedBox.checked;
+    committedBox.disabled = true;
+    try {
+      const r = await fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/committed`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ committed: want }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+      const body = await r.json().catch(() => ({}));
+      // Prefer the server's own label set over a locally guessed patch.
+      let labels = Array.isArray(body.labels) ? body.labels : null;
+      if (!labels) {
+        const set = new Set(issue.labels || []);
+        if (want) set.add(labelName); else set.delete(labelName);
+        labels = [...set];
+      }
+      // Both halves matter: the in-memory object keeps THIS render honest, and
+      // the L1 write-through keeps the next one honest. Without the second, a
+      // reload inside the 15-minute TTL re-parsed the old payload from
+      // localStorage and the checkbox silently flipped back.
+      issue.labels = labels;
+      patchCachedLabels(repo.name, issue.number, labels);
+      if (body.scheduled) setCommittedNote(committedLabel, 'queued');
+    } catch (err) {
+      committedBox.checked = !want; // GitHub said no — don't pretend otherwise
+      alert(`Could not update the ${labelName} label: ${err.message}`);
+    } finally {
+      committedBox.disabled = false;
+    }
+  });
+  committedLabel.append(committedBox, document.createTextNode(labelName));
+
+  icons.append(committedLabel, refreshPrsBtn, hideBtn, deleteBtn);
 
   renderPrs(); // also paints the Create PR segment, which now lives inside it
 
@@ -1998,6 +2690,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   for (const pr of st.prs) {
     if (pr.deploy && pr.deploy.status === 'deploying') reconcileDeploy(pr.prNumber);
     if (pr.merge && pr.merge.status === 'merging') reconcileMerge(pr.prNumber);
+    if (pr.update && pr.update.status === 'updating') reconcileUpdate(pr.prNumber);
   }
 
   // --- blocking -------------------------------------------------------------
@@ -2136,9 +2829,13 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     ghSlot.className = 'wfgh';
     ghSlot.style.visibility = 'hidden';
     ghSlot.textContent = '↗';
+    const syncSlot = document.createElement('span');
+    syncSlot.className = 'wfsync';
+    syncSlot.style.visibility = 'hidden';
+    syncSlot.textContent = '✓';
     const lead = document.createElement('span');
     lead.className = 'wflead';
-    lead.append(num, ghSlot);
+    lead.append(syncSlot, num, ghSlot);
 
     const chevbar = document.createElement('div');
     chevbar.className = 'chevbar';
@@ -2194,6 +2891,14 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     prlog.className = 'prlog panel';
     const mergelog = document.createElement('div');
     mergelog.className = 'mergelog panel';
+    const updatelog = document.createElement('div');
+    updatelog.className = 'updatelog panel';
+
+    // Base-branch sync badge. Clicking it NEVER merges the PR into main — it
+    // starts a Copilot session that merges the base branch INTO this PR.
+    const syncBtn = document.createElement('button');
+    syncBtn.className = 'wfsync';
+    syncBtn.addEventListener('click', () => onUpdateBranch(pr.prNumber));
 
     const chevbar = document.createElement('div');
     chevbar.className = 'chevbar';
@@ -2290,7 +2995,32 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     mergeLogBtn.addEventListener('click', toggleMergeLog);
     mergeTool.append(mergeLogBtn, mergeAbortBtn, mergeTiming);
 
-    tools.append(prTool, deployTool, mergeTool);
+    const updateTool = document.createElement('span');
+    updateTool.className = 'chevtool chevtool-update';
+    const updateLogBtn = document.createElement('button');
+    updateLogBtn.className = 'iconbtn updatelog-toggle';
+    updateLogBtn.textContent = '▤';
+    updateLogBtn.title = 'Show the base-branch update log';
+    const updateAbortBtn = document.createElement('button');
+    updateAbortBtn.className = 'iconbtn abortbtn';
+    updateAbortBtn.textContent = '⨯';
+    updateAbortBtn.title = 'Abort this branch update';
+    updateAbortBtn.addEventListener('click', () => onUpdateAbort(pr.prNumber));
+    const updateTiming = document.createElement('span');
+    updateTiming.className = 'timing';
+    if (pr.update && pr.update.durationMs != null) updateTiming.textContent = `ran ${fmtDur(pr.update.durationMs)}`;
+    updateLogBtn.addEventListener('click', async () => {
+      const show = !updatelog.classList.contains('show');
+      updatelog.classList.toggle('show', show);
+      const cur = findPr(pr.prNumber);
+      const s = cur && cur.update && cur.update.status;
+      if (show && !updatelog.textContent.trim() && (s === 'success' || s === 'failed' || s === 'aborted')) {
+        await loadUpdateTranscript(pr.prNumber);
+      }
+    });
+    updateTool.append(updateLogBtn, updateAbortBtn, updateTiming);
+
+    tools.append(updateTool, prTool, deployTool, mergeTool);
 
     // "⋯" reveals the tools line; a running stage force-opens it so Abort and
     // the live log are one tap away without hunting for the toggle.
@@ -2311,10 +3041,10 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
 
     const lead = document.createElement('span');
     lead.className = 'wflead';
-    lead.append(link, ghIcon);
+    lead.append(syncBtn, link, ghIcon);
 
     row.append(lead, chevbar, more);
-    item.append(row, makeCommitLine(pr), tools, prlog, mergelog);
+    item.append(row, makeCommitLine(pr), tools, prlog, mergelog, updatelog);
 
     // Initial paint. The "Create PR" cell always reads success: this row only
     // exists because a PR was found, so its own creation is a done deal —
@@ -2339,7 +3069,12 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     const showMergeLog0 = m0 === 'merging' || (pr.merge && pr.merge.hasConversation) || m0 === 'success' || m0 === 'failed' || m0 === 'aborted';
     mergeLogBtn.hidden = !showMergeLog0;
     mergeAbortBtn.hidden = m0 !== 'merging';
-    if (s0 === 'deploying' || m0 === 'merging') item.classList.add('tools-open');
+    const u0 = (pr.update && pr.update.status) || 'idle';
+    paintSyncBadge(syncBtn, pr);
+    const showUpdateLog0 = u0 === 'updating' || (pr.update && pr.update.hasConversation) || u0 === 'success' || u0 === 'failed' || u0 === 'aborted';
+    updateLogBtn.hidden = !showUpdateLog0;
+    updateAbortBtn.hidden = u0 !== 'updating';
+    if (s0 === 'deploying' || m0 === 'merging' || u0 === 'updating') item.classList.add('tools-open');
     updateMoreBtn(item);
 
     return item;
@@ -2419,6 +3154,55 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   }
 
 
+  // --- base-branch sync badge ----------------------------------------------
+  function syncBadgeEl(prNumber) {
+    return prlist.querySelector(`.pritem[data-pr="${prNumber}"] .wfsync`);
+  }
+  function updatePanel(prNumber) {
+    return prlist.querySelector(`.pritem[data-pr="${prNumber}"] .updatelog`);
+  }
+
+  function paintSyncBadge(el, pr) {
+    if (!el) return;
+    // A merged PR has nothing left to sync — hide the badge but keep its slot
+    // so the chevron bar stays aligned with the rows above and below.
+    if (pr.state === 'MERGED') {
+      el.className = 'wfsync';
+      el.textContent = '✓';
+      el.title = '';
+      el.disabled = true;
+      el.removeAttribute('data-behind');
+      el.style.visibility = 'hidden';
+      return;
+    }
+    el.style.visibility = '';
+    const view = syncBadgeView(pr.sync, pr.update);
+    el.className = `wfsync ${view.cls}`;
+    el.textContent = view.text;
+    el.title = view.title;
+    el.disabled = !view.clickable;
+    // The commit count rides on the ring as a superscript (CSS ::after), so a
+    // three-digit drift can't squeeze the glyph out of a 26px circle.
+    if (view.behind) el.dataset.behind = view.behind > 99 ? '99+' : String(view.behind);
+    else el.removeAttribute('data-behind');
+  }
+
+  function paintUpdate(prNumber) {
+    const pr = findPr(prNumber);
+    if (!pr) return;
+    paintSyncBadge(syncBadgeEl(prNumber), pr);
+    const us = (pr.update && pr.update.status) || 'idle';
+    const showLog = us === 'updating' || (pr.update && pr.update.hasConversation) || us === 'success' || us === 'failed' || us === 'aborted';
+    const tool = toolEl(prNumber, 'update');
+    if (tool) {
+      const logBtn = tool.querySelector('.updatelog-toggle'); if (logBtn) logBtn.hidden = !showLog;
+      const abort = tool.querySelector('.abortbtn'); if (abort) abort.hidden = us !== 'updating';
+      const t = tool.querySelector('.timing');
+      if (t && pr.update && pr.update.durationMs != null) t.textContent = `ran ${fmtDur(pr.update.durationMs)}`;
+    }
+    setToolsOpen(prNumber, us === 'updating');
+  }
+
   function setPrTiming(prNumber, durationMs) {
     const t = prlist.querySelector(`.pritem[data-pr="${prNumber}"] .chevtool-deploy .timing`);
     if (t && durationMs != null) t.textContent = `ran ${fmtDur(durationMs)}`;
@@ -2447,8 +3231,12 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         state: p.state || (ex && ex.state) || null,
         headRefName: p.headRefName || (ex && ex.headRefName) || null,
         headCommit: p.headCommit || (ex && ex.headCommit) || null,
+        // Freshly collected sync status wins; a refresh that couldn't collect
+        // it keeps the previous value rather than blanking the badge.
+        sync: p.sync || (ex && ex.sync) || null,
         deploy: ex ? ex.deploy : (p.deploy || { status: 'idle' }),
         merge: ex ? ex.merge : (p.merge || { status: 'idle' }),
+        update: (ex && ex.update) || p.update || { status: 'idle' },
       };
     });
     renderPrs();
@@ -2456,7 +3244,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
 
   function upsertLocalPr(p) {
     if (!st.prs.find((x) => x.prNumber === p.prNumber)) {
-      st.prs.unshift({ prNumber: p.prNumber, prUrl: p.prUrl, deploy: { status: 'idle' }, merge: { status: 'idle' } });
+      st.prs.unshift({ prNumber: p.prNumber, prUrl: p.prUrl, sync: null, deploy: { status: 'idle' }, merge: { status: 'idle' }, update: { status: 'idle' } });
       renderPrs();
     }
   }
@@ -2543,7 +3331,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       });
       if (!resp.ok || !resp.body) { appendWork(`\n[error] HTTP ${resp.status}\n`, 'err'); return reconcileWork(); }
       await pumpSSE(resp, {
-        onMeta: () => repoCtx.setActive(issue.number),
+        onMeta: () => repoCtx.setActive(issue.number, 'work'),
         onChunk: (t, s) => appendWork(t, s === 'stderr' ? 'stderr' : null),
         onError: (m) => appendWork(`\n[error] ${m}\n`, 'err'),
         onResult: (d) => { finalStatus = d.status; resultData = d; },
@@ -2591,7 +3379,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         if (s === 'success' && rec.work.prNumber && pipelineDepth() !== 'pr') onDeploy(rec.work.prNumber);
         return;
       }
-      if (rec.live && rec.live.work) { repoCtx.setActive(issue.number); return streamWork(true); }
+      if (rec.live && rec.live.work) { repoCtx.setActive(issue.number, 'work'); return streamWork(true); }
       await sleep(3000);
     }
     appendWork(`\n[work] status check timed out — tap Create PR again to re-check.\n`, 'stderr');
@@ -2640,7 +3428,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       if (!resp.ok || !resp.body) { appendDeploy(prNumber, `\n[error] HTTP ${resp.status}\n`, 'err'); return reconcileDeploy(prNumber); }
       await pumpSSE(resp, {
-        onMeta: () => repoCtx.setActive(issue.number),
+        onMeta: () => repoCtx.setActive(issue.number, 'deploy'),
         onChunk: (t, s) => appendDeploy(prNumber, t, s === 'stderr' ? 'stderr' : null),
         onError: (m) => appendDeploy(prNumber, `\n[error] ${m}\n`, 'err'),
         onResult: (d) => { finalStatus = d.status; resultData = d; },
@@ -2687,7 +3475,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         if (s === 'success' && pipelineDepth() === 'merge') onMerge(prNumber);
         return;
       }
-      if (rec.live && rec.live.deploy && rec.live.deploy[prNumber]) { repoCtx.setActive(issue.number); return streamDeploy(prNumber, true); }
+      if (rec.live && rec.live.deploy && rec.live.deploy[prNumber]) { repoCtx.setActive(issue.number, 'deploy'); return streamDeploy(prNumber, true); }
       await sleep(3000);
     }
     appendDeploy(prNumber, `\n[deploy #${prNumber}] status check timed out — tap Deploy again.\n`, 'stderr');
@@ -2699,6 +3487,140 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       const prRec = (rec.prs || {})[prNumber];
       const pr = findPr(prNumber);
       if (prRec && pr) { pr.deploy = { ...prRec.deploy }; paintDeploy(prNumber); }
+    } catch { /* ignore */ }
+  }
+
+  // --- Update from base branch (per PR, issue #58) ---------------------------
+  // The badge's only meaning is "bring the latest base branch INTO this PR".
+  // It must never be confused with Merge, which goes the other way, so the
+  // confirmation spells the direction out.
+  async function onUpdateBranch(prNumber) {
+    const pr = findPr(prNumber);
+    if (!pr) return;
+    const us = (pr.update && pr.update.status) || 'idle';
+    if (us === 'updating') { const p = updatePanel(prNumber); if (p) p.classList.toggle('show'); return; }
+    // Same repo-level working-tree lock the other actions honour.
+    if (repoCtx.activeWorkIssue != null && repoCtx.activeWorkIssue !== issue.number) return;
+    const sync = pr.sync || {};
+    const base = sync.baseRefName || 'the base branch';
+    const head = sync.headRefName || `the branch of PR #${prNumber}`;
+    const what = sync.state === 'conflict'
+      ? `PR #${prNumber} conflicts with ${base}.\n\nStart a Copilot session to merge ${base} into ${head} and resolve the conflicts?`
+      : sync.state === 'behind'
+        ? `PR #${prNumber} is ${sync.behindBy} commit(s) behind ${base}.\n\nMerge ${base} into ${head} with Copilot?`
+        : `Merge ${base} into ${head} with Copilot?`;
+    if (!window.confirm(`${what}\n\nThis does NOT merge the PR into ${base}.`)) return;
+    if (!pr.update) pr.update = {};
+    pr.update.status = 'updating';
+    paintUpdate(prNumber);
+    const p = updatePanel(prNumber); if (p) p.classList.add('show');
+    await streamUpdate(prNumber, false);
+  }
+
+  async function onUpdateAbort(prNumber) {
+    const pr = findPr(prNumber);
+    if (!pr || !pr.update || pr.update.status !== 'updating') return;
+    if (!window.confirm(`Abort the branch update for PR #${prNumber}?`)) return;
+    appendUpdate(prNumber, `\n[abort requested…]\n`, 'stderr');
+    try {
+      await fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/prs/${prNumber}/update/cancel`, { method: 'POST' });
+    } catch (e) {
+      appendUpdate(prNumber, `\n[abort failed: ${e.message}]\n`, 'err');
+    }
+  }
+
+  async function streamUpdate(prNumber, reconnect) {
+    const pr = findPr(prNumber);
+    if (!pr) return;
+    if (!pr.update) pr.update = {};
+    if (reconnect) {
+      pr.update.status = 'updating';
+      paintUpdate(prNumber);
+      appendUpdate(prNumber, `\n[reconnecting branch update for PR #${prNumber}…]\n`, 'stderr');
+    }
+    const url = `/api/repos/${enc(repo.name)}/issues/${issue.number}/prs/${prNumber}/update`;
+    let finalStatus = null, resultData = null;
+    try {
+      const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (!resp.ok || !resp.body) { appendUpdate(prNumber, `\n[error] HTTP ${resp.status}\n`, 'err'); return reconcileUpdate(prNumber); }
+      await pumpSSE(resp, {
+        onMeta: () => repoCtx.setActive(issue.number, 'update'),
+        onChunk: (t, s) => appendUpdate(prNumber, t, s === 'stderr' ? 'stderr' : null),
+        onError: (m) => appendUpdate(prNumber, `\n[error] ${m}\n`, 'err'),
+        onResult: (d) => { finalStatus = d.status; resultData = d; },
+        notify: notifyPr('update', prNumber),
+      });
+    } catch (e) {
+      appendUpdate(prNumber, `\n[connection dropped: ${e.message}] — update still running, checking status…\n`, 'stderr');
+      return reconcileUpdate(prNumber);
+    }
+    if (finalStatus === 'blocked') {
+      pr.update.status = 'idle';
+      paintUpdate(prNumber);
+      const p = updatePanel(prNumber); if (p) p.classList.add('show');
+      appendUpdate(prNumber, `\n${(resultData && resultData.message) || 'blocked'}\n`, 'err');
+      return;
+    }
+    if (finalStatus) {
+      pr.update.status = finalStatus;
+      pr.update.hasConversation = true;
+      if (resultData) {
+        pr.update.message = resultData.message || null;
+        // The server re-collects the sync status before answering, so the
+        // badge settles on the truth without waiting for the next refresh.
+        if (resultData.sync) pr.sync = resultData.sync;
+      }
+      paintUpdate(prNumber);
+      appendUpdate(prNumber, `\n[update #${prNumber}] finished: ${finalStatus}\n`, finalStatus === 'success' ? 'ok' : 'err');
+      if (resultData && resultData.message) {
+        appendUpdate(prNumber, `[update #${prNumber}] ${resultData.message}\n`, finalStatus === 'success' ? 'ok' : 'err');
+      }
+      repoCtx.clearActive(issue.number);
+      // A successful update pushed new commits, so Deploy/Merge were reset
+      // server-side — pull the whole record back in rather than guessing.
+      await refreshAfterUpdate(prNumber);
+    } else {
+      return reconcileUpdate(prNumber);
+    }
+  }
+
+  async function reconcileUpdate(prNumber) {
+    for (let i = 0; i < 200; i++) {
+      let rec;
+      try { rec = await fetchRecord(); } catch { await sleep(3000); continue; }
+      const prRec = (rec.prs || {})[prNumber];
+      const s = prRec && prRec.update && prRec.update.status;
+      if (s === 'success' || s === 'failed' || s === 'aborted') {
+        const pr = findPr(prNumber);
+        if (pr) { pr.update = { ...prRec.update, hasConversation: Boolean(prRec.update.conversation) }; pr.sync = prRec.sync || pr.sync; }
+        paintUpdate(prNumber);
+        appendUpdate(prNumber, `\n[update #${prNumber}] finished: ${s}\n`, s === 'success' ? 'ok' : 'err');
+        repoCtx.clearActive(issue.number);
+        if (window.CCNotify) CCNotify.jobFinished(notifyPr('update', prNumber, { status: s, replayed: true }));
+        return;
+      }
+      if (rec.live && rec.live.update && rec.live.update[prNumber]) {
+        repoCtx.setActive(issue.number, 'update');
+        return streamUpdate(prNumber, true);
+      }
+      await sleep(3000);
+    }
+    appendUpdate(prNumber, `\n[update #${prNumber}] status check timed out — tap the sync badge again.\n`, 'stderr');
+  }
+
+  async function refreshAfterUpdate(prNumber) {
+    try {
+      const rec = await fetchRecord();
+      const prRec = (rec.prs || {})[prNumber];
+      const pr = findPr(prNumber);
+      if (!prRec || !pr) return;
+      pr.update = { ...prRec.update, hasConversation: Boolean(prRec.update && prRec.update.conversation) };
+      pr.sync = prRec.sync || pr.sync;
+      pr.deploy = { ...prRec.deploy, hasConversation: Boolean(prRec.deploy && prRec.deploy.conversation) };
+      pr.merge = { ...prRec.merge, hasConversation: Boolean(prRec.merge && prRec.merge.conversation) };
+      paintUpdate(prNumber);
+      paintDeploy(prNumber);
+      paintMerge(prNumber);
     } catch { /* ignore */ }
   }
 
@@ -2748,7 +3670,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       });
       if (!resp.ok || !resp.body) { appendMerge(prNumber, `\n[error] HTTP ${resp.status}\n`, 'err'); return reconcileMerge(prNumber); }
       await pumpSSE(resp, {
-        onMeta: () => repoCtx.setActive(issue.number),
+        onMeta: () => repoCtx.setActive(issue.number, 'merge'),
         onChunk: (t, s) => appendMerge(prNumber, t, s === 'stderr' ? 'stderr' : null),
         onError: (m) => appendMerge(prNumber, `\n[error] ${m}\n`, 'err'),
         onResult: (d) => { finalStatus = d.status; resultData = d; },
@@ -2806,7 +3728,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         return;
       }
       if (rec.live && rec.live.merge && rec.live.merge[prNumber]) {
-        repoCtx.setActive(issue.number);
+        repoCtx.setActive(issue.number, 'merge');
         return streamMerge(prNumber, true);
       }
       await sleep(3000);
@@ -2839,7 +3761,8 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       .map((p) => ({
         prNumber: p.prNumber, prUrl: p.prUrl, title: p.title, createdAt: p.createdAt,
         state: p.state || null,
-        deploy: { ...p.deploy }, merge: { ...p.merge },
+        sync: p.sync || null,
+        deploy: { ...p.deploy }, merge: { ...p.merge }, update: { ...(p.update || { status: 'idle' }) },
       }));
     st.prs = arr;
     renderPrs();
@@ -2863,6 +3786,19 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     CCChat.resetText(panelEl);
     const prRec = (rec.prs || {})[prNumber];
     const conv = prRec && prRec.deploy && prRec.deploy.conversation;
+    appendTo(panelEl, conv || '(no transcript stored yet)', conv ? null : 'stderr');
+  }
+
+  async function loadUpdateTranscript(prNumber) {
+    const panelEl = updatePanel(prNumber);
+    if (!panelEl) return;
+    panelEl.classList.add('show');
+    CCChat.resetText(panelEl);
+    panelEl.innerHTML = '<span class="stderr">loading transcript…</span>';
+    const rec = await fetchRecord();
+    CCChat.resetText(panelEl);
+    const prRec = (rec.prs || {})[prNumber];
+    const conv = prRec && prRec.update && prRec.update.conversation;
     appendTo(panelEl, conv || '(no transcript stored yet)', conv ? null : 'stderr');
   }
 
@@ -2890,6 +3826,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   function appendWork(text, cls) { appendTo(worklog, text, cls); }
   function appendDeploy(prNumber, text, cls) { const p = deployPanel(prNumber); if (p) appendTo(p, text, cls); }
   function appendMerge(prNumber, text, cls) { const p = mergePanel(prNumber); if (p) appendTo(p, text, cls); }
+  function appendUpdate(prNumber, text, cls) { const p = updatePanel(prNumber); if (p) appendTo(p, text, cls); }
 
   // --- Dismiss/hide (local only — never touches GitHub) --------------------
   async function onHide(confirmMsg) {
@@ -2940,6 +3877,26 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   }
 
   function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+  // Hook the three-minute sync poller calls to refresh the badges of this
+  // issue's rows WITHOUT re-rendering anything: a re-render would tear down a
+  // log panel a live SSE stream is writing into, which is exactly why
+  // patchStatuses gives up whenever one is open. Writing back into `st.prs`
+  // keeps the click handlers and the next real render in agreement.
+  el.applySyncMap = (syncByPr) => {
+    let touched = false;
+    for (const pr of st.prs) {
+      const next = syncByPr[String(pr.prNumber)];
+      if (!next) continue;
+      const prev = pr.sync;
+      if (prev && prev.at === next.at && prev.state === next.state) continue;
+      pr.sync = next;
+      paintSyncBadge(syncBadgeEl(pr.prNumber), pr);
+      touched = true;
+    }
+    return touched;
+  };
+
   return el;
 }
 
@@ -4961,6 +5918,10 @@ function initAdminTerminal() {
 loadRepos().then(route);
 loadModelSetting();
 loadSelfInfo();
+checkServerVersion();
+// Cheap (two `git rev-parse` calls) and only useful between a deploy and its
+// restart, so a slow beat is plenty.
+setInterval(checkServerVersion, 60000);
 </script>
 </body>
 </html>

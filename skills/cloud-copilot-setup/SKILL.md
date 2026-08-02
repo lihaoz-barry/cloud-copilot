@@ -53,8 +53,17 @@ Verify: `ls -l ~/.agents/skills/` shows `testflight-deploy`, `create-pr`.
 - Verify: the `.p8` exists and `deploy.env` sources cleanly
   (`bash -c 'source ~/.config/cloud-copilot/deploy.env && echo "$ASC_APP_ID"'`).
 
-## 5. fastlane
-- Install: `brew install fastlane`. Verify `fastlane --version`.
+## 4b. Phone pushes (ntfy, optional)
+- Copy `setup/notify.env.example` → `~/.config/cloud-copilot/notify.env` and set
+  `NTFY_TOPIC` (a long, unguessable topic — it IS the credential) and
+  `APP_BASE_URL` (how the phone reaches this cloud-copilot, e.g.
+  `http://192.168.1.20:8787`) so notifications are tappable. **Never commit it.**
+- Subscribe to the same topic in the ntfy app on the phone.
+- Verify: `curl -X POST localhost:8787/api/settings/ntfy/test` (or the
+  **Test phone push** button in the 🔔 Alerts drawer) makes the phone buzz.
+- With no topic set, cloud-copilot simply never pushes — nothing breaks.
+
+## 5. fastlane- Install: `brew install fastlane`. Verify `fastlane --version`.
 - The **target app repo** (`$APP_REPO`) must contain `fastlane/Fastfile` with a
   `beta` lane (manual signing via the API key). See the `testflight-deploy` skill.
 - One-time keychain grant so `codesign` won't block headless deploys:

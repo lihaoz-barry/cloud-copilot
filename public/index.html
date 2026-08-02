@@ -43,25 +43,64 @@
     .caret { transition: transform .15s; }
     .repo.open .caret { transform: rotate(90deg); }
 
-    .toolbar { display: flex; gap: 8px; align-items: center; margin: 6px 4px 10px; }
+    .toolbar { display: flex; gap: 8px; align-items: center; margin: 6px 4px 8px; }
     .toolbar .spacer { flex: 1; }
     .muted { color: #888; font-size: .78rem; }
 
-    .issue { border-top: 1px solid #8882; padding: 10px 4px; }
+    /* Cache freshness readout: server→browser→next-sync, colour-coded by the
+       older of the two timestamps. Green = within the 15m TTL, amber = aged
+       out but under an hour, grey = the hourly server pass hasn't landed. */
+    .syncpill {
+      display: inline-flex; align-items: center; gap: 5px; cursor: help;
+      font-size: .72rem; font-variant-numeric: tabular-nums; white-space: nowrap;
+      padding: 3px 9px; border-radius: 999px; border: 1px solid transparent;
+    }
+    .syncpill .syncsep { opacity: .35; }
+    .syncpill.fresh { background: #16a34a1a; border-color: #16a34a44; color: #15803d; }
+    .syncpill.aging { background: #eab3081f; border-color: #eab30855; color: #a16207; }
+    .syncpill.stale { background: #8881; border-color: #8883; color: #888; }
+    .syncpill.syncing { animation: pulse 1s infinite; }
+    @media (max-width: 560px) {
+      /* Keep the countdown, drop the browser-copy age — the pill still fits
+         beside the issue count on a phone. Each segment carries its own
+         leading separator so hiding one never strands a dangling "·". */
+      .syncpill .sync-local { display: none; }
+    }
+
+    /* One issue = one header line + one workflow line per PR. Everything that
+       used to sit on its own row (title, action buttons, PR number, per-stage
+       tools) is folded into those two, so a repo's issues fit on one screen
+       instead of scrolling for three. */
+    .issue { border-top: 1px solid #8882; padding: 5px 4px; }
     .issue:first-child { border-top: none; }
-    /* Header row (badge/number/buttons) and title are separate rows, so a
-       long wrapping title never squeezes/misaligns the badge or buttons. */
-    .issue-top { display: flex; flex-direction: column; gap: 4px; }
-    .issue-toprow { display: flex; align-items: center; gap: 8px; }
-    .issue-toprow .spacer { flex: 1; }
-    .issue-num { color: #888; font-variant-numeric: tabular-nums; font-size: .82rem; }
-    .issue-title { font-size: .92rem; }
-    .labels { margin-top: 3px; }
+    .issue-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .issue-num { color: #888; font-variant-numeric: tabular-nums; font-size: .82rem; flex: none; }
+    .issue-title {
+      font-size: .92rem; flex: 1; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .labels { display: flex; gap: 4px; flex: none; overflow: hidden; max-width: 30%; }
     .label {
       display: inline-block; font-size: .68rem; padding: 1px 6px; border-radius: 999px;
-      background: #8883; color: inherit; margin-right: 4px;
+      background: #8883; color: inherit; white-space: nowrap;
     }
-    .actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+    /* Pin / GitHub / refresh-PRs / delete, squeezed into one compact cluster.
+       Uniform square targets so the four read as one control group; they get
+       their full 36px tap size back on narrow screens, where the cluster has a
+       line to itself. */
+    .issue-icons { display: flex; align-items: center; gap: 1px; flex: none; }
+    /* Scoped with .issue-row so these win over the standalone .pinbtn /
+       .hidebtn / a.ghlink rules defined further down the sheet. */
+    .issue-row .issue-icons > * {
+      min-height: 28px; min-width: 28px; padding: 3px 6px; font-size: .84rem;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: transparent; border: 1px solid transparent; border-radius: 7px;
+    }
+    .issue-row .issue-icons > *:hover { background: #8883; }
+    .issue-row .issue-icons > .pinbtn.active { background: #eab30833; opacity: 1; filter: none; }
+    @media (max-width: 560px) {
+      .issue-row .issue-icons > * { min-height: 36px; min-width: 36px; }
+    }
 
     /* state dot buttons — blue=planned, yellow=running, green=done, red=failed */
     .stbtn { display: inline-flex; align-items: center; gap: 6px; }
@@ -77,10 +116,91 @@
     .st-failed .dot { background: #dc2626; }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
 
-    /* Create PR → Deploy → Merge as a connected chevron/arrow step bar */
-    .pritem { margin-top: 4px; }
-    .prheadrow { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-    .chevbar { display: flex; width: 100%; }
+    /* Create PR → Deploy → Merge as a connected chevron/arrow step bar. One
+       workflow line per PR, prefixed by its PR number; the first line is
+       always the "no PR yet" line whose Create PR segment starts a new one. */
+    .pritem { margin-top: 0; }
+    .wfrow { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    /* PR number + its GitHub link are packed together on the LEFT at a fixed
+       width, so every chevron bar — Create PR line included — starts at the
+       same x no matter which icons that row has. */
+    .wflead { flex: none; display: flex; align-items: center; gap: 1px; }
+    .wfnum {
+      flex: none; width: 42px; text-align: right; font-size: .76rem;
+      font-variant-numeric: tabular-nums; color: #888; text-decoration: none;
+    }
+    a.wfnum { font-weight: 700; color: inherit; }
+    a.wfnum:hover { text-decoration: underline; }
+    .wfnum.empty { opacity: .4; }
+    /* "⋯" reveals the per-stage log/abort/timing line, which is collapsed by
+       default and force-opened while a stage is running. */
+    .wfmore {
+      flex: none; cursor: pointer; font: inherit; border: none; background: transparent;
+      color: inherit; opacity: .45; padding: 2px 5px; border-radius: 6px; font-size: .8rem;
+      line-height: 1; touch-action: manipulation;
+    }
+    .wfmore:hover { opacity: 1; background: #8883; }
+    .wfmore[hidden] { display: none; }
+    .wfgh {
+      flex: none; text-decoration: none; opacity: .45; padding: 2px 4px; border-radius: 6px;
+      color: inherit; font-size: .8rem; line-height: 1;
+    }
+    a.wfgh:hover { opacity: 1; background: #8883; }
+
+    /* Branch + tip commit under each workflow line: which code this row is
+       about, linked to that exact commit on GitHub. Indented to line up with
+       the chevron bar above it. */
+    .wfcommit {
+      display: flex; align-items: baseline; gap: 6px; min-width: 0;
+      margin: 1px 0 2px 62px; font-size: .68rem; color: #888;
+    }
+    .wfcommit[hidden] { display: none; }
+    .wfbranch {
+      flex: none; max-width: 34%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-family: ui-monospace, Menlo, monospace; opacity: .75;
+    }
+    .wfbranch::before { content: '⎇ '; opacity: .6; }
+    .wfcommitlink {
+      display: flex; align-items: baseline; gap: 6px; min-width: 0; flex: 1;
+      color: inherit; text-decoration: none; border-radius: 5px; padding: 1px 3px;
+    }
+    .wfcommitlink:hover { background: #8882; color: inherit; }
+    .wfcommitlink:hover .wfsha { text-decoration: underline; }
+    .wfsha {
+      flex: none; font-family: ui-monospace, Menlo, monospace; font-weight: 600;
+      color: #2563eb; opacity: .9;
+    }
+    .wfwhen { flex: none; opacity: .7; font-variant-numeric: tabular-nums; }
+    .wfheadline { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .85; }
+    /* Same commit chip, reused in the repo header for the local checkout. */
+    .repo-branch { font-family: ui-monospace, Menlo, monospace; }
+    a.repo-commit {
+      display: inline-flex; align-items: baseline; gap: 5px; max-width: 46ch;
+      color: inherit; text-decoration: none; border-radius: 5px; padding: 0 3px; vertical-align: bottom;
+    }
+    .repo-commit::before { content: '·'; opacity: .5; margin-right: 4px; }
+    a.repo-commit:hover { background: #8882; }
+    a.repo-commit:hover .wfsha { text-decoration: underline; }
+    .repo-commit .wfheadline { display: inline-block; max-width: 28ch; }
+    /* A commit that exists only on this machine: no GitHub page to link to. */
+    .repo-commit.is-local { cursor: help; }
+    .repo-commit.is-local .wfsha { color: inherit; opacity: .7; }
+    .unpushed {
+      flex: none; font-size: .62rem; font-weight: 700; letter-spacing: .02em;
+      padding: 0 5px; border-radius: 999px; background: #eab30833; color: #a16207;
+      text-transform: uppercase;
+    }
+    /* Which issue the checked-out branch belongs to. */
+    .repo-issue-link {
+      color: inherit; text-decoration: none; border-radius: 5px; padding: 0 4px;
+      display: inline-block; max-width: 34ch; overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; vertical-align: bottom; opacity: .95;
+    }
+    .repo-issue-link::before { content: '·'; opacity: .5; margin-right: 5px; }
+    .repo-issue-link:hover { background: #2563eb22; color: #1d4ed8; }
+    .pritem .chevtools { display: none; }
+    .pritem.tools-open .chevtools { display: flex; }
+    .chevbar { display: flex; flex: 1; min-width: 0; }
     .chev {
       flex: 1; display: flex; align-items: center; justify-content: center;
       height: 34px; min-width: 0; color: #fff; font-weight: 700; font-size: .74rem;
@@ -103,7 +223,7 @@
     .chev-failed, .chev-aborted { background: #dc2626; }
     .chev-locked   { background: #93a3b8; color: #eef2f7; opacity: .85; }
     .chevtools {
-      display: flex; margin-top: 6px; font-size: .74rem; color: #888;
+      display: flex; margin: 3px 0 3px 62px; font-size: .74rem; color: #888;
     }
     .chevtool { flex: 1; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
     .chevtool:first-child { justify-content: flex-start; }
@@ -151,27 +271,54 @@
       background: #8882; color: inherit; font-weight: 600; font-size: .82rem;
     }
     .err-inline { color: #dc2626; font-size: .8rem; padding: 8px 4px; }
-    .mode-row { margin: 0; font-size: .8rem; color: #888; }
     select { font: inherit; padding: 5px 8px; border-radius: 8px; border: 1px solid #8884; background: #8881; }
 
-    /* top bar with title + controls (filter lives top-right) */
+    /* top bar with title + a single settings dropdown (top-right) */
     .topbar { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
-    .topbar .grow { flex: 1; }
-    .topctrls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+    .topbar .grow { flex: 1; min-width: 0; }
+    .topbar h1 { overflow-wrap: anywhere; }
+    .topctrls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; flex: none; }
     .filter { position: relative; }
+    .settings-trigger { position: relative; white-space: nowrap; }
+    /* badge shown when a setting is non-default (e.g. repos are hidden), so
+       collapsing the controls doesn't hide active state */
+    .settings-dot {
+      position: absolute; top: -3px; right: -3px; width: 8px; height: 8px;
+      border-radius: 50%; background: #f59e0b; box-shadow: 0 0 0 2px Canvas;
+    }
     .filter-menu {
-      position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; min-width: 220px;
+      position: absolute; right: 0; top: calc(100% + 6px); z-index: 20;
+      width: min(280px, calc(100vw - 24px)); max-width: calc(100vw - 24px); box-sizing: border-box;
       background: Canvas; color: CanvasText; border: 1px solid #8884; border-radius: 10px;
       box-shadow: 0 8px 30px #0006; padding: 8px; display: none; max-height: 60vh; overflow-y: auto;
     }
     .filter-menu.show { display: block; }
     .filter-menu h4 { margin: 4px 6px 8px; font-size: .78rem; color: #888; font-weight: 600; }
+    .filter-menu h4:not(:first-child) { margin-top: 12px; }
     .filter-menu label {
       display: flex; align-items: center; gap: 8px; padding: 6px 6px; border-radius: 8px;
       font-size: .85rem; cursor: pointer;
     }
     .filter-menu label:hover { background: #8881; }
+    /* long model names must be ellipsised, never widen the panel */
+    .filter-menu select {
+      display: block; width: 100%; max-width: 100%; box-sizing: border-box;
+      text-overflow: ellipsis; font-size: .85rem;
+    }
+    .filter-menu label > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .settings-section { margin-top: 4px; }
+    .settings-note { font-size: .76rem; color: #888; padding: 2px 6px 0; overflow-wrap: anywhere; }
+    .settings-note.err { color: #dc2626; }
+    .settings-row { display: flex; gap: 6px; padding: 6px 6px 2px; }
     .filter-actions { display: flex; gap: 6px; padding: 6px 6px 2px; border-top: 1px solid #8882; margin-top: 4px; }
+
+    /* narrow screens: the title and the settings trigger share one row without
+       overflowing a ~390px viewport */
+    @media (max-width: 560px) {
+      .topbar { gap: 8px; }
+      .topbar h1 { font-size: 1.25rem; }
+      .topctrls { gap: 6px; }
+    }
 
     /* GitHub link beside the issue title */
     a.ghlink {
@@ -305,19 +452,14 @@
       cursor: zoom-in;
     }
 
-    /* per-PR rows: PR number on the left, Deploy on the right, one row per PR */
-    .prlist { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
-    .prrow {
-      display: flex; align-items: center; gap: 8px; padding: 6px 8px;
-      border: 1px solid #8883; border-radius: 10px; background: #8881;
-    }
-    .prrow .spacer { flex: 1; }
-    a.prnum {
-      text-decoration: none; font-weight: 700; font-size: .84rem; color: inherit;
-      font-variant-numeric: tabular-nums;
-    }
+    /* one workflow line per PR, plus the leading "no PR yet" line */
+    .prlist { margin-top: 3px; display: flex; flex-direction: column; gap: 3px; }
     .timing { color: #888; font-size: .72rem; font-variant-numeric: tabular-nums; }
-    .prlist-empty { color: #888; font-size: .78rem; padding: 2px 4px; }
+    /* PreIssue cards reuse .issue for its frame only — their body is free-form
+       text that must wrap, unlike the single-line issue title. */
+    .pre-top { display: flex; flex-direction: column; gap: 4px; padding: 4px 0; }
+    .pre-headrow { display: flex; align-items: flex-start; gap: 8px; }
+    .pre-text { flex: 1; min-width: 0; font-size: .92rem; }
 
     /* icon/log buttons — sized for comfortable tapping, not just clicking */
     .iconbtn {
@@ -342,12 +484,48 @@
 
     /* blocked while another PR-creation runs in the same repo */
     .issue.blocked { opacity: .45; }
-    .issue.blocked .actions, .issue.blocked .prlist { pointer-events: none; }
+    .issue.blocked .issue-icons, .issue.blocked .prlist { pointer-events: none; }
     .blocked-note { color: #a16207; font-size: .72rem; padding: 2px 4px; display: none; }
     .issue.blocked .blocked-note { display: block; }
 
-    .pritem { display: flex; flex-direction: column; gap: 6px; }
+    .pritem { display: flex; flex-direction: column; gap: 0; }
     .prlog { margin-top: 0; }
+
+    /* Narrow screens can't fit number + title + icons on one line, so the
+       title drops to its own line and the icons stay pinned right. */
+    @media (max-width: 560px) {
+      .issue-row { flex-wrap: wrap; row-gap: 2px; }
+      .issue-num { flex: 1; }
+      .issue-icons { order: 2; }
+      .issue-title {
+        order: 3; flex-basis: 100%; white-space: normal;
+        display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      }
+      .labels { order: 4; max-width: 100%; }
+      .wfnum { width: 34px; }
+      .chevtools { margin-left: 50px; }
+      /* On a phone the commit headline says more than the branch name, and
+         there is only room for one — the branch is still in the ↗ target. */
+      .wfcommit { margin-left: 52px; }
+      .wfbranch { display: none; }
+      /* The header line already wraps on a phone; a commit chip there would
+         push the repo name onto a third row. */
+      a.repo-commit { display: none; }
+      /* A phone-width workflow bar has ~300px for three labels, so shrink the
+         type and the arrow notch — otherwise the segments overlap their own
+         text ("PR createdDeployed Merge"). */
+      .chev {
+        /* Extra left padding clears the incoming notch, which otherwise
+           clips the first letter of a centred label. */
+        font-size: .64rem; height: 30px; padding: 0 6px 0 14px;
+        clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 50%, calc(100% - 9px) 100%, 0 100%, 9px 50%);
+        margin-right: -8px;
+      }
+      .chev:first-child {
+        clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 50%, calc(100% - 9px) 100%, 0 100%);
+        padding-left: 7px;
+      }
+    }
 
     /* ---- floating top nav switcher (Home / Admin / TestFlight) ------------ */
     body { padding-top: 60px; }
@@ -397,23 +575,10 @@
     .tmsg-body {
       font-size: .82rem; line-height: 1.5; border-radius: 12px; padding: 9px 12px; word-break: break-word;
     }
-    .tmsg.user .tmsg-body { background: #2563eb; color: #fff; }
+    /* User turns are plain text; assistant turns are rendered by CCChat and
+       styled by the shared .cc-md rules further down. */
+    .tmsg.user .tmsg-body { background: #2563eb; color: #fff; white-space: pre-wrap; }
     .tmsg.assistant .tmsg-body { background: #17171c; color: #e6e6e6; border: 1px solid #ffffff12; }
-    .tmsg-body p { margin: 0 0 8px; }
-    .tmsg-body p:last-child { margin-bottom: 0; }
-    .tmsg-body pre {
-      background: #05050799; border: 1px solid #ffffff14; border-radius: 8px; padding: 10px 12px;
-      overflow-x: auto; margin: 8px 0; font-family: ui-monospace, Menlo, monospace; font-size: .76rem;
-    }
-    .tmsg-body code {
-      font-family: ui-monospace, Menlo, monospace; font-size: .78em;
-      background: #ffffff1a; padding: 1px 5px; border-radius: 5px;
-    }
-    .tmsg-body pre code { background: none; padding: 0; }
-    .tmsg-body strong { font-weight: 700; }
-    .tmsg-cursor { display: inline-block; width: 7px; height: 1em; background: #6ee787; vertical-align: -2px; animation: blink 1s steps(2) infinite; }
-    .tmsg-stream { white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, Menlo, monospace; font-size: .78rem; }
-    .tmsg-stream .dim { color: #9aa0aa; }
     @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
     /* Compact summary strip parsed from the CLI's end-of-turn footer. */
     .tmsg-meta {
@@ -560,6 +725,103 @@
     .notify-install.show { display: block; }
     .settings-drawer .actions { display: flex; gap: 8px; margin-top: 6px; }
 
+    /* ---- Shared streamed-markdown renderer (public/chat-render.js) --------
+       One stylesheet for every surface that streams Copilot output: the PR
+       chat panel, the pre-issue chat panel and the Admin Terminal. Colours are
+       deliberately alpha-based (#888x) so the same rules read correctly on the
+       light chat bubbles and on the dark terminal. */
+    .cc-scrollhost { position: relative; display: flex; flex-direction: column; min-height: 0; }
+    .term > .cc-scrollhost { flex: 1; }
+    .cc-md { line-height: 1.55; word-break: break-word; overflow-wrap: anywhere; }
+    /* Assistant bubbles hold markdown now, not preformatted monospace text. */
+    .chat-text.cc-md { white-space: normal; font-family: inherit; font-size: .84rem; }
+    .cc-md > .cc-blk > :first-child { margin-top: 0; }
+    .cc-md > .cc-blk:last-of-type > :last-child { margin-bottom: 0; }
+    .cc-md p { margin: 0 0 .6em; }
+    .cc-md h1, .cc-md h2, .cc-md h3, .cc-md h4, .cc-md h5, .cc-md h6 {
+      margin: .9em 0 .4em; line-height: 1.3; font-weight: 700;
+    }
+    .cc-md h1 { font-size: 1.18em; }
+    .cc-md h2 { font-size: 1.1em; }
+    .cc-md h3 { font-size: 1.02em; }
+    .cc-md h4, .cc-md h5, .cc-md h6 { font-size: .96em; }
+    .cc-md ul, .cc-md ol { margin: 0 0 .6em; padding-left: 1.35em; }
+    .cc-md li { margin: .18em 0; }
+    .cc-md li > p { margin: 0 0 .3em; }
+    .cc-md li.task-list-item { list-style: none; margin-left: -1.15em; }
+    .cc-md li.task-list-item input { margin-right: .45em; }
+    .cc-md a { color: #2563eb; text-decoration: underline; }
+    .tmsg-body .cc-md a, .cc-md.tmsg-body a { color: #79b8ff; }
+    .cc-md blockquote {
+      margin: 0 0 .6em; padding: .1em 0 .1em .8em; border-left: 3px solid #8886; opacity: .88;
+    }
+    .cc-md hr { border: 0; border-top: 1px solid #8884; margin: .9em 0; }
+    .cc-md table {
+      border-collapse: collapse; margin: 0 0 .6em; font-size: .95em;
+      display: block; max-width: 100%; overflow-x: auto;
+    }
+    .cc-md th, .cc-md td { border: 1px solid #8886; padding: 4px 9px; text-align: left; }
+    .cc-md th { background: #8882; font-weight: 700; }
+    .cc-md code {
+      font-family: ui-monospace, Menlo, monospace; font-size: .88em;
+      background: #8883; padding: 1px 5px; border-radius: 5px;
+    }
+    /* Code fences stay dark on every surface so one highlight.js theme works. */
+    .cc-pre { position: relative; margin: 0 0 .6em; }
+    .cc-md pre {
+      margin: 0; background: #0d1117; color: #e6edf3; border: 1px solid #ffffff1f;
+      border-radius: 8px; padding: 10px 12px; overflow-x: auto;
+      font-family: ui-monospace, Menlo, monospace; font-size: .74rem; line-height: 1.5;
+    }
+    .cc-md pre code, .cc-md pre code.hljs {
+      background: none; padding: 0; font-size: inherit; color: inherit; display: block;
+    }
+    .cc-copy {
+      font: inherit; font-size: .66rem; line-height: 1; cursor: pointer;
+      border-radius: 6px; padding: 4px 7px; border: 1px solid #8886;
+      background: #8882; color: inherit;
+    }
+    .cc-pre > .cc-copy {
+      position: absolute; top: 6px; right: 6px; z-index: 2;
+      border-color: #ffffff2e; background: #ffffff1a; color: #c9d1d9;
+      opacity: 0; transition: opacity .12s;
+    }
+    .cc-pre:hover > .cc-copy, .cc-pre > .cc-copy:focus { opacity: 1; }
+    /* Touch devices have no hover, so keep the button faintly visible. */
+    @media (hover: none) { .cc-pre > .cc-copy { opacity: .7; } }
+    .cc-md > .cc-copy { display: inline-flex; margin-top: 8px; opacity: .65; }
+    .cc-md > .cc-copy:hover { opacity: 1; }
+    /* Very long tool/terminal dumps fold away instead of burying the answer. */
+    .cc-pre.cc-collapsed pre { max-height: 15em; overflow: hidden; }
+    .cc-pre.cc-collapsed::after {
+      content: ''; position: absolute; left: 1px; right: 1px; bottom: 26px; height: 44px;
+      background: linear-gradient(to bottom, #0d111700, #0d1117); pointer-events: none;
+    }
+    .cc-more {
+      display: block; width: 100%; margin-top: 4px; cursor: pointer; font: inherit;
+      font-size: .68rem; padding: 4px; border-radius: 6px; border: 1px solid #8886;
+      background: #8882; color: inherit;
+    }
+    /* Shimmer until the first token lands, then a blinking caret. */
+    .cc-cursor {
+      display: inline-block; width: 7px; height: 1em; background: #6ee787;
+      vertical-align: -2px; animation: blink 1s steps(2) infinite;
+    }
+    .cc-cursor:only-child {
+      width: 92px; border-radius: 5px; animation: ccshimmer 1.3s linear infinite;
+      background: linear-gradient(90deg, #8883, #8887, #8883); background-size: 200% 100%;
+    }
+    @keyframes ccshimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+    .cc-jump {
+      position: absolute; left: 50%; transform: translateX(-50%); bottom: 12px; z-index: 6;
+      font: inherit; font-size: .72rem; font-weight: 600; padding: 6px 13px; cursor: pointer;
+      border-radius: 999px; border: none; background: #2563eb; color: #fff;
+      box-shadow: 0 2px 10px #0005;
+    }
+    .cc-jump[hidden] { display: none; }
+    .cc-noout { color: #9aa0aa; }
+    .cc-aborted { color: #eab308; }
+
     /* ---- Narrow screens: keep the composer's Send button on screen ---------
        The composer control rows are single-line flex rows on desktop. On a
        phone the selects (16px font, to avoid iOS focus auto-zoom) no longer fit
@@ -579,6 +841,7 @@
       .chat-model { font-size: 16px; padding: 6px; }
     }
   </style>
+  <link rel="stylesheet" href="/vendor/highlight-github-dark.min.css" />
 </head>
 <body>
   <nav class="navbar">
@@ -594,21 +857,28 @@
         <p class="sub" id="rootline">loading…</p>
       </div>
       <div class="topctrls">
-        <div class="mode-row">
-          mode:
-          <select id="mode">
-            <option value="allow-all" selected>Allow All</option>
-            <option value="granular">Granular</option>
-            <option value="default">Default</option>
-          </select>
-        </div>
-        <div class="mode-row">
-          model:
-          <select id="modelSel"><option value="">loading…</option></select>
-        </div>
         <div class="filter">
-          <button id="filterBtn" class="ghost sm">⚙ Filter</button>
-          <div id="filterMenu" class="filter-menu">
+          <button id="filterBtn" class="ghost sm settings-trigger"
+                  aria-haspopup="true" aria-expanded="false" aria-controls="filterMenu">
+            ⚙ Settings<span id="settingsDot" class="settings-dot" hidden></span>
+          </button>
+          <div id="filterMenu" class="filter-menu" role="dialog" aria-label="Settings">
+            <h4>Mode</h4>
+            <select id="mode">
+              <option value="allow-all" selected>Allow All</option>
+              <option value="granular">Granular</option>
+              <option value="default">Default</option>
+            </select>
+            <h4>Model</h4>
+            <select id="modelSel"><option value="">loading…</option></select>
+            <div id="selfSection" class="settings-section" hidden>
+              <h4>This instance</h4>
+              <div class="settings-note">branch: <strong id="selfBranch">…</strong></div>
+              <div class="settings-row">
+                <button id="restartMainBtn" class="ghost sm">🔄 Restart main</button>
+              </div>
+              <div id="restartNote" class="settings-note" hidden></div>
+            </div>
             <h4>Show repositories</h4>
             <div id="filterList"></div>
             <div class="filter-actions">
@@ -714,6 +984,12 @@
     <div class="actions">
       <button id="notifyTest" class="ghost sm">▶ Test notification</button>
     </div>
+    <h3 style="margin-top:18px">📲 Phone push (ntfy)</h3>
+    <p class="hint">Pushes reach your phone even when cloud-copilot isn’t open. Each finished job sends its own message naming the repo, the action and the issue/PR or chat title.</p>
+    <div class="notify-state" id="ntfyState">Checking…</div>
+    <div class="actions">
+      <button id="ntfyTest" class="ghost sm">▶ Test phone push</button>
+    </div>
   </div>
   <div id="depthDrawer" class="depth-drawer">
     <h3>Auto-run depth</h3>
@@ -733,6 +1009,12 @@
   </div>
 
 <script src="/notify.js"></script>
+<!-- Vendored (see public/vendor/README.md) — no third-party CDN is ever hit at
+     runtime, so the app keeps working on a LAN with no internet. -->
+<script src="/vendor/marked.min.js"></script>
+<script src="/vendor/purify.min.js"></script>
+<script src="/vendor/highlight.min.js"></script>
+<script src="/chat-render.js"></script>
 <script>
 const reposEl = document.getElementById('repos');
 const rootLine = document.getElementById('rootline');
@@ -741,6 +1023,11 @@ const modelSel = document.getElementById('modelSel');
 const filterBtn = document.getElementById('filterBtn');
 const filterMenu = document.getElementById('filterMenu');
 const filterList = document.getElementById('filterList');
+const settingsDot = document.getElementById('settingsDot');
+const selfSection = document.getElementById('selfSection');
+const selfBranchEl = document.getElementById('selfBranch');
+const restartMainBtn = document.getElementById('restartMainBtn');
+const restartNote = document.getElementById('restartNote');
 
 const enc = encodeURIComponent;
 
@@ -823,6 +1110,7 @@ function syncNotifyUi() {
 
 function openNotifyDrawer() {
   syncNotifyUi();
+  syncNtfyUi();
   notifyDrawer.classList.add('show');
   notifyScrim.classList.add('show');
 }
@@ -855,6 +1143,45 @@ notifyTestBtn.addEventListener('click', async () => {
     }
   } finally {
     notifyTestBtn.disabled = false;
+  }
+});
+
+// ---- server-side phone pushes (ntfy) --------------------------------------
+// The browser-side alerts above only fire while a page is (or was) open; these
+// are sent by the server itself when a job reaches a terminal state, so they
+// arrive even with the app fully closed. Config lives on the machine, not here.
+const ntfyStateEl = document.getElementById('ntfyState');
+const ntfyTestBtn = document.getElementById('ntfyTest');
+
+async function syncNtfyUi() {
+  try {
+    const s = await fetch('/api/settings/ntfy').then((r) => r.json());
+    const configured = Boolean(s.enabled);
+    ntfyTestBtn.disabled = !configured;
+    ntfyStateEl.classList.toggle('warn', !configured);
+    ntfyStateEl.textContent = configured
+      ? `Pushing to ${s.server} · topic ${s.topic}${s.appBaseUrl ? '' : ' · set APP_BASE_URL to make pushes tappable'}`
+      : `Not configured — create ${s.configFile} from setup/notify.env.example (NTFY_TOPIC=…).`;
+  } catch {
+    ntfyStateEl.classList.add('warn');
+    ntfyStateEl.textContent = 'Couldn’t reach the server to check push settings.';
+  }
+}
+
+ntfyTestBtn.addEventListener('click', async () => {
+  ntfyTestBtn.disabled = true;
+  const before = ntfyStateEl.textContent;
+  try {
+    const r = await fetch('/api/settings/ntfy/test', { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    ntfyStateEl.textContent = r.ok ? 'Sent — check your phone.' : `Push failed: ${d.error || `HTTP ${r.status}`}`;
+    ntfyStateEl.classList.toggle('warn', !r.ok);
+    if (r.ok) setTimeout(() => { ntfyStateEl.textContent = before; }, 4000);
+  } catch (e) {
+    ntfyStateEl.textContent = `Push failed: ${e.message}`;
+    ntfyStateEl.classList.add('warn');
+  } finally {
+    ntfyTestBtn.disabled = false;
   }
 });
 
@@ -899,19 +1226,70 @@ function renderFilterMenu(repos) {
       if (cb.checked) set.delete(repo.name); else set.add(repo.name);
       saveHidden(set);
       applyRepoVisibility();
+      updateSettingsBadge();
     });
+    const name = document.createElement('span');
+    name.textContent = repo.name;
     label.appendChild(cb);
-    label.appendChild(document.createTextNode(repo.name));
+    label.appendChild(name);
     filterList.appendChild(label);
   }
+  updateSettingsBadge();
+}
+
+// Badge on the collapsed trigger whenever a setting is non-default — right now
+// that means the repo filter is hiding at least one repo.
+function updateSettingsBadge() {
+  const hidden = hiddenSet();
+  const known = (window.__repos || []).map((r) => r.name);
+  const hidingSomething = known.some((n) => hidden.has(n));
+  settingsDot.hidden = !hidingSomething;
+}
+
+// Keep the panel inside the viewport on both edges, however narrow the screen
+// is and however close the trigger sits to a border.
+function clampSettingsMenu() {
+  filterMenu.style.left = '';
+  filterMenu.style.right = '0';
+  const box = filterMenu.getBoundingClientRect();
+  const margin = 12;
+  if (box.left < margin) {
+    const overflowLeft = margin - box.left;
+    filterMenu.style.right = `${Math.max(0, parseFloat(getComputedStyle(filterMenu).right || 0) - overflowLeft)}px`;
+  }
+  const after = filterMenu.getBoundingClientRect();
+  if (after.right > window.innerWidth - margin) {
+    filterMenu.style.right = `${after.right - (window.innerWidth - margin)}px`;
+  }
+}
+
+function settingsOpen() { return filterMenu.classList.contains('show'); }
+function openSettings() {
+  filterMenu.classList.add('show');
+  filterBtn.setAttribute('aria-expanded', 'true');
+  clampSettingsMenu();
+  loadSelfInfo();
+}
+function closeSettings({ focusTrigger = false } = {}) {
+  if (!settingsOpen()) return;
+  filterMenu.classList.remove('show');
+  filterBtn.setAttribute('aria-expanded', 'false');
+  if (focusTrigger) filterBtn.focus();
 }
 filterBtn.addEventListener('click', (e) => {
   e.stopPropagation();
-  filterMenu.classList.toggle('show');
+  if (settingsOpen()) closeSettings(); else openSettings();
 });
 document.addEventListener('click', (e) => {
-  if (!filterMenu.contains(e.target) && e.target !== filterBtn) filterMenu.classList.remove('show');
+  if (!filterMenu.contains(e.target) && !filterBtn.contains(e.target)) closeSettings();
 });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && settingsOpen()) {
+    e.stopPropagation();
+    closeSettings({ focusTrigger: true });
+  }
+});
+window.addEventListener('resize', () => { if (settingsOpen()) clampSettingsMenu(); });
 document.getElementById('filterAll').addEventListener('click', () => {
   saveHidden(new Set());
   renderFilterMenu(window.__repos || []);
@@ -924,6 +1302,65 @@ document.getElementById('filterNone').addEventListener('click', () => {
 });
 
 // ---- pinned issues (persisted in localStorage, shown at the top) ----------
+// ---- L1: per-device issue-list cache + repo open/closed state --------------
+// Tier 1 of the three-level read path (L2 = the server's data/gh-cache.json,
+// L3 = the `gh` CLI). Expanding a repo renders straight from here, so the list
+// is on screen before any request goes out; the server is only asked once this
+// copy is older than the shared 15-minute TTL. "↻ Refresh" ignores all of it.
+const LS_ISSUE_CACHE = 'cc.cache.v1.issues.';
+const LS_REPO_OPEN = 'cc.repoOpen.v1';
+const L1_TTL_MS = 15 * 60 * 1000;
+
+function readIssueCache(repoName) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS_ISSUE_CACHE + repoName) || 'null');
+    if (!raw || !raw.payload || !Array.isArray(raw.payload.issues)) return null;
+    return raw;
+  } catch { return null; }
+}
+
+// `localAt` is overridable so a statuses-only patch can write the merged
+// payload back WITHOUT restarting the TTL clock — the GitHub half of this
+// payload is exactly as old as it was, and silently renewing it would keep the
+// issue list from ever refreshing for someone who visits often enough.
+function writeIssueCache(repoName, payload, localAt = Date.now()) {
+  const entry = { localAt, serverAt: payload.serverAt ?? payload.at ?? null, payload };
+  try {
+    localStorage.setItem(LS_ISSUE_CACHE + repoName, JSON.stringify(entry));
+  } catch {
+    // Quota exceeded (or Safari private mode) — the dashboard still works, it
+    // just falls back to asking the server on every expand.
+  }
+  return entry;
+}
+
+function getRepoOpen() {
+  try { return JSON.parse(localStorage.getItem(LS_REPO_OPEN) || '{}') || {}; }
+  catch { return {}; }
+}
+function setRepoOpen(repoName, open) {
+  const map = getRepoOpen();
+  if (open) map[repoName] = true; else delete map[repoName];
+  try { localStorage.setItem(LS_REPO_OPEN, JSON.stringify(map)); } catch { /* ignore */ }
+}
+
+// "3m" / "2h" / "just now" — deliberately coarse; the pill is a freshness cue,
+// not a clock. Absolute times live in its tooltip.
+function fmtAgo(ms) {
+  if (ms == null || !Number.isFinite(ms)) return '—';
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 45) return 'just now';
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  return h < 24 ? `${h}h` : `${Math.round(h / 24)}d`;
+}
+function fmtIn(ms) {
+  if (ms == null || !Number.isFinite(ms) || ms <= 0) return 'due';
+  const m = Math.max(1, Math.round(ms / 60000));
+  return m < 60 ? `${m}m` : `${Math.round(m / 60)}h`;
+}
+
 const LS_PINS = 'cc.pinnedIssues';
 const pinnedSection = document.getElementById('pinnedSection');
 function getPins() {
@@ -999,6 +1436,99 @@ modelSel.addEventListener('change', async () => {
   }
 });
 
+// ---- self repo ("this instance") + Restart main ----------------------------
+// Only the cloud-copilot checkout serving this page gets these controls; the
+// server returns { repo: null } for every other setup.
+let selfInfo = null;
+let restarting = false;
+
+function setRestartNote(text, isErr = false) {
+  restartNote.hidden = !text;
+  restartNote.textContent = text || '';
+  restartNote.classList.toggle('err', Boolean(isErr));
+}
+
+async function loadSelfInfo() {
+  if (restarting) return;
+  try {
+    const info = await fetch('/api/settings/self', { cache: 'no-store' }).then((x) => x.json());
+    selfInfo = info;
+    if (!info.repo) { selfSection.hidden = true; return; }
+    selfSection.hidden = false;
+    selfBranchEl.textContent = info.branch || '(unknown)';
+    const branch = info.defaultBranch || 'main';
+    restartMainBtn.textContent = `🔄 Restart ${branch}`;
+    restartMainBtn.disabled = Boolean(info.busy);
+    if (info.busy) setRestartNote(`Blocked: ${info.busy}.`, true);
+    else if (info.dirty) setRestartNote('Uncommitted changes will be stashed first.');
+    else setRestartNote('');
+  } catch {
+    selfSection.hidden = true;
+  }
+}
+
+// Poll /api/health until a *different* process answers — i.e. the restart
+// finished — instead of hanging on the request that killed the old server.
+async function waitForRestart(prevStartedAt, timeoutMs = 120000) {
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await wait(1500);
+    try {
+      const r = await fetch('/api/health', { cache: 'no-store' });
+      if (r.ok) {
+        const h = await r.json();
+        if (h.ok && (!prevStartedAt || h.startedAt !== prevStartedAt)) return h;
+      }
+    } catch {
+      /* still down — keep polling */
+    }
+  }
+  throw new Error('Timed out waiting for the server to come back. Check server.log.');
+}
+
+restartMainBtn.addEventListener('click', async () => {
+  if (restarting) return;
+  const branch = (selfInfo && selfInfo.defaultBranch) || 'main';
+  const dirtyWarning = selfInfo && selfInfo.dirty
+    ? '\n\nUncommitted changes will be stashed (recoverable with `git stash pop`).'
+    : '';
+  if (!confirm(`Check out ${branch}, pull the latest code, and restart cloud-copilot?${dirtyWarning}`)) return;
+
+  const prevStartedAt = (selfInfo && selfInfo.startedAt) || null;
+  restarting = true;
+  restartMainBtn.disabled = true;
+  setRestartNote(`Switching to ${branch}…`);
+
+  let data = {};
+  try {
+    const r = await fetch('/api/settings/self/restart-main', { method: 'POST' });
+    data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  } catch (err) {
+    restarting = false;
+    restartMainBtn.disabled = false;
+    setRestartNote(err.message || 'Restart failed.', true);
+    return;
+  }
+
+  selfBranchEl.textContent = data.branch || branch;
+  setRestartNote(`${(data.steps || []).join(' · ')} · waiting for the server to come back…`);
+  try {
+    await waitForRestart(prevStartedAt);
+  } catch (err) {
+    restarting = false;
+    restartMainBtn.disabled = false;
+    setRestartNote(err.message, true);
+    return;
+  }
+  restarting = false;
+  const stashNote = data.stashed ? ` · stashed: "${data.stashed}"` : '';
+  setRestartNote(`Restarted ✓ on ${data.branch || branch}${data.head ? ` @ ${data.head}` : ''}${stashNote} · reloading…`);
+  // The server just swapped the code it serves — reload so the page matches.
+  setTimeout(() => location.reload(), 1500);
+});
+
 // ---- repos ----------------------------------------------------------------
 async function loadRepos() {
   const r = await fetch('/api/repos').then((x) => x.json());
@@ -1015,47 +1545,166 @@ function renderRepo(repo) {
   const el = document.createElement('div');
   el.className = 'repo';
   el.dataset.repo = repo.name;
+  // Tip commit of the local checkout — what this machine would deploy right
+  // now. An UNPUSHED commit has no page on GitHub (linking to it just 404s),
+  // so it renders as a plain chip carrying an "unpushed" marker instead.
+  // The separator lives inside the chip (via CSS ::before) so hiding it on
+  // narrow screens doesn't strand a dangling "·".
+  const c = repo.headCommit;
+  const when = c && c.committedDate ? fmtAgo(Date.now() - new Date(c.committedDate).getTime()) : '';
+  const commitTitle = c
+    ? `${c.sha}\n${c.committedDate ? new Date(c.committedDate).toLocaleString() : ''}\n${c.headline || ''}` +
+      (c.pushed ? '' : '\n\nNot pushed yet — GitHub has no page for this commit.')
+    : '';
+  const commitInner = c
+    ? `<span class="wfsha">${escape(c.abbrev || '')}</span>` +
+      (c.pushed ? '' : '<span class="unpushed">unpushed</span>') +
+      `<span class="wfwhen">${escape(when)}</span>` +
+      `<span class="wfheadline">${escape(c.headline || '')}</span>`
+    : '';
+  let headBit = '';
+  if (c && c.pushed && repo.ownerRepo) {
+    headBit =
+      `<a class="repo-commit" href="https://github.com/${escape(repo.ownerRepo)}/commit/${escape(c.sha)}"` +
+      ` target="_blank" rel="noopener" title="${escape(commitTitle)}">${commitInner}</a>`;
+  } else if (c) {
+    headBit = `<span class="repo-commit is-local" title="${escape(commitTitle)}">${commitInner}</span>`;
+  }
   el.innerHTML = `
     <div class="repo-head">
       <span class="caret">▶</span>
       <span class="repo-name">${escape(repo.name)}</span>
-      <span class="repo-meta">${repo.ownerRepo ? escape(repo.ownerRepo) : 'no github remote'} · ${escape(repo.branch || '')}</span>
+      <span class="repo-meta">${repo.ownerRepo ? escape(repo.ownerRepo) : 'no github remote'} · <span class="repo-branch">${escape(repo.branch || '')}</span><span class="repo-issue"></span>${headBit}</span>
     </div>
     <div class="repo-body"><div class="muted" style="padding:8px 4px">Click to load issues…</div></div>`;
   const head = el.querySelector('.repo-head');
   const body = el.querySelector('.repo-body');
-  let loaded = false;
+  const startOpen = repo.github && Boolean(getRepoOpen()[repo.name]);
   head.addEventListener('click', async () => {
     el.classList.toggle('open');
-    if (el.classList.contains('open') && !loaded && repo.github) {
-      loaded = true;
-      await loadIssues(repo, body);
-    }
+    const open = el.classList.contains('open');
+    setRepoOpen(repo.name, open);
+    if (open && repo.github && !body.dataset.loaded) await loadIssues(repo, body);
   });
   if (!repo.github) {
     body.innerHTML = '<div class="muted" style="padding:8px 4px">No github.com remote — issues unavailable.</div>';
+  } else if (startOpen) {
+    // Restored from the last visit: expand immediately and let loadIssues
+    // paint from the L1 cache, so a reload lands on the same view with no
+    // spinner rather than resetting every repo to collapsed.
+    el.classList.add('open');
+    loadIssues(repo, body);
   }
   return el;
 }
 
+// Every mounted repo body, so the shared tickers below can repaint sync pills
+// and top the caches up without each repo owning its own timers.
+const mountedRepos = new Map();
+
 async function loadIssues(repo, body, force = false) {
-  body.innerHTML = '<div class="muted" style="padding:8px 4px">Loading issues…</div>';
+  body.dataset.loaded = '1';
+  mountedRepos.set(repo.name, { repo, body });
+
+  const cached = force ? null : readIssueCache(repo.name);
+  if (cached) {
+    renderIssueList(repo, body, cached.payload, cached.localAt);
+    // GitHub metadata is fresh enough to reuse — but the action statuses that
+    // came along with it are live server state this browser cannot have seen
+    // change (a Create PR started on another machine, say). Paint from cache
+    // for speed, then patch the live half in. See issue #52.
+    if (Date.now() - cached.localAt < L1_TTL_MS) return void patchStatuses(repo, body);
+  } else {
+    body.innerHTML = '<div class="muted" style="padding:8px 4px">Loading issues…</div>';
+  }
+  await fetchIssues(repo, body, { force, silent: Boolean(cached) });
+}
+
+/**
+ * Re-read just the live half of an already-rendered (cache-backed) issue list
+ * and re-render if anything actually moved. Cheap: `/statuses` reads state.json
+ * and the job table, never `gh`.
+ */
+async function patchStatuses(repo, body) {
+  const cached = readIssueCache(repo.name);
+  if (!cached) return;
+  const numbers = cached.payload.issues.map((i) => i.number);
+  if (!numbers.length) return;
+  let data;
+  try {
+    data = await fetch(`/api/repos/${enc(repo.name)}/statuses?n=${numbers.join(',')}`)
+      .then((x) => x.json());
+  } catch { return; }
+  if (!data || data.error || !data.statuses) return;
+  if (!body.isConnected) return;
+
+  const merged = {
+    ...cached.payload,
+    issues: cached.payload.issues.map((i) =>
+      (data.statuses[i.number] ? { ...i, status: data.statuses[i.number] } : i)),
+    activeWorkIssues: data.activeWorkIssues || [],
+  };
+  const same =
+    JSON.stringify(merged.issues.map((i) => i.status)) ===
+      JSON.stringify(cached.payload.issues.map((i) => i.status)) &&
+    (merged.activeWorkIssues[0] ?? null) ===
+      ((cached.payload.activeWorkIssues || [])[0] ?? null);
+  if (same) return; // nothing moved — leave the DOM (and any live SSE panel) alone
+
+  // A re-render tears down the DOM, so never do it under a log panel a live
+  // SSE stream is writing into. Leave the cache stale too: it is the only
+  // record that this change still needs applying, so the next pass (the 60s
+  // sweep, or the next visit) retries instead of silently swallowing it.
+  if (body.querySelector('.worklog.show, .prlog.show, .mergelog.show')) return;
+
+  // Same localAt — only the live half was re-read, the GitHub half has not got
+  // any younger, and renewing the TTL here would keep the issue list from ever
+  // refreshing for someone who visits often enough.
+  writeIssueCache(repo.name, merged, cached.localAt);
+  renderIssueList(repo, body, merged, cached.localAt);
+}
+
+/**
+ * Ask the server for this repo's issues. Without `force` this is a cheap L2
+ * read (the server answers from memory/disk unless its own copy has aged out),
+ * which is why the background ticker can afford to call it on a timer.
+ * `silent` keeps whatever is already on screen if the request fails.
+ */
+async function fetchIssues(repo, body, { force = false, silent = false } = {}) {
+  const pill = body.querySelector('.syncpill');
+  if (pill) pill.classList.add('syncing');
   let data;
   try {
     data = await fetch(`/api/repos/${enc(repo.name)}/issues${force ? '?refresh=1' : ''}`)
       .then((x) => x.json());
   } catch (e) {
-    body.innerHTML = `<div class="err-inline">Failed to load: ${escape(e.message)}</div>`;
+    if (pill) pill.classList.remove('syncing');
+    if (!silent) body.innerHTML = `<div class="err-inline">Failed to load: ${escape(e.message)}</div>`;
     return;
   }
   if (data.error) {
-    body.innerHTML = `<div class="err-inline">${escape(data.error)}</div>`;
+    if (pill) pill.classList.remove('syncing');
+    if (!silent) body.innerHTML = `<div class="err-inline">${escape(data.error)}</div>`;
     return;
   }
+  const entry = writeIssueCache(repo.name, data);
+  renderIssueList(repo, body, data, entry.localAt);
+}
+
+function renderIssueList(repo, body, data, localAt) {
   const toolbar = document.createElement('div');
   toolbar.className = 'toolbar';
-  const when = data.at ? new Date(data.at).toLocaleTimeString() : '';
-  toolbar.innerHTML = `<span class="muted">${data.issues.length} open · ${data.cached ? 'cached' : 'fresh'} ${when}</span><span class="spacer"></span>`;
+
+  const count = document.createElement('span');
+  count.className = 'muted';
+  count.textContent = `${data.issues.length} open`;
+  toolbar.appendChild(count);
+  toolbar.appendChild(makeSyncPill(data, localAt));
+
+  const spacer = document.createElement('span');
+  spacer.className = 'spacer';
+  toolbar.appendChild(spacer);
+
   const preIssuesBtn = document.createElement('button');
   preIssuesBtn.className = 'ghost sm';
   preIssuesBtn.textContent = '📝 PreIssues';
@@ -1064,9 +1713,12 @@ async function loadIssues(repo, body, force = false) {
   });
   toolbar.appendChild(preIssuesBtn);
 
+  // The one control that punches through all three tiers: forces a live `gh`
+  // call, rewrites the server's cache, and replaces this browser's copy.
   const refresh = document.createElement('button');
   refresh.className = 'ghost sm';
   refresh.textContent = '↻ Refresh';
+  refresh.title = 'Force a live GitHub read and update both caches';
   refresh.addEventListener('click', () => loadIssues(repo, body, true));
   toolbar.appendChild(refresh);
 
@@ -1080,7 +1732,109 @@ async function loadIssues(repo, body, force = false) {
 
   for (const issue of data.issues) body.appendChild(renderIssue(repo, issue, repoCtx));
   repoCtx.update();
+  mountedRepos.set(repo.name, { repo, body, repoCtx });
+  paintRepoIssueLink(repo, data);
 }
+
+/**
+ * Name the issue the checked-out branch belongs to, right beside the branch in
+ * the repo header — so "which ticket is this working tree on?" is answerable
+ * without opening anything. Resolved purely from data already on screen: each
+ * issue's PRs now carry `headRefName`, so the branch matches at most one.
+ */
+function paintRepoIssueLink(repo, data) {
+  const el = document.querySelector(`.repo[data-repo="${cssEsc(repo.name)}"] .repo-issue`);
+  if (!el) return;
+  el.textContent = '';
+  el.removeAttribute('title');
+  if (!repo.branch) return;
+  let match = null;
+  for (const issue of data.issues || []) {
+    const prs = (issue.status && issue.status.prs) || [];
+    const pr = prs.find((p) => p.headRefName && p.headRefName === repo.branch);
+    if (pr) { match = { issue, pr }; break; }
+  }
+  if (!match) return;
+  const a = document.createElement('a');
+  a.className = 'repo-issue-link';
+  a.href = `#/pr/${enc(repo.name)}/${match.issue.number}/${match.pr.prNumber}`;
+  a.textContent = `#${match.issue.number} ${match.issue.title}`;
+  a.title = `This branch is PR #${match.pr.prNumber} for issue #${match.issue.number}: ${match.issue.title}`;
+  el.appendChild(a);
+}
+
+// Escape a value for use inside a CSS attribute selector.
+function cssEsc(s) {
+  return window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/["\\]/g, '\\$&');
+}
+
+// Two-segment freshness readout: when the server last talked to GitHub, and
+// when this browser last talked to the server — plus a countdown to the next
+// automatic top-up. Timestamps ride on the element so one shared ticker can
+// repaint every pill on the page.
+function makeSyncPill(data, localAt) {
+  const pill = document.createElement('span');
+  pill.className = 'syncpill';
+  pill.dataset.serverAt = data.serverAt ?? data.at ?? '';
+  pill.dataset.localAt = String(localAt);
+  pill.dataset.nextSyncAt = data.nextSyncAt ?? '';
+  pill.innerHTML =
+    '<span class="syncseg sync-server"><span class="v"></span></span>' +
+    '<span class="syncseg sync-local"><span class="syncsep">·</span> <span class="v"></span></span>' +
+    '<span class="syncseg sync-next"><span class="syncsep">·</span> <span class="v"></span></span>';
+  paintSyncPill(pill);
+  return pill;
+}
+
+function paintSyncPill(pill) {
+  const now = Date.now();
+  const serverAt = Number(pill.dataset.serverAt) || null;
+  const localAt = Number(pill.dataset.localAt) || null;
+  // The browser's copy can never be fresher than the server data it came from,
+  // so the pill's colour follows the older of the two.
+  const oldest = Math.min(serverAt ?? now, localAt ?? now);
+  const age = now - oldest;
+  pill.classList.toggle('fresh', age < L1_TTL_MS);
+  pill.classList.toggle('aging', age >= L1_TTL_MS && age < 60 * 60 * 1000);
+  pill.classList.toggle('stale', age >= 60 * 60 * 1000);
+  pill.querySelector('.sync-server .v').textContent = `☁ ${fmtAgo(serverAt ? now - serverAt : null)}`;
+  pill.querySelector('.sync-local .v').textContent = `💾 ${fmtAgo(localAt ? now - localAt : null)}`;
+  // Whichever comes first: this browser topping up its own copy, or the
+  // server's hourly pass refilling from GitHub.
+  const nextLocal = localAt ? localAt + L1_TTL_MS : null;
+  const nextServer = Number(pill.dataset.nextSyncAt) || null;
+  const next = Math.min(nextLocal ?? Infinity, nextServer ?? Infinity);
+  pill.querySelector('.sync-next .v').textContent = `↻ ${fmtIn(Number.isFinite(next) ? next - now : null)}`;
+  const abs = (t) => (t ? new Date(t).toLocaleTimeString() : 'never');
+  pill.title =
+    `GitHub read by server: ${abs(serverAt)}\n` +
+    `Copied to this browser: ${abs(localAt)}\n` +
+    `Next automatic sync: ${abs(Number.isFinite(next) ? next : null)}\n` +
+    'Refresh forces a live read and updates both caches.';
+}
+
+// Repaint every pill twice a minute so the relative times and the countdown
+// keep moving without re-rendering any issue rows.
+setInterval(() => {
+  document.querySelectorAll('.syncpill').forEach(paintSyncPill);
+}, 30000);
+
+// Top the L1 cache up in the background once it ages past the TTL. Skipped
+// while anything in that repo is running: re-rendering the list would tear
+// down the DOM a live SSE stream is writing into.
+setInterval(() => {
+  if (document.hidden) return;
+  for (const [name, m] of mountedRepos) {
+    if (!m.body.isConnected || !m.body.closest('.repo.open')) continue;
+    if (m.repoCtx && m.repoCtx.activeWorkIssue != null) continue;
+    const cached = readIssueCache(name);
+    // Still fresh: no need to re-read GitHub, but a job may well have started
+    // from another machine since the last paint — that half is always worth
+    // re-checking, and costs no `gh` call (issue #52).
+    if (cached && Date.now() - cached.localAt < L1_TTL_MS) { patchStatuses(m.repo, m.body); continue; }
+    fetchIssues(m.repo, m.body, { silent: true });
+  }
+}, 60000);
 
 // Shared per-repo lock context: only one working-tree action (Create PR,
 // Deploy, or Chat) may be active per repo at a time; every other issue/PR in
@@ -1110,36 +1864,25 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     .map((l) => `<span class="label">${escape(l)}</span>`)
     .join('');
   el.innerHTML = `
-    <div class="issue-top">
-      <div class="issue-toprow">
-        ${opts.pinned ? `<span class="repo-badge">${escape(repo.name)}</span>` : ''}
-        <span class="issue-num">#${issue.number}</span>
-        <span class="spacer"></span>
+    <div class="issue-row">
+      ${opts.pinned ? `<span class="repo-badge">${escape(repo.name)}</span>` : ''}
+      <span class="issue-num">#${issue.number}</span>
+      <span class="issue-title" title="${escape(issue.title)}">${escape(issue.title)}</span>
+      <span class="labels">${labels}</span>
+      <span class="issue-icons">
         <button class="pinbtn" title="Pin to top">📌</button>
-        <a class="ghlink" target="_blank" rel="noopener">↗ GitHub</a>
-        <button class="hidebtn" title="Hide this issue from cloud-copilot (local only — does not touch GitHub)" aria-label="Hide this issue from the list">🗑</button>
-      </div>
-      <div class="issue-title">${escape(issue.title)}
-        <div class="labels">${labels}</div>
-      </div>
+        <a class="ghlink" target="_blank" rel="noopener" title="Open on GitHub">↗</a>
+      </span>
     </div>
-    <div class="actions"></div>
     <div class="worklog panel"></div>
     <div class="blocked-note">⏸ Waiting — another PR creation is running in this repo…</div>
     <div class="prlist"></div>`;
 
-  const actions = el.querySelector('.actions');
+  const icons = el.querySelector('.issue-icons');
   const prlist = el.querySelector('.prlist');
   const worklog = el.querySelector('.worklog');
   const ghLink = el.querySelector('.ghlink');
-  const hideBtn = el.querySelector('.hidebtn');
   ghLink.href = issue.url;
-  hideBtn.addEventListener('click', () =>
-    onHide(
-      `Hide issue #${issue.number} from cloud-copilot? This only hides it locally — it will NOT close ` +
-        `or delete the issue on GitHub. Any running work/deploy jobs for it will be cancelled first.`,
-    ),
-  );
 
   const pinBtn = el.querySelector('.pinbtn');
   const paintPin = () => pinBtn.classList.toggle('active', isPinned(repo.name, issue.number));
@@ -1155,13 +1898,22 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   if (!st.prs) st.prs = [];
   if (!st.work) st.work = { status: 'idle' };
 
-  // --- Create PR button + its log toggle -----------------------------------
+  // Re-entrancy guard for paintWork → renderPrs → paintWork. Declared up here
+  // because the first renderPrs() runs during setup below, before the point
+  // where paintWork itself is defined.
+  let repaintingPrs = false;
+
+  // --- Create PR: the first segment of the "no PR yet" workflow line --------
+  // These three live for the lifetime of the issue card and get *moved* into
+  // that line on every renderPrs(), so paintWork/setBlocked can keep holding
+  // direct references across re-renders.
   const workBtn = document.createElement('button');
+  workBtn.className = 'chev chev-col-pr chev-idle';
   workBtn.addEventListener('click', onWork);
 
   const workLogBtn = document.createElement('button');
   workLogBtn.className = 'iconbtn';
-  workLogBtn.textContent = '▤ log';
+  workLogBtn.textContent = '▤';
   workLogBtn.title = 'Show PR-creation logs';
   workLogBtn.hidden = true;
   workLogBtn.addEventListener('click', async () => {
@@ -1174,14 +1926,15 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
 
   const workAbortBtn = document.createElement('button');
   workAbortBtn.className = 'iconbtn abortbtn';
-  workAbortBtn.textContent = '⨯ Abort';
+  workAbortBtn.textContent = '⨯';
   workAbortBtn.title = 'Abort PR creation';
   workAbortBtn.hidden = true;
   workAbortBtn.addEventListener('click', onWorkAbort);
 
+  // --- issue-level icon cluster (right end of the header line) --------------
   const refreshPrsBtn = document.createElement('button');
-  refreshPrsBtn.className = 'ghost sm';
-  refreshPrsBtn.textContent = '↻ PRs';
+  refreshPrsBtn.className = 'pinbtn';
+  refreshPrsBtn.textContent = '↻';
   refreshPrsBtn.title = 'Refresh PR list from GitHub';
   refreshPrsBtn.addEventListener('click', async () => {
     refreshPrsBtn.disabled = true;
@@ -1191,17 +1944,31 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     } catch { /* ignore */ } finally { refreshPrsBtn.disabled = false; }
   });
 
-  actions.append(workBtn, workAbortBtn, workLogBtn, refreshPrsBtn);
+  // Two distinct trash actions, side by side: the plain 🗑 only hides the issue
+  // locally, while ☠ really deletes it on github.com (gated behind typing the
+  // issue number in onDelete).
+  const hideBtn = document.createElement('button');
+  hideBtn.className = 'hidebtn';
+  hideBtn.textContent = '🗑';
+  hideBtn.title = 'Hide this issue from cloud-copilot (does not touch GitHub)';
+  hideBtn.setAttribute('aria-label', 'Hide this issue from the list');
+  hideBtn.addEventListener('click', () =>
+    onHide(
+      `Hide issue #${issue.number} from cloud-copilot? This only hides it locally — it will NOT close ` +
+        `or delete the issue on GitHub. Any running work/deploy jobs for it will be cancelled first.`,
+    ),
+  );
 
   const deleteBtn = document.createElement('button');
-  deleteBtn.className = 'iconbtn abortbtn smallbtn';
-  deleteBtn.textContent = '🗑 Delete issue';
+  deleteBtn.className = 'hidebtn';
+  deleteBtn.textContent = '☠';
   deleteBtn.title = 'PERMANENTLY delete this issue on GitHub — cannot be undone';
+  deleteBtn.setAttribute('aria-label', 'Permanently delete this issue on GitHub');
   deleteBtn.addEventListener('click', onDelete);
-  actions.append(deleteBtn);
 
-  paintWork(st.work.status);
-  renderPrs();
+  icons.append(refreshPrsBtn, hideBtn, deleteBtn);
+
+  renderPrs(); // also paints the Create PR segment, which now lives inside it
 
   // Register with the repo-level lock so we can be greyed out / re-enabled.
   repoCtx.issues.push({ issueNumber: issue.number, setBlocked });
@@ -1226,18 +1993,89 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     el.classList.toggle('blocked', blocked);
     workBtn.disabled = blocked;
     refreshPrsBtn.disabled = blocked;
+    // The green "PR created" segments double as "create another PR" triggers.
+    prlist.querySelectorAll('.pritem[data-pr]:not([data-pr="new"]) .chev-col-pr')
+      .forEach((b) => { b.disabled = blocked; });
   }
 
   // --- Create PR visuals: success/fail shown ON THE ISSUE, not the button ---
   function paintWork(status) {
-    const visual = status === 'working' ? 'working' : 'idle'; // button stays "Create PR"
-    paintBtn(workBtn, 'work', visual, st.work);
+    // Whether the "—" line belongs on screen depends on this status, so a
+    // transition into/out of working|failed|aborted has to rebuild the list.
+    // The guard stops the renderPrs → paintWork → renderPrs cycle.
+    const rowPresent = Boolean(prlist.querySelector('.pritem[data-pr="new"]'));
+    if (!repaintingPrs && rowPresent !== showCreateRow()) {
+      repaintingPrs = true;
+      try { renderPrs(); } finally { repaintingPrs = false; }
+      return;
+    }
+    // The Create PR segment reports "working" and failures, but falls back to
+    // plain "Create PR" on success — by then the outcome lives on the PR row
+    // below, and this line is ready to start a second PR.
+    const visual = status === 'success' ? 'idle' : status;
+    paintChev(workBtn, 'chev-col-pr', 'work', visual, st.work);
     el.classList.toggle('ok', status === 'success');
     el.classList.toggle('fail', status === 'failed' || status === 'aborted');
     const hasLog = status === 'working' || status === 'success' || status === 'failed' || status === 'aborted' || st.work.hasConversation;
     workLogBtn.hidden = !hasLog;
     workAbortBtn.hidden = status !== 'working';
+    setToolsOpen('new', status === 'working');
     updateAllPrWorkTimings();
+  }
+
+  // Force the collapsed tools line open while a stage runs (Abort + live
+  // timing need to be reachable), and leave it alone otherwise so a manually
+  // opened row doesn't snap shut under the user.
+  function setToolsOpen(prNumber, running) {
+    const item = prlist.querySelector(`.pritem[data-pr="${prNumber}"]`);
+    if (!item) return;
+    if (running) item.classList.add('tools-open');
+    updateMoreBtn(item);
+  }
+
+  // Branch + tip commit under a PR's workflow line: what code this row is
+  // actually about, and a link straight to that commit on GitHub so you can
+  // see what a given deploy shipped.
+  function makeCommitLine(pr) {
+    const line = document.createElement('div');
+    line.className = 'wfcommit';
+    const c = pr.headCommit;
+    if (!pr.headRefName && !c) { line.hidden = true; return line; }
+
+    if (pr.headRefName) {
+      const branch = document.createElement('span');
+      branch.className = 'wfbranch';
+      branch.textContent = pr.headRefName;
+      branch.title = `Branch ${pr.headRefName}`;
+      line.appendChild(branch);
+    }
+    if (!c) return line;
+
+    const when = c.committedDate ? Date.now() - new Date(c.committedDate).getTime() : null;
+    const link = document.createElement('a');
+    link.className = 'wfcommitlink';
+    link.href = c.url || '#';
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.title = `${c.sha || ''}\n${c.committedDate ? new Date(c.committedDate).toLocaleString() : ''}\n${c.headline || ''}`;
+    link.innerHTML =
+      `<span class="wfsha">${escape(c.abbrev || '')}</span>` +
+      (when != null ? `<span class="wfwhen">${escape(fmtAgo(when))}</span>` : '') +
+      `<span class="wfheadline">${escape(c.headline || '')}</span>`;
+    line.appendChild(link);
+    return line;
+  }
+
+  // A row that has never run anything has nothing behind "⋯" — hide the
+  // toggle rather than letting it open an empty line.
+  function updateMoreBtn(item) {
+    const more = item.querySelector('.wfmore');
+    if (!more) return;
+    const tools = item.querySelector('.chevtools');
+    const hasButton = tools && [...tools.querySelectorAll('button')].some((b) => !b.hidden);
+    const hasTiming = tools && [...tools.querySelectorAll('.timing')].some((t) => t.textContent.trim());
+    more.hidden = !hasButton && !hasTiming;
+    if (more.hidden) item.classList.remove('tools-open');
   }
 
   // --- PR rows: 3-column pipeline (Create PR | Deploy | Merge), each with its
@@ -1248,13 +2086,80 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   function chevEl(n, col) { return prlist.querySelector(`.pritem[data-pr="${n}"] .chev-col-${col}`); }
   function toolEl(n, col) { return prlist.querySelector(`.pritem[data-pr="${n}"] .chevtool-${col}`); }
 
+  // The "no PR yet" line is only worth a row while it is the only way to act
+  // on the issue. Once a PR exists you start another one from that PR's green
+  // "PR created" segment instead, which saves a row per issue. It comes back
+  // whenever a Create PR run is live or ended badly, so progress and failures
+  // stay reachable.
+  function showCreateRow() {
+    const s = st.work.status;
+    return st.prs.length === 0 || s === 'working' || s === 'failed' || s === 'aborted';
+  }
+
   function renderPrs() {
     prlist.innerHTML = '';
-    if (!st.prs.length) {
-      prlist.innerHTML = '<div class="prlist-empty">No PRs yet — use Create PR above.</div>';
-      return;
-    }
+    if (showCreateRow()) prlist.appendChild(renderCreateRow());
     for (const pr of st.prs) prlist.appendChild(renderPrRow(pr));
+    paintWork(st.work.status);
+  }
+
+  // The Create PR line: same three-segment workflow bar as a real PR row, but
+  // with an empty PR number and Deploy/Merge shown as inert placeholders —
+  // there is nothing to deploy or merge until the PR exists.
+  function renderCreateRow() {
+    const item = document.createElement('div');
+    item.className = 'pritem';
+    item.dataset.pr = 'new';
+
+    const row = document.createElement('div');
+    row.className = 'wfrow';
+
+    const num = document.createElement('span');
+    num.className = 'wfnum empty';
+    num.textContent = '—';
+    num.title = 'No PR yet';
+    // Invisible stand-in for a PR row's ↗, so both kinds of line start their
+    // chevron bar at exactly the same x.
+    const ghSlot = document.createElement('span');
+    ghSlot.className = 'wfgh';
+    ghSlot.style.visibility = 'hidden';
+    ghSlot.textContent = '↗';
+    const lead = document.createElement('span');
+    lead.className = 'wflead';
+    lead.append(num, ghSlot);
+
+    const chevbar = document.createElement('div');
+    chevbar.className = 'chevbar';
+    const deployGhost = document.createElement('button');
+    deployGhost.className = 'chev chev-col-deploy chev-locked';
+    deployGhost.textContent = 'Deploy';
+    deployGhost.disabled = true;
+    const mergeGhost = document.createElement('button');
+    mergeGhost.className = 'chev chev-col-merge chev-locked';
+    mergeGhost.textContent = 'Merge';
+    mergeGhost.disabled = true;
+    chevbar.append(workBtn, deployGhost, mergeGhost);
+
+    const more = document.createElement('button');
+    more.className = 'wfmore';
+    more.textContent = '⋯';
+    more.title = 'Show PR-creation log / abort';
+    more.addEventListener('click', () => item.classList.toggle('tools-open'));
+
+    row.append(lead, chevbar, more);
+
+    const tools = document.createElement('div');
+    tools.className = 'chevtools';
+    const prTool = document.createElement('span');
+    prTool.className = 'chevtool chevtool-pr';
+    const timing = document.createElement('span');
+    timing.className = 'timing';
+    if (st.work.durationMs != null) timing.textContent = `ran ${fmtDur(st.work.durationMs)}`;
+    prTool.append(workLogBtn, workAbortBtn, timing);
+    tools.append(prTool);
+
+    item.append(row, tools);
+    return item;
   }
 
   // One connected Create PR → Deploy → Merge chevron/arrow step bar per PR,
@@ -1265,20 +2170,13 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     item.className = 'pritem';
     item.dataset.pr = pr.prNumber;
 
-    const headRow = document.createElement('div');
-    headRow.className = 'prheadrow';
+    const row = document.createElement('div');
+    row.className = 'wfrow';
     const link = document.createElement('a');
-    link.className = 'prnum';
+    link.className = 'wfnum';
     link.href = `#/pr/${enc(repo.name)}/${issue.number}/${pr.prNumber}`;
     link.title = 'Open PR detail page';
-    link.textContent = `PR #${pr.prNumber}`;
-    const ghIcon = document.createElement('a');
-    ghIcon.className = 'ghlink';
-    ghIcon.href = pr.prUrl || '#';
-    ghIcon.target = '_blank'; ghIcon.rel = 'noopener';
-    ghIcon.textContent = '↗';
-    ghIcon.title = 'Open on GitHub';
-    headRow.append(link, ghIcon);
+    link.textContent = `#${pr.prNumber}`;
 
     const prlog = document.createElement('div');
     prlog.className = 'prlog panel';
@@ -1288,11 +2186,19 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     const chevbar = document.createElement('div');
     chevbar.className = 'chevbar';
 
-    // --- Segment 1: Create PR (read-only reflection of the issue-level work
-    // status — the actual trigger is the Create PR button above) -----------
+    // An issue has exactly ONE work record, but can have several PRs — most of
+    // them discovered on GitHub rather than created here. Only the PR that run
+    // actually produced may claim its log and duration; showing them on every
+    // row attributed e.g. a 45h aborted run to a PR that predated it.
+    const ownsWorkRun = st.work.prNumber != null && st.work.prNumber === pr.prNumber;
+    item.dataset.workOwner = ownsWorkRun ? '1' : '0';
+
+    // --- Segment 1: Create PR — done by definition on a row that exists.
+    // Clicking starts ANOTHER PR for this issue, which is how you get a second
+    // one now that the empty "—" line is gone. ------------------------------
     const prSeg = document.createElement('button');
-    prSeg.title = 'Toggle Create PR logs';
-    prSeg.addEventListener('click', () => worklog.classList.toggle('show'));
+    prSeg.title = 'Create another PR for this issue';
+    prSeg.addEventListener('click', onCreateAnother);
 
     // --- Segment 2: Deploy ---------------------------------------------------
     const deploySeg = document.createElement('button');
@@ -1313,11 +2219,11 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     const prLogBtn = document.createElement('button');
     prLogBtn.className = 'iconbtn prlog-toggle-shared';
     prLogBtn.textContent = '▤';
-    prLogBtn.title = 'Show PR-creation logs';
+    prLogBtn.title = 'Show the Create PR log that produced this PR';
     prLogBtn.addEventListener('click', () => worklog.classList.toggle('show'));
     const prTiming = document.createElement('span');
     prTiming.className = 'timing';
-    if (st.work.durationMs != null) prTiming.textContent = `ran ${fmtDur(st.work.durationMs)}`;
+    if (ownsWorkRun && st.work.durationMs != null) prTiming.textContent = `ran ${fmtDur(st.work.durationMs)}`;
     prTool.append(prLogBtn, prTiming);
 
     const deployTool = document.createElement('span');
@@ -1373,18 +2279,45 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     mergeTool.append(mergeLogBtn, mergeAbortBtn, mergeTiming);
 
     tools.append(prTool, deployTool, mergeTool);
-    item.append(headRow, chevbar, tools, prlog, mergelog);
+
+    // "⋯" reveals the tools line; a running stage force-opens it so Abort and
+    // the live log are one tap away without hunting for the toggle.
+    const more = document.createElement('button');
+    more.className = 'wfmore';
+    more.textContent = '⋯';
+    more.title = 'Show logs / abort / timing';
+    more.addEventListener('click', () => item.classList.toggle('tools-open'));
+
+    // GitHub link sits on the LEFT, packed against the PR number, so every
+    // workflow bar starts at the same x regardless of which icons a row has.
+    const ghIcon = document.createElement('a');
+    ghIcon.className = 'wfgh';
+    ghIcon.href = pr.prUrl || '#';
+    ghIcon.target = '_blank'; ghIcon.rel = 'noopener';
+    ghIcon.textContent = '↗';
+    ghIcon.title = 'Open PR on GitHub';
+
+    const lead = document.createElement('span');
+    lead.className = 'wflead';
+    lead.append(link, ghIcon);
+
+    row.append(lead, chevbar, more);
+    item.append(row, makeCommitLine(pr), tools, prlog, mergelog);
 
     // Initial paint. The "Create PR" cell always reads success: this row only
     // exists because a PR was found, so its own creation is a done deal —
     // regardless of the issue's shared work.status, which may currently be
     // "working" for an unrelated, still-running Create PR run (or reflect an
     // older/different PR entirely, e.g. one merely referencing this issue).
-    paintChev(prSeg, 'chev-col-pr', 'work', 'success', st.work);
+    paintChev(prSeg, 'chev-col-pr', 'work', 'success', ownsWorkRun ? st.work : null);
     paintChev(deploySeg, 'chev-col-deploy', 'deploy', (pr.deploy && pr.deploy.status) || 'idle', pr.deploy);
     paintChevMerge(mergeSeg, pr);
+    // paintChev overwrites the title with timing; restore the action hint.
+    prSeg.title = ownsWorkRun && st.work.durationMs != null
+      ? `Created by a ${fmtDur(st.work.durationMs)} Create PR run — click to start another PR`
+      : 'Create another PR for this issue';
 
-    const hasWorkLog = st.work.status === 'working' || st.work.status === 'success' || st.work.status === 'failed' || st.work.status === 'aborted' || st.work.hasConversation;
+    const hasWorkLog = ownsWorkRun && (st.work.status === 'success' || st.work.status === 'failed' || st.work.status === 'aborted' || st.work.hasConversation);
     prLogBtn.hidden = !hasWorkLog;
     const s0 = (pr.deploy && pr.deploy.status) || 'idle';
     const showDeployLog0 = s0 === 'deploying' || (pr.deploy && pr.deploy.hasConversation) || s0 === 'success' || s0 === 'failed' || s0 === 'aborted';
@@ -1394,6 +2327,8 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     const showMergeLog0 = m0 === 'merging' || (pr.merge && pr.merge.hasConversation) || m0 === 'success' || m0 === 'failed' || m0 === 'aborted';
     mergeLogBtn.hidden = !showMergeLog0;
     mergeAbortBtn.hidden = m0 !== 'merging';
+    if (s0 === 'deploying' || m0 === 'merging') item.classList.add('tools-open');
+    updateMoreBtn(item);
 
     return item;
   }
@@ -1423,6 +2358,13 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       el.title = 'Deploy has not succeeded yet — click to force-merge anyway';
     } else {
       paintChev(el, 'chev-col-merge', 'merge', ms, pr.merge);
+      if (ms === 'success' && pr.merge && pr.merge.conflictResolved) {
+        el.textContent = 'Merged · conflict resolved';
+        el.title = pr.merge.recoveryMessage || el.title;
+      } else if (ms === 'success' && pr.merge && pr.merge.recoveryAttempted) {
+        el.textContent = 'Merged · recovered by Copilot';
+        el.title = pr.merge.recoveryMessage || el.title;
+      }
     }
   }
 
@@ -1439,6 +2381,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       const abort = tool.querySelector('.abortbtn'); if (abort) abort.hidden = s !== 'deploying';
     }
     if (pr.deploy && pr.deploy.durationMs != null) setPrTiming(prNumber, pr.deploy.durationMs);
+    setToolsOpen(prNumber, s === 'deploying');
     // Deploy's outcome changes whether Merge is locked — repaint it too.
     paintMerge(prNumber);
   }
@@ -1456,19 +2399,23 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       const abort = tool.querySelector('.abortbtn'); if (abort) abort.hidden = ms !== 'merging';
     }
     if (pr.merge && pr.merge.durationMs != null) setMergeTiming(prNumber, pr.merge.durationMs);
+    setToolsOpen(prNumber, ms === 'merging');
   }
+
 
   function setPrTiming(prNumber, durationMs) {
     const t = prlist.querySelector(`.pritem[data-pr="${prNumber}"] .chevtool-deploy .timing`);
     if (t && durationMs != null) t.textContent = `ran ${fmtDur(durationMs)}`;
   }
 
-  // Create PR's duration is shared across every PR row for this issue (one
-  // work record, not per-PR) — update all of them in one pass.
+  // The issue has one work record; only the rows that record actually produced
+  // (plus the live "new" line) may display its duration.
   function updateAllPrWorkTimings() {
     if (st.work.durationMs == null) return;
     const text = `ran ${fmtDur(st.work.durationMs)}`;
-    prlist.querySelectorAll('.chevtool-pr .timing').forEach((t) => { t.textContent = text; });
+    prlist
+      .querySelectorAll('.pritem[data-pr="new"] .chevtool-pr .timing, .pritem[data-work-owner="1"] .chevtool-pr .timing')
+      .forEach((t) => { t.textContent = text; });
   }
 
   function setMergeTiming(prNumber, durationMs) {
@@ -1476,23 +2423,13 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     if (t && durationMs != null) t.textContent = `ran ${fmtDur(durationMs)}`;
   }
 
-  function paintBtn(btn, action, s, timingObj) {
-    btn.className = `stbtn ${STATE_CLASS[s] || 'st-idle'}`;
-    let extra = '';
-    if (action === 'deploy' && timingObj && (timingObj.buildNumber || timingObj.version)) {
-      const bits = [timingObj.buildNumber ? `build ${timingObj.buildNumber}` : null, timingObj.version ? `v${timingObj.version}` : null].filter(Boolean);
-      if (bits.length) extra = ` <span class="muted">· ${bits.join(' · ')}</span>`;
-    }
-    btn.innerHTML = `<span class="dot"></span>${STATE_LABEL[action][s] || s}${extra}`;
-    const dur = timingObj && timingObj.durationMs;
-    btn.title = dur != null ? `ran ${fmtDur(dur)}` : '';
-  }
-
   function mergePrs(list) {
     st.prs = list.map((p) => {
       const ex = st.prs.find((x) => x.prNumber === p.prNumber);
       return {
         prNumber: p.prNumber, prUrl: p.prUrl, title: p.title, createdAt: p.createdAt,
+        headRefName: p.headRefName || (ex && ex.headRefName) || null,
+        headCommit: p.headCommit || (ex && ex.headCommit) || null,
         deploy: ex ? ex.deploy : (p.deploy || { status: 'idle' }),
         merge: ex ? ex.merge : (p.merge || { status: 'idle' }),
       };
@@ -1533,6 +2470,20 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     st.work.status = 'working';
     paintWork('working');
     await streamWork(false);
+  }
+
+  // Starting a SECOND PR from an existing PR's green segment. Behind a confirm
+  // because that segment otherwise reads as a status, not a button — an
+  // accidental click would kick off a real Copilot run.
+  async function onCreateAnother() {
+    if (st.work.status === 'working') return void worklog.classList.toggle('show');
+    if (repoCtx.activeWorkIssue != null && repoCtx.activeWorkIssue !== issue.number) return;
+    const n = st.prs.length;
+    if (!window.confirm(
+      `Create another PR for issue #${issue.number}?\n\n` +
+      `This issue already has ${n} PR${n === 1 ? '' : 's'}. A new Copilot run will start and open an additional PR.`,
+    )) return;
+    await onWork();
   }
 
   async function onWorkAbort() {
@@ -1758,6 +2709,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       });
       if (!resp.ok || !resp.body) { appendMerge(prNumber, `\n[error] HTTP ${resp.status}\n`, 'err'); return reconcileMerge(prNumber); }
       await pumpSSE(resp, {
+        onMeta: () => repoCtx.setActive(issue.number),
         onChunk: (t, s) => appendMerge(prNumber, t, s === 'stderr' ? 'stderr' : null),
         onError: (m) => appendMerge(prNumber, `\n[error] ${m}\n`, 'err'),
         onResult: (d) => { finalStatus = d.status; resultData = d; },
@@ -1777,9 +2729,18 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     if (finalStatus) {
       pr.merge.status = finalStatus;
       pr.merge.hasConversation = true;
+      if (resultData) {
+        pr.merge.recoveryAttempted = Boolean(resultData.recoveryAttempted);
+        pr.merge.conflictResolved = Boolean(resultData.conflictResolved);
+        pr.merge.recoveryMessage = resultData.recoveryMessage || null;
+      }
       paintMerge(prNumber);
       appendMerge(prNumber, `\n[merge #${prNumber}] finished: ${finalStatus}\n`, finalStatus === 'success' ? 'ok' : 'err');
+      if (resultData && resultData.recoveryMessage) {
+        appendMerge(prNumber, `[merge #${prNumber}] ${resultData.recoveryMessage}\n`, finalStatus === 'success' ? 'ok' : 'err');
+      }
       refreshMergeTiming(prNumber);
+      repoCtx.clearActive(issue.number);
     } else {
       return reconcileMerge(prNumber);
     }
@@ -1796,10 +2757,14 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         if (pr) pr.merge = { ...prRec.merge };
         paintMerge(prNumber);
         appendMerge(prNumber, `\n[merge #${prNumber}] finished: ${s}\n`, s === 'success' ? 'ok' : 'err');
+        repoCtx.clearActive(issue.number);
         if (window.CCNotify) CCNotify.jobFinished(notifyPr('merge', prNumber, { status: s, replayed: true }));
         return;
       }
-      if (rec.live && rec.live.merge && rec.live.merge[prNumber]) return streamMerge(prNumber, true);
+      if (rec.live && rec.live.merge && rec.live.merge[prNumber]) {
+        repoCtx.setActive(issue.number);
+        return streamMerge(prNumber, true);
+      }
       await sleep(3000);
     }
     appendMerge(prNumber, `\n[merge #${prNumber}] status check timed out — tap Merge again.\n`, 'stderr');
@@ -1834,7 +2799,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     worklog.classList.add('show');
     worklog.innerHTML = '<span class="stderr">loading transcript…</span>';
     const rec = await fetchRecord();
-    worklog.innerHTML = '';
+    CCChat.resetText(worklog);
     appendWork(rec.work.conversation || '(no transcript stored yet)', rec.work.conversation ? null : 'stderr');
   }
 
@@ -1842,9 +2807,10 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     const panelEl = deployPanel(prNumber);
     if (!panelEl) return;
     panelEl.classList.add('show');
+    CCChat.resetText(panelEl);
     panelEl.innerHTML = '<span class="stderr">loading transcript…</span>';
     const rec = await fetchRecord();
-    panelEl.innerHTML = '';
+    CCChat.resetText(panelEl);
     const prRec = (rec.prs || {})[prNumber];
     const conv = prRec && prRec.deploy && prRec.deploy.conversation;
     appendTo(panelEl, conv || '(no transcript stored yet)', conv ? null : 'stderr');
@@ -1854,20 +2820,22 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     const panelEl = mergePanel(prNumber);
     if (!panelEl) return;
     panelEl.classList.add('show');
+    CCChat.resetText(panelEl);
     panelEl.innerHTML = '<span class="stderr">loading transcript…</span>';
     const rec = await fetchRecord();
-    panelEl.innerHTML = '';
+    CCChat.resetText(panelEl);
     const prRec = (rec.prs || {})[prNumber];
     const conv = prRec && prRec.merge && prRec.merge.conversation;
     appendTo(panelEl, conv || '(no transcript stored yet)', conv ? null : 'stderr');
   }
 
+  // Pipeline logs are raw CLI output (interleaved stdout/stderr, progress
+  // spinners), not markdown — so they stay verbatim. They do share CCChat's
+  // sticky-bottom autoscroll and its node coalescing: consecutive chunks from
+  // the same stream extend one text node instead of adding a <span> each, which
+  // is what used to make a long Create-PR run janky on mobile.
   function appendTo(panelEl, text, cls) {
-    const span = document.createElement('span');
-    if (cls) span.className = cls;
-    span.textContent = text;
-    panelEl.appendChild(span);
-    panelEl.scrollTop = panelEl.scrollHeight;
+    CCChat.appendText(panelEl, text, cls);
   }
   function appendWork(text, cls) { appendTo(worklog, text, cls); }
   function appendDeploy(prNumber, text, cls) { const p = deployPanel(prNumber); if (p) appendTo(p, text, cls); }
@@ -2362,6 +3330,11 @@ function applyTab() {
 }
 function setTab(tab) {
   currentTab = tab;
+  // Leaving the Admin tab by hand must drop an #/admin… deep link, otherwise
+  // the router would immediately bounce back to it.
+  if (tab !== 'admin' && /^#\/admin(\/|$)/.test(location.hash)) {
+    history.replaceState(null, '', location.pathname + location.search);
+  }
   applyTab();
   if (tab === 'admin') initAdminTerminal();
   if (tab === 'testflight') loadTestflightBuilds();
@@ -2453,7 +3426,8 @@ function renderTfCard(b) {
     if (ms === 'success') {
       const pill = document.createElement('span');
       pill.className = `stbtn ${STATE_CLASS.success}`;
-      pill.innerHTML = `<span class="dot"></span>Merged${b.merge.forced ? ' (forced)' : ''}`;
+      const recovery = b.merge.conflictResolved ? ' · conflict resolved' : '';
+      pill.innerHTML = `<span class="dot"></span>Merged${b.merge.forced ? ' (forced)' : ''}${recovery}`;
       row.appendChild(pill);
     } else if (ms === 'merging') {
       const pill = document.createElement('span');
@@ -2537,6 +3511,14 @@ function parsePreIssueDetailHash() {
   return m ? { repo: m[1], id: m[2] } : null;
 }
 
+// Deep link into the Admin Terminal (#/admin, or #/admin/chat/<chatId>) — what
+// an "Admin chat" push notification points at, so tapping it lands on the very
+// conversation that just replied.
+function parseAdminHash() {
+  const m = decodeURIComponent(location.hash).match(/^#\/admin(?:\/chat\/([^/]+))?$/);
+  return m ? { chatId: m[1] || null } : null;
+}
+
 function hideAllHomeViews() {
   mainView.style.display = 'none';
   prDetailView.style.display = 'none';
@@ -2545,6 +3527,13 @@ function hideAllHomeViews() {
 }
 
 function route() {
+  const admin = parseAdminHash();
+  if (admin) {
+    if (currentTab !== 'admin') setTab('admin');
+    else initAdminTerminal();
+    if (admin.chatId && window.CCAdmin) window.CCAdmin.openChat(admin.chatId);
+    return;
+  }
   if (currentTab !== 'home') return;
   const parsed = parseHash();
   const preList = parsePreIssuesHash();
@@ -2664,6 +3653,9 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
     </div>`;
 
   const messagesEl = wrap.querySelector('.chat-messages');
+  // Sticky-bottom autoscroll + "jump to latest" pill, so reading back through a
+  // live turn isn't interrupted by every incoming token.
+  const chatSticky = CCChat.sticky(messagesEl, { pill: true });
   const inputEl = wrap.querySelector('.chat-input');
   const sendBtn = wrap.querySelector('.chat-send');
   const abortBtn = wrap.querySelector('.chat-abort');
@@ -2726,13 +3718,19 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
       if (m.role !== 'user' && m.model) metaEl.appendChild(modelBadge(m.model));
       const textEl = document.createElement('div');
       textEl.className = 'chat-text';
-      textEl.textContent = m.text;
+      // User turns are prompts, not markdown, so they stay verbatim. Assistant
+      // turns go through the shared renderer + the CLI footer chip strip.
+      if (m.role === 'user') textEl.textContent = m.text;
+      else {
+        const { body, footer } = renderAssistant(m.text || '');
+        CCChat.renderInto(textEl, body, { trailingHtml: footer });
+      }
       bubble.append(metaEl, textEl);
       if (m.images && m.images.length) bubble.insertAdjacentHTML('beforeend', renderMsgImages(m.images));
       messagesEl.appendChild(bubble);
     }
     messagesEl.appendChild(pendingEl);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    chatSticky.pin();
   }
   renderMessages();
 
@@ -2770,14 +3768,14 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
       if (item.images && item.images.length) bubble.insertAdjacentHTML('beforeend', renderMsgImages(item.images));
       pendingEl.appendChild(bubble);
     }
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    chatSticky.pin();
   }
 
-  // Append a live assistant bubble and return its text element. Streamed chunks
-  // are appended as text nodes (the Create-PR log approach) instead of
-  // re-rendering the whole message list per chunk — the latter left the
-  // in-flight reply out of `messages` entirely, so nothing showed until the
-  // turn finished (and it silently drops on mobile besides).
+  // Append a live assistant bubble and return a CCChat stream sink for it. The
+  // sink re-parses the accumulated buffer as markdown on a throttled cadence
+  // and patches only the blocks that changed, so the reply is readable *while*
+  // it streams instead of flipping from raw monospace to HTML at the end — and
+  // a long turn no longer costs one DOM node (and one reflow) per SSE chunk.
   function appendLiveAssistant(mode, model) {
     const empty = messagesEl.querySelector('.chat-empty');
     if (empty) empty.remove();
@@ -2791,8 +3789,8 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
     textEl.className = 'chat-text';
     bubble.append(metaEl, textEl);
     messagesEl.insertBefore(bubble, pendingEl);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-    return textEl;
+    chatSticky.pin();
+    return CCChat.createStream(textEl, { scrollEl: messagesEl });
   }
 
   // Non-blocking composer: the textarea stays editable while a turn streams so
@@ -2832,9 +3830,8 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
       messages.push(userMsg);
       renderMessages();
     }
-    // Live streaming bubble — append chunks incrementally so the reply shows in
-    // real time (mobile-safe), instead of only appearing once the turn ends.
-    const textEl = appendLiveAssistant(mode, model);
+    // Live streaming bubble — markdown is rendered incrementally as chunks land.
+    const stream = appendLiveAssistant(mode, model);
     let raw = '';
     let finalStatus = null;
     let usedModel = model;
@@ -2845,13 +3842,13 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
       });
       if (!resp.ok || !resp.body) {
         raw = `[error] ${await friendlyHttpError(resp)}`;
-        textEl.appendChild(document.createTextNode(raw));
+        stream.finish({ body: raw });
         messages.push({ role: 'assistant', text: raw, mode, model, at: new Date().toISOString() });
         return;
       }
       await pumpSSE(resp, {
-        onChunk: (t) => { raw += t; textEl.appendChild(document.createTextNode(t)); messagesEl.scrollTop = messagesEl.scrollHeight; },
-        onError: (m) => { const s = `\n[error] ${m}`; raw += s; textEl.appendChild(document.createTextNode(s)); },
+        onChunk: (t) => { raw += t; stream.push(t); },
+        onError: (m) => { const s = `\n[error] ${m}`; raw += s; stream.push(s); },
         onResult: (d) => { finalStatus = d.status; if (d.model) usedModel = d.model; },
         notify: {
           action: 'chat',
@@ -2864,8 +3861,10 @@ function renderChatPanel(repoName, issueNumber, prNumber, prRec, chatLive) {
       });
     } catch (e) {
       const s = `\n[connection dropped: ${e.message}]`;
-      raw += s; textEl.appendChild(document.createTextNode(s));
+      raw += s; stream.push(s);
     }
+    const { body: finalBody, footer } = renderAssistant(raw);
+    stream.finish({ body: finalBody, trailingHtml: footer, emptyHtml: '<p class="cc-noout">(no output)</p>' });
     messages.push({ role: 'assistant', text: raw, mode, model: usedModel, at: new Date().toISOString() });
 
     if (mode === 'plan' && finalStatus === 'success') {
@@ -3016,9 +4015,9 @@ async function renderPreIssuesList(repoName) {
           ? `<span class="label" style="background:#a70">⏳ working…</span>`
           : '';
       card.innerHTML = `
-        <div class="issue-top">
-          <div class="issue-toprow">
-            <span class="issue-title" style="flex:1">${escape(pre.text)}</span>
+        <div class="pre-top">
+          <div class="pre-headrow">
+            <span class="pre-text">${escape(pre.text)}</span>
             ${statusBadge}
           </div>
           <div class="muted" style="padding:2px 4px">${escape(when)}</div>
@@ -3149,6 +4148,7 @@ async function renderPreIssueDetail(repoName, id) {
   preIssueDetailView.appendChild(wrap);
 
   const messagesEl = chatWrap.querySelector('.chat-messages');
+  const chatSticky = CCChat.sticky(messagesEl, { pill: true });
   const inputEl = chatWrap.querySelector('.chat-input');
   const sendBtn = chatWrap.querySelector('.chat-send');
   const abortBtn = chatWrap.querySelector('.chat-abort');
@@ -3187,12 +4187,16 @@ async function renderPreIssueDetail(repoName, id) {
       if (m.role !== 'user' && m.model) metaEl.appendChild(modelBadge(m.model));
       const textEl = document.createElement('div');
       textEl.className = 'chat-text';
-      textEl.textContent = m.text;
+      if (m.role === 'user') textEl.textContent = m.text;
+      else {
+        const { body, footer } = renderAssistant(m.text || '');
+        CCChat.renderInto(textEl, body, { trailingHtml: footer });
+      }
       bubble.append(metaEl, textEl);
       messagesEl.appendChild(bubble);
     }
     messagesEl.appendChild(pendingEl);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    chatSticky.pin();
   }
   renderMessages();
 
@@ -3226,7 +4230,7 @@ async function renderPreIssueDetail(repoName, id) {
       bubble.append(metaEl, textEl);
       pendingEl.appendChild(bubble);
     }
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    chatSticky.pin();
   }
 
   function appendLiveAssistant(model) {
@@ -3242,8 +4246,8 @@ async function renderPreIssueDetail(repoName, id) {
     textEl.className = 'chat-text';
     bubble.append(metaEl, textEl);
     messagesEl.insertBefore(bubble, pendingEl);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-    return textEl;
+    chatSticky.pin();
+    return CCChat.createStream(textEl, { scrollEl: messagesEl });
   }
 
   // Non-blocking: the composer stays editable while a turn streams, and what
@@ -3271,7 +4275,7 @@ async function renderPreIssueDetail(repoName, id) {
       messages.push({ role: 'user', text, model, at: new Date().toISOString() });
       renderMessages();
     }
-    const textEl = appendLiveAssistant(model);
+    const stream = appendLiveAssistant(model);
     let raw = '';
     let finalDraft = null;
     let usedModel = model;
@@ -3282,13 +4286,13 @@ async function renderPreIssueDetail(repoName, id) {
       });
       if (!resp.ok || !resp.body) {
         raw = `[error] HTTP ${resp.status}`;
-        textEl.appendChild(document.createTextNode(raw));
+        stream.finish({ body: raw });
         messages.push({ role: 'assistant', text: raw, model, at: new Date().toISOString() });
         return;
       }
       await pumpSSE(resp, {
-        onChunk: (t) => { raw += t; textEl.appendChild(document.createTextNode(t)); messagesEl.scrollTop = messagesEl.scrollHeight; },
-        onError: (m) => { const s = `\n[error] ${m}`; raw += s; textEl.appendChild(document.createTextNode(s)); },
+        onChunk: (t) => { raw += t; stream.push(t); },
+        onError: (m) => { const s = `\n[error] ${m}`; raw += s; stream.push(s); },
         onResult: (d) => { finalDraft = d.draft || null; if (d.model) usedModel = d.model; },
         notify: {
           action: 'preissue-chat',
@@ -3299,8 +4303,10 @@ async function renderPreIssueDetail(repoName, id) {
       });
     } catch (e) {
       const s = `\n[connection dropped: ${e.message}]`;
-      raw += s; textEl.appendChild(document.createTextNode(s));
+      raw += s; stream.push(s);
     }
+    const { body: finalBody, footer } = renderAssistant(raw);
+    stream.finish({ body: finalBody, trailingHtml: footer, emptyHtml: '<p class="cc-noout">(no output)</p>' });
     messages.push({ role: 'assistant', text: raw, model: usedModel, at: new Date().toISOString() });
     if (finalDraft) {
       pre.draft = finalDraft;
@@ -3331,27 +4337,8 @@ async function renderPreIssueDetail(repoName, id) {
 }
 
 // ---- Admin terminal: free-form Copilot CLI chat rooted at REPOS_ROOT -------
-function mdToHtml(text) {
-  // Escape first, then apply a tiny, safe subset of markdown. Order matters:
-  // fenced code blocks are pulled out before inline formatting so their
-  // contents aren't reinterpreted.
-  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const blocks = [];
-  let s = text.replace(/```(?:[\w-]*)\n?([\s\S]*?)```/g, (_, code) => {
-    blocks.push(`<pre><code>${esc(code.replace(/\n$/, ''))}</code></pre>`);
-    return `\u0000${blocks.length - 1}\u0000`;
-  });
-  s = esc(s);
-  s = s.replace(/`([^`\n]+)`/g, (_, c) => `<code>${c}</code>`);
-  s = s.replace(/\*\*([^*\n]+)\*\*/g, (_, b) => `<strong>${b}</strong>`);
-  // paragraphs / line breaks
-  s = s
-    .split(/\n{2,}/)
-    .map((para) => `<p>${para.replace(/\n/g, '<br>')}</p>`)
-    .join('');
-  s = s.replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[Number(i)]);
-  return s;
-}
+// Markdown rendering itself lives in public/chat-render.js (marked + DOMPurify
+// + highlight.js, all vendored) and is shared with every chat surface.
 
 // The Copilot CLI appends a plain-text summary footer after each turn, e.g.
 //   Changes    +0 -0
@@ -3403,11 +4390,12 @@ function footerHtml(meta) {
   return chips.length ? `<div class="tmsg-meta">${chips.join('')}</div>` : '';
 }
 
-// Render an assistant turn: clean answer body + chip strip, footer stripped.
+// Split an assistant turn into the answer body (markdown, to be handed to
+// CCChat) and the pre-rendered chip strip, with the CLI footer stripped out.
 function renderAssistant(raw) {
   const { body, meta } = splitCopilotFooter(raw);
   const hasBody = body.trim().length > 0;
-  return { html: hasBody ? mdToHtml(body) : '', footer: footerHtml(meta), hasBody };
+  return { body: hasBody ? body : '', footer: footerHtml(meta), hasBody };
 }
 
 let adminInited = false;
@@ -3416,6 +4404,8 @@ function initAdminTerminal() {
   adminInited = true;
 
   const logEl = document.getElementById('termLog');
+  // Sticky-bottom autoscroll + "jump to latest" pill for the terminal log.
+  const termSticky = CCChat.sticky(logEl, { pill: true });
   const inputEl = document.getElementById('termInput');
   const sendBtn = document.getElementById('termSend');
   const abortBtn = document.getElementById('termAbort');
@@ -3458,7 +4448,7 @@ function initAdminTerminal() {
   // restart that died before Copilot assigned a session id. Always use
   // currentChatId (not sessionId) to fetch/delete/highlight a conversation.
   let currentChatId = null;
-  let activeTurn = null; // { turnId, asstBody, raw } while a turn streams/reconnects
+  let activeTurn = null; // { turnId, asstBody, stream } while a turn streams/reconnects
 
   const LS_ADMIN_TURN = 'cc.adminActiveTurn';
   const LS_ADMIN_REPO = 'cc.adminRepo';
@@ -3475,6 +4465,10 @@ function initAdminTerminal() {
     if (!activeTurn) return;
     const t = activeTurn;
     activeTurn = null;
+    // The bubble is about to be replaced by another transcript, so tear the
+    // renderer down rather than finishing it — otherwise its pending repaint
+    // keeps firing and the log stays in "a turn is live" mode.
+    if (t.stream) t.stream.dispose();
     localStorage.removeItem(LS_ADMIN_TURN);
     setSending(false);
     try { await fetch(`/api/admin/chat/${encodeURIComponent(t.turnId)}/cancel`, { method: 'POST' }); } catch { /* ignore */ }
@@ -3593,10 +4587,13 @@ function initAdminTerminal() {
       setSelectedRepo(chat.repo || '');
       logEl.innerHTML = '';
       (chat.messages || []).forEach((m) => {
-        const body = addMessage(m.role === 'user' ? 'user' : 'assistant', m.model);
-        if (m.role === 'user') body.textContent = m.text || '';
-        else { const { html, footer } = renderAssistant(m.text || ''); body.innerHTML = html + footer; }
-        if (m.images && m.images.length) body.insertAdjacentHTML('beforeend', renderMsgImages(m.images));
+        const bodyEl = addMessage(m.role === 'user' ? 'user' : 'assistant', m.model);
+        if (m.role === 'user') bodyEl.textContent = m.text || '';
+        else {
+          const { body, footer } = renderAssistant(m.text || '');
+          CCChat.renderInto(bodyEl, body, { trailingHtml: footer });
+        }
+        if (m.images && m.images.length) bodyEl.insertAdjacentHTML('beforeend', renderMsgImages(m.images));
       });
       if (!chat.messages || !chat.messages.length) {
         logEl.innerHTML = '<div class="term-empty">This conversation has no messages yet.</div>';
@@ -3646,7 +4643,7 @@ function initAdminTerminal() {
     wrap.append(roleEl, body);
     if (!pendingEl.isConnected) logEl.appendChild(pendingEl);
     logEl.insertBefore(wrap, pendingEl);
-    logEl.scrollTop = logEl.scrollHeight;
+    termSticky.pin();
     return body;
   }
 
@@ -3684,7 +4681,7 @@ function initAdminTerminal() {
       if (item.images && item.images.length) body.insertAdjacentHTML('beforeend', renderMsgImages(item.images));
       pendingEl.appendChild(wrapEl);
     }
-    logEl.scrollTop = logEl.scrollHeight;
+    termSticky.pin();
   }
 
   async function sendNow(id) {
@@ -3702,42 +4699,41 @@ function initAdminTerminal() {
     statusEl.textContent = sending ? 'Copilot is thinking…' : '';
   }
 
-  // Stream chunks in by appending text nodes (the Create-PR log approach),
-  // NOT by re-rendering the whole reply per chunk — repeated innerHTML rewrites
-  // during a streaming fetch read silently fail to repaint on mobile Safari.
-  // The tidy markdown + chip render happens once at the end in finishTurn.
-  function appendActiveChunk(t, streamName) {
-    if (!activeTurn || !activeTurn.streamEl) return;
-    activeTurn.raw += t;
-    const node = document.createElement('span');
-    if (streamName === 'stderr') node.className = 'dim';
-    node.textContent = t;
-    activeTurn.streamEl.appendChild(node);
-    logEl.scrollTop = logEl.scrollHeight;
+  // Feed a chunk into the turn's CCChat stream sink, which re-parses the whole
+  // accumulated buffer as markdown on a throttled cadence and patches only the
+  // block that changed. stdout and stderr both land in the same buffer — the
+  // final render never distinguished them either, and interleaving styled spans
+  // with markdown blocks isn't meaningful.
+  function appendActiveChunk(t) {
+    if (!activeTurn || !activeTurn.stream) return;
+    activeTurn.stream.push(t);
   }
 
   // On a job re-subscribe the server replays the whole transcript as one chunk
   // preceded by meta{replay:true}; clear both the buffer and the DOM so it
   // isn't doubled.
   function resetActiveStream() {
-    if (!activeTurn || !activeTurn.streamEl) return;
-    activeTurn.raw = '';
-    activeTurn.streamEl.textContent = '';
+    if (!activeTurn || !activeTurn.stream) return;
+    activeTurn.stream.reset();
   }
 
   function finishTurn(status, finalSession, note) {
     if (!activeTurn) return;
-    const { asstBody, raw } = activeTurn;
-    const { html: bodyHtml, footer, hasBody } = renderAssistant(raw);
-    let html = hasBody ? bodyHtml : '';
-    if (status === 'aborted') html += '<p style="color:#eab308">[aborted]</p>';
-    if (note) html += `<p class="err">[${escape(note)}]</p>`;
-    asstBody.innerHTML = (html || '<p style="color:#9aa0aa">(no output)</p>') + footer;
+    const { stream } = activeTurn;
+    const { body, footer, hasBody } = renderAssistant(stream.getRaw());
+    let trailing = footer;
+    if (status === 'aborted') trailing = '<p class="cc-aborted">[aborted]</p>' + trailing;
+    if (note) trailing = `<p class="err">[${escape(note)}]</p>` + trailing;
+    stream.finish({
+      body: hasBody ? body : '',
+      trailingHtml: trailing,
+      emptyHtml: '<p class="cc-noout">(no output)</p>',
+    });
     if (finalSession) { sessionId = finalSession; currentChatId = finalSession; }
     localStorage.removeItem(LS_ADMIN_TURN);
     activeTurn = null;
     setSending(false);
-    logEl.scrollTop = logEl.scrollHeight;
+    termSticky.follow();
   }
 
   // A turn that died mid-flight (server restart) but got recovered by
@@ -3764,8 +4760,8 @@ function initAdminTerminal() {
     try {
       await pumpSSE(resp, {
         onMeta: (m) => { if (m && m.replay) resetActiveStream(); },
-        onChunk: (t, s) => appendActiveChunk(t, s),
-        onError: (m) => appendActiveChunk(`\n[error] ${m}`, 'stderr'),
+        onChunk: (t) => appendActiveChunk(t),
+        onError: (m) => appendActiveChunk(`\n[error] ${m}`),
         onResult: (d) => {
           if (!d) return;
           if (d.sessionId) finalSession = d.sessionId;
@@ -3835,10 +4831,9 @@ function initAdminTerminal() {
     userBody.textContent = text;
     if (images.length) userBody.insertAdjacentHTML('beforeend', renderMsgImages(images));
     const asstBody = addMessage('assistant', model);
-    asstBody.innerHTML = '<span class="tmsg-stream"></span><span class="tmsg-cursor"></span>';
 
     const turnId = makeTurnId();
-    activeTurn = { turnId, asstBody, raw: '', streamEl: asstBody.querySelector('.tmsg-stream') };
+    activeTurn = { turnId, asstBody, stream: CCChat.createStream(asstBody, { scrollEl: logEl }) };
     localStorage.setItem(LS_ADMIN_TURN, JSON.stringify({ turnId, sessionId, text, model }));
     setSending(true);
 
@@ -3852,12 +4847,12 @@ function initAdminTerminal() {
     } catch {
       // Couldn't reach the server to start — the job may still have launched,
       // so try reconnecting rather than giving up.
-      appendActiveChunk('\n[connection dropped — reconnecting…]', 'stderr');
+      appendActiveChunk('\n[connection dropped — reconnecting…]');
       return reconnectLoop();
     }
     if (!resp.ok || !resp.body) { finishTurn('failed', null, await friendlyHttpError(resp)); return; }
     if (!(await consumeStream(resp))) {
-      if (activeTurn) appendActiveChunk('\n[connection dropped — reconnecting…]', 'stderr');
+      if (activeTurn) appendActiveChunk('\n[connection dropped — reconnecting…]');
       await reconnectLoop();
     }
   }
@@ -3879,8 +4874,7 @@ function initAdminTerminal() {
     clearEmpty();
     if (saved.text) { const ub = addMessage('user'); ub.textContent = saved.text; }
     const asstBody = addMessage('assistant', saved.model);
-    asstBody.innerHTML = '<span class="tmsg-stream"></span><span class="tmsg-cursor"></span>';
-    activeTurn = { turnId: saved.turnId, asstBody, raw: '', streamEl: asstBody.querySelector('.tmsg-stream') };
+    activeTurn = { turnId: saved.turnId, asstBody, stream: CCChat.createStream(asstBody, { scrollEl: logEl }) };
     setSending(true);
     let resp;
     try { resp = await fetch(`/api/admin/chat/${encodeURIComponent(saved.turnId)}/stream`); }
@@ -3893,7 +4887,7 @@ function initAdminTerminal() {
   attachEnterToSend(inputEl, () => submit());
   abortBtn.addEventListener('click', async () => {
     if (!activeTurn) return;
-    appendActiveChunk('\n[abort requested…]', 'stderr');
+    appendActiveChunk('\n[abort requested…]');
     try { await fetch(`/api/admin/chat/${encodeURIComponent(activeTurn.turnId)}/cancel`, { method: 'POST' }); } catch { /* ignore */ }
     // The job then emits result(aborted)+done, which the live stream turns into
     // a finished turn.
@@ -3904,10 +4898,19 @@ function initAdminTerminal() {
   // any messages restored from the queue, which would otherwise race it.
   if (hasSavedTurn()) queue.enqueue({ reconnect: true }, { front: true });
   queue.start();
+
+  // Entry point for the #/admin/chat/<id> deep link (push notifications).
+  window.CCAdmin = {
+    openChat(id) {
+      if (!id || id === currentChatId) return;
+      loadConversation(id);
+    },
+  };
 }
 
 loadRepos().then(route);
 loadModelSetting();
+loadSelfInfo();
 </script>
 </body>
 </html>

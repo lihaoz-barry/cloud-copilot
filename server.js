@@ -19,7 +19,7 @@
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const { execSync, execFileSync } = require('child_process');
+const { execSync, execFileSync, spawn } = require('child_process');
 const express = require('express');
 
 const store = require('./lib/store');
@@ -27,6 +27,7 @@ const gh = require('./lib/gh');
 const repoConfig = require('./lib/repoConfig');
 const { runCopilotSSE, writeSseHead } = require('./lib/runner');
 const jobs = require('./lib/jobs');
+const notifier = require('./lib/notifier');
 const { UPLOADS_DIR, saveUploadedImages, cleanupOldUploads } = require('./lib/attachments');
 
 const HOST = process.env.HOST || '0.0.0.0';
@@ -123,18 +124,30 @@ function resolveRepo(name) {
 }
 
 // Actions that check out a branch on a repo's single shared working tree —
-// Create PR, Deploy, and Chat (even "plan" mode checks out the PR's branch) —
+// Create PR, Deploy, Chat (even "plan" mode checks out the PR's branch), and
+// Merge (when its automatic Copilot recovery is needed) —
 // must be mutually exclusive per repo, or concurrent runs collide on the same
-// checkout. Merge is excluded: it only calls `gh pr merge` via the API, no
-// local checkout involved.
-const WORKING_TREE_ACTION_RE = /^(\d+):(work|deploy|chat)(?::(\d+))?$/;
+// checkout.
+const WORKING_TREE_ACTION_RE = /^(\d+):(work|deploy|chat|merge|restart)(?::(\d+))?$/;
+
+// Working-tree locks held by actions that are NOT backed by a `jobs` child
+// process — currently just "Restart main", which runs a few short git commands
+// in-process and then relaunches the server. Held keys use the same
+// `<repo>#<n>:<action>` shape so findOtherRepoBusyKey/describeBusyKey treat
+// them exactly like a running job.
+const manualLocks = new Set();
+
+// Every key currently holding a working-tree lock, from both sources.
+function heldWorkingTreeKeys() {
+  return [...jobs.runningKeys(), ...manualLocks];
+}
 
 // First OTHER running job (excluding `excludeKey`) that touches this repo's
 // shared working tree, or null. Used to block a second such action from
 // starting concurrently.
 function findOtherRepoBusyKey(repoName, excludeKey) {
   const prefix = `${repoName}#`;
-  for (const k of jobs.runningKeys()) {
+  for (const k of heldWorkingTreeKeys()) {
     if (!k.startsWith(prefix) || k === excludeKey) continue;
     if (WORKING_TREE_ACTION_RE.test(k.slice(prefix.length))) return k;
   }
@@ -150,7 +163,13 @@ function repoBusyIssueNumber(repoName) {
   return m ? Number(m[1]) : null;
 }
 
-const BUSY_ACTION_LABEL = { work: 'a Create PR run', deploy: 'a Deploy', chat: 'a chat turn' };
+const BUSY_ACTION_LABEL = {
+  work: 'a Create PR run',
+  deploy: 'a Deploy',
+  chat: 'a chat turn',
+  merge: 'a Merge',
+  restart: 'a Restart main',
+};
 
 // Human-readable description of what's holding a repo's working-tree lock,
 // for the "blocked" message shown when a second action tries to start.
@@ -159,8 +178,41 @@ function describeBusyKey(repoName, busyKey) {
   if (!m) return `something else is already running in ${repoName}`;
   const [, issueNum, action, prNum] = m;
   const label = BUSY_ACTION_LABEL[action] || action;
+  // Restart main isn't tied to an issue — don't invent a "#0" for it.
+  if (action === 'restart') return `${label} is already running in ${repoName}`;
   const prSuffix = prNum ? ` (PR #${prNum})` : '';
   return `${label}${prSuffix} is already running for issue #${issueNum} in ${repoName}`;
+}
+
+// ---------------------------------------------------------------------------
+// Context for task-aware push notifications (issue #27). A push has to say
+// *which* task of *which* repo finished, so every job's `meta` carries the
+// repo/issue/PR identity plus a human subject line. These lookups are all
+// cache-only (no `gh` calls) — a missing title just means a shorter push.
+// ---------------------------------------------------------------------------
+
+function cachedGhTitle(ownerRepo, kind, number) {
+  try {
+    const entry = gh.cache.get(ownerRepo, kind);
+    const hit = entry && entry.data.find((x) => x.number === number);
+    return (hit && hit.title) || null;
+  } catch {
+    return null;
+  }
+}
+
+const cachedIssueTitle = (repo, n) => (repo.ownerRepo ? cachedGhTitle(repo.ownerRepo, 'issues', n) : null);
+const cachedPrTitle = (repo, prNumber) =>
+  repo.ownerRepo ? cachedGhTitle(repo.ownerRepo, 'prs', prNumber) : null;
+
+// How many Create PR runs this repo has started since the server came up —
+// lets a push say "本 repo 第 2 个 Create PR" when several are queued up on the
+// same repo, which is otherwise the hardest case to tell apart on a phone.
+const createPrRuns = new Map();
+function nextCreatePrSequence(repoName) {
+  const n = (createPrRuns.get(repoName) || 0) + 1;
+  createPrRuns.set(repoName, n);
+  return n;
 }
 
 // Map a UI mode to copilot approval flags.
@@ -201,6 +253,9 @@ app.get('/api/repos', (req, res) => {
   const repos = gh.listRepos(REPOS_ROOT).map((r) => ({
     name: r.name,
     branch: r.branch,
+    // Tip commit of the local checkout, so the repo header can say which code
+    // this machine would actually deploy right now.
+    headCommit: r.headCommit,
     ownerRepo: r.ownerRepo,
     github: r.github,
   }));
@@ -226,6 +281,226 @@ app.post('/api/settings/model', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Phone pushes (ntfy) — status + a "send a test push" button, so the machine's
+// notify.env can be verified from the settings panel without waiting for a real
+// job to finish. The topic is never returned in full (it IS the credential).
+// ---------------------------------------------------------------------------
+app.get('/api/settings/ntfy', (req, res) => {
+  res.json(notifier.status());
+});
+
+app.post('/api/settings/ntfy/test', async (req, res) => {
+  const result = await notifier.sendTest();
+  if (result.skipped) {
+    return res.status(400).json({
+      error: `No ntfy topic configured. Create ${notifier.status().configFile} (see setup/notify.env.example).`,
+    });
+  }
+  if (!result.ok) return res.status(502).json({ error: result.error });
+  res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// "Self" repo — the cloud-copilot checkout that is serving this very app.
+//
+// The settings panel surfaces its current branch and a "Restart main" button,
+// used to periodically verify that whatever is on `main` still works. Only the
+// self repo gets that button; restarting is meaningless for any other repo.
+// ---------------------------------------------------------------------------
+
+const SERVER_STARTED_AT = new Date().toISOString();
+// Identify this app's directory by (device, inode) rather than by path string:
+// on macOS `realpathSync` does NOT normalise case, so "/Users/me/repos/x" and
+// "/Users/me/Repos/x" are the same directory but different strings.
+const SELF_DIR_ID = (() => {
+  try {
+    const s = fs.statSync(__dirname);
+    return `${s.dev}:${s.ino}`;
+  } catch {
+    return null;
+  }
+})();
+
+// The repo under REPOS_ROOT whose working tree IS this app's directory, or
+// null when cloud-copilot is running from outside the authorized root.
+function findSelfRepo() {
+  if (!SELF_DIR_ID) return null;
+  return (
+    gh.listRepos(REPOS_ROOT).find((r) => {
+      try {
+        const s = fs.statSync(r.path);
+        return `${s.dev}:${s.ino}` === SELF_DIR_ID;
+      } catch {
+        return false;
+      }
+    }) || null
+  );
+}
+
+// Argument-array git (never a shell string) against a specific repo.
+function git(repoPath, args, timeout = 20000) {
+  return execFileSync('git', ['-C', repoPath, ...args], {
+    encoding: 'utf8',
+    timeout,
+    maxBuffer: 4 * 1024 * 1024,
+  }).trim();
+}
+
+function isDirty(repoPath) {
+  try {
+    return git(repoPath, ['status', '--porcelain']).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+// origin's default branch (usually `main`), falling back to "main".
+function defaultBranchOf(repoPath) {
+  try {
+    const ref = git(repoPath, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']);
+    const name = ref.split('/').pop();
+    if (name) return name;
+  } catch {
+    /* origin/HEAD not set locally */
+  }
+  return 'main';
+}
+
+// Cheap liveness probe the client polls while the server restarts itself.
+// `startedAt`/`pid` let it tell "still the old process" from "back up".
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, pid: process.pid, startedAt: SERVER_STARTED_AT });
+});
+
+app.get('/api/settings/self', (req, res) => {
+  const repo = findSelfRepo();
+  if (!repo) return res.json({ repo: null, pid: process.pid, startedAt: SERVER_STARTED_AT });
+  const busyKey = findOtherRepoBusyKey(repo.name, null);
+  res.json({
+    repo: repo.name,
+    ownerRepo: repo.ownerRepo,
+    branch: gh.gitBranch(repo.path),
+    defaultBranch: defaultBranchOf(repo.path),
+    dirty: isDirty(repo.path),
+    busy: busyKey ? describeBusyKey(repo.name, busyKey) : null,
+    pid: process.pid,
+    startedAt: SERVER_STARTED_AT,
+  });
+});
+
+// Relaunch cloud-copilot *detached* from this process.
+//
+// The obvious approach — letting the restart script `pkill -f 'node server.js'`
+// — is unreliable when it is spawned by the very process it must kill, and it
+// would also take down unrelated node servers. Instead we hand a detached
+// shell a simple contract: wait for OUR pid to disappear, then `npm start`.
+// This process then exits on its own, so the handover is deterministic.
+function spawnSelfRestart(repoPath) {
+  // `pid` is a number, so this shell string carries no injectable input.
+  const script =
+    `for i in $(seq 1 100); do kill -0 ${process.pid} 2>/dev/null || break; sleep 0.3; done; ` +
+    `exec npm start > server.log 2>&1`;
+  const child = spawn('/bin/bash', ['-lc', script], {
+    cwd: repoPath,
+    env: process.env,
+    detached: true, // own session/process group — survives our own death
+    stdio: 'ignore',
+  });
+  child.unref();
+}
+
+app.post('/api/settings/self/restart-main', (req, res) => {
+  const repo = findSelfRepo();
+  if (!repo) {
+    return res.status(404).json({
+      error: 'cloud-copilot is not running from a repo under REPOS_ROOT, so it cannot restart itself.',
+    });
+  }
+
+  const key = `${repo.name}#0:restart`;
+  if (manualLocks.has(key)) {
+    return res.status(409).json({ error: 'A Restart main is already in progress.' });
+  }
+  // Same per-repo working-tree lock as Create PR / Deploy / Chat — this action
+  // checks out a branch, so it must be mutually exclusive with all of them.
+  const busyKey = findOtherRepoBusyKey(repo.name, key);
+  if (busyKey) {
+    return res.status(409).json({
+      error: `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`,
+    });
+  }
+
+  manualLocks.add(key);
+  const release = () => manualLocks.delete(key);
+
+  const branch = defaultBranchOf(repo.path);
+  const steps = [];
+  let stashed = null;
+
+  try {
+    // Never silently discard local work: park it in a stash whose message
+    // says exactly where it came from, so it can be recovered with
+    // `git stash list` / `git stash pop`.
+    if (isDirty(repo.path)) {
+      stashed = `cloud-copilot restart-main ${new Date().toISOString()}`;
+      git(repo.path, ['stash', 'push', '--include-untracked', '-m', stashed], 60000);
+      steps.push(`Stashed uncommitted changes as "${stashed}"`);
+    }
+    git(repo.path, ['checkout', branch], 60000);
+    steps.push(`Checked out ${branch}`);
+    git(repo.path, ['pull', '--ff-only'], 180000);
+    steps.push(`Pulled latest ${branch}`);
+  } catch (err) {
+    release();
+    const detail = (err.stderr || err.stdout || err.message || '').toString().trim();
+    return res.status(500).json({
+      error: `Restart main failed before restarting: ${detail || err.message}`,
+      steps,
+      stashed,
+      branch: gh.gitBranch(repo.path),
+    });
+  }
+
+  let head = null;
+  try {
+    head = git(repo.path, ['rev-parse', '--short', 'HEAD']);
+  } catch {
+    /* non-fatal */
+  }
+
+  // Safety net: this process is about to be killed, so the lock normally dies
+  // with it — but if the relaunch somehow never kills us, don't wedge the repo.
+  const guard = setTimeout(release, 120000);
+  if (guard.unref) guard.unref();
+
+  // Flush the result FIRST; only then pull the rug out from under ourselves.
+  res.json({
+    ok: true,
+    repo: repo.name,
+    branch,
+    head,
+    stashed,
+    steps: [...steps, 'Restarting server…'],
+    pid: process.pid,
+    startedAt: SERVER_STARTED_AT,
+  });
+  res.on('finish', () => {
+    // Only now that the client has the result do we hand over: spawn the
+    // detached relauncher, then exit so it can bind the port.
+    setTimeout(() => {
+      try {
+        spawnSelfRestart(repo.path);
+      } catch (err) {
+        release();
+        console.error('[restart-main] failed to spawn relauncher:', err.message);
+        return;
+      }
+      setTimeout(() => process.exit(0), 500);
+    }, 300);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // TestFlight overview — every build ever shipped via the ios-testflight
 // deploy path (current + archived deploy attempts), across all repos/issues,
 // flattened for a single cross-repo page: version/build, the PR (and its
@@ -246,6 +521,47 @@ app.get('/api/testflight/builds', (req, res) => {
   res.json({ builds });
 });
 
+/**
+ * Pull a repo's issues + PRs (through the L2 cache unless `force`) and fold the
+ * discovered PRs into the store. Shared by the issues endpoint and the hourly
+ * background refresher so both keep the store in exactly the same shape.
+ */
+async function syncRepoFromGitHub(repo, { force = false } = {}) {
+  const { issues, cached, at } = await gh.listIssues(repo.ownerRepo, { force });
+  const dismissed = store.getDismissedNumbers(repo.name);
+  const visible = issues.filter((i) => !dismissed.has(i.number));
+
+  // Auto-discover PRs referencing any of these issues — one `gh pr list`
+  // call for the whole repo, matched in-process — so the pipeline is
+  // populated on every expand without needing the manual "↻ PRs" click.
+  const { prs: allPrs } = await gh.listAllPrs(repo.ownerRepo, { force });
+  // Best-effort branch + tip-commit annotations; an empty map just means the
+  // rows render without them.
+  const headCommits = await gh.listPrHeadCommits(repo.ownerRepo, { force });
+  for (const issue of visible) {
+    const matched = gh.matchPrsForIssue(allPrs, issue.number);
+    for (const p of matched) {
+      const head = headCommits[String(p.number)] || null;
+      store.upsertPr(repo.name, issue.number, {
+        prNumber: p.number,
+        prUrl: p.url,
+        title: p.title,
+        createdAt: p.createdAt,
+        source: 'gh',
+        headRefName: p.headRefName || (head && head.headRefName) || null,
+        headCommit: head
+          ? { sha: head.sha, abbrev: head.abbrev, committedDate: head.committedDate, headline: head.headline, url: head.url }
+          : undefined,
+      });
+    }
+    // Drop previously auto-discovered PRs that no longer match (e.g. the
+    // match heuristic got stricter, or a PR body was edited) — never
+    // touches PRs cloud-copilot itself created for this issue.
+    store.pruneStaleGhPrs(repo.name, issue.number, matched.map((p) => p.number));
+  }
+  return { visible, cached, at };
+}
+
 app.get('/api/repos/:name/issues', async (req, res) => {
   const repo = resolveRepo(req.params.name);
   if (!repo) return res.status(404).json({ error: 'repo not found under REPOS_ROOT' });
@@ -253,30 +569,7 @@ app.get('/api/repos/:name/issues', async (req, res) => {
 
   try {
     const force = req.query.refresh === '1' || req.query.refresh === 'true';
-    const { issues, cached, at } = await gh.listIssues(repo.ownerRepo, { force });
-    const dismissed = store.getDismissedNumbers(repo.name);
-    const visible = issues.filter((i) => !dismissed.has(i.number));
-
-    // Auto-discover PRs referencing any of these issues — one `gh pr list`
-    // call for the whole repo, matched in-process — so the pipeline is
-    // populated on every expand without needing the manual "↻ PRs" click.
-    const { prs: allPrs } = await gh.listAllPrs(repo.ownerRepo, { force });
-    for (const issue of visible) {
-      const matched = gh.matchPrsForIssue(allPrs, issue.number);
-      for (const p of matched) {
-        store.upsertPr(repo.name, issue.number, {
-          prNumber: p.number,
-          prUrl: p.url,
-          title: p.title,
-          createdAt: p.createdAt,
-          source: 'gh',
-        });
-      }
-      // Drop previously auto-discovered PRs that no longer match (e.g. the
-      // match heuristic got stricter, or a PR body was edited) — never
-      // touches PRs cloud-copilot itself created for this issue.
-      store.pruneStaleGhPrs(repo.name, issue.number, matched.map((p) => p.number));
-    }
+    const { visible, cached, at } = await syncRepoFromGitHub(repo, { force });
 
     const numbers = visible.map((i) => i.number);
     const statuses = store.getStatuses(repo.name, numbers);
@@ -294,10 +587,48 @@ app.get('/api/repos/:name/issues', async (req, res) => {
     // existing `activeWorkIssues[0]` client contract.
     const busyIssue = repoBusyIssueNumber(repo.name);
     const activeWorkIssues = busyIssue != null ? [busyIssue] : [];
-    res.json({ repo: repo.name, ownerRepo: repo.ownerRepo, cached, at, issues: merged, activeWorkIssues });
+    res.json({
+      repo: repo.name,
+      ownerRepo: repo.ownerRepo,
+      cached,
+      at,
+      // Cache telemetry the client's sync pill renders from: when this repo's
+      // L2 entry was last filled, how long entries stay fresh, and when the
+      // hourly background refresh will next touch it.
+      serverAt: gh.cache.syncedAt(repo.ownerRepo) ?? at,
+      ttlMs: gh.CACHE_TTL_MS,
+      nextSyncAt: nextBackgroundSyncAt(),
+      issues: merged,
+      activeWorkIssues,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message, stderr: (err.stderr || '').toString() });
   }
+});
+
+// Just the live half of the issues list: per-issue action statuses plus which
+// issue holds the working-tree lock. Deliberately does NOT touch `gh` or the
+// L2 cache — it only reads state.json and the in-memory job table, so the
+// client can call it as often as it likes.
+//
+// Exists because the browser's L1 cache stores the whole /issues payload for
+// 15 minutes, which is right for GitHub metadata and wrong for this: a job
+// started from another machine (or another tab) is invisible to a cached
+// render, so the card stays "idle" and never reconnects (issue #52). The
+// client renders from L1 for speed, then patches the result with this.
+app.get('/api/repos/:name/statuses', (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found under REPOS_ROOT' });
+  const numbers = String(req.query.n || '')
+    .split(',')
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isInteger(n) && n > 0);
+  const busyIssue = repoBusyIssueNumber(repo.name);
+  res.json({
+    repo: repo.name,
+    statuses: numbers.length ? store.getStatuses(repo.name, numbers) : {},
+    activeWorkIssues: busyIssue != null ? [busyIssue] : [],
+  });
 });
 
 // Full stored record for one issue (conversation, PR link, etc.).
@@ -337,13 +668,19 @@ app.get('/api/repos/:name/issues/:n/prs', async (req, res) => {
     // Manual refresh always bypasses the whole-repo PR cache — unlike the
     // automatic discovery on repo expand, this is an explicit "check again now".
     const prs = await gh.findPrsForIssue(repo.ownerRepo, n, { force: true });
+    const headCommits = await gh.listPrHeadCommits(repo.ownerRepo, { force: true });
     for (const p of prs) {
+      const head = headCommits[String(p.number)] || null;
       store.upsertPr(repo.name, n, {
         prNumber: p.number,
         prUrl: p.url,
         title: p.title,
         createdAt: p.createdAt,
         source: 'gh',
+        headRefName: p.headRefName || (head && head.headRefName) || null,
+        headCommit: head
+          ? { sha: head.sha, abbrev: head.abbrev, committedDate: head.committedDate, headline: head.headline, url: head.url }
+          : undefined,
       });
     }
     const record = store.getRecord(repo.name, n);
@@ -354,7 +691,7 @@ app.get('/api/repos/:name/issues/:n/prs', async (req, res) => {
 });
 
 // Dismiss/hide an issue from the dashboard. Cancels any in-flight jobs tied to
-// it (work + every PR's deploy), then clears its tracked state and remembers
+// it (work + every PR's deploy/merge), then clears its tracked state and remembers
 // the dismissal so it doesn't reappear on the next issue-list refresh/poll.
 // This never touches the issue on GitHub itself.
 app.post('/api/repos/:name/issues/:n/hide', (req, res) => {
@@ -368,6 +705,7 @@ app.post('/api/repos/:name/issues/:n/hide', (req, res) => {
   if (jobs.cancelJob(`${repo.name}#${n}:work`)) cancelledJobs.push('work');
   for (const pr of Object.values(record.prs || {})) {
     if (jobs.cancelJob(`${repo.name}#${n}:deploy:${pr.prNumber}`)) cancelledJobs.push(`deploy:${pr.prNumber}`);
+    if (jobs.cancelJob(`${repo.name}#${n}:merge:${pr.prNumber}`)) cancelledJobs.push(`merge:${pr.prNumber}`);
   }
 
   store.dismissIssue(repo.name, n);
@@ -520,7 +858,14 @@ app.post('/api/repos/:name/preissues/:id/chat', async (req, res) => {
     bin: COPILOT_BIN,
     args,
     cwd: repo.path,
-    meta: { action: 'preissue-chat', id, model },
+    meta: {
+      action: 'preissue-chat',
+      id,
+      model,
+      repo: repo.name,
+      chatTitle: store.titleFromMessage(pre.text),
+      subject: store.titleFromMessage(message),
+    },
     onSession: (sid) => store.setPreIssueSession(repo.name, id, sid),
     onDone: async (j) => {
       const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
@@ -620,7 +965,13 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
     bin: COPILOT_BIN,
     args,
     cwd: repo.path,
-    meta: { action: 'work' },
+    meta: {
+      action: 'work',
+      repo: repo.name,
+      issueNumber: n,
+      subject: cachedIssueTitle(repo, n) || `issue #${n}`,
+      sequence: nextCreatePrSequence(repo.name),
+    },
     onSession: (id) =>
       store.updateRecord(repo.name, n, (r) => {
         r.work.sessionId = id;
@@ -783,7 +1134,13 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
       bin: COPILOT_BIN,
       args,
       cwd: repo.path,
-      meta: { action: 'deploy', prNumber },
+      meta: {
+        action: 'deploy',
+        prNumber,
+        repo: repo.name,
+        issueNumber: n,
+        subject: pr.title || `PR #${prNumber}`,
+      },
       onSession: (id) =>
         store.updateDeploy(repo.name, n, prNumber, (d) => {
           d.sessionId = id;
@@ -883,7 +1240,13 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
       bin: 'bash',
       args: ['-lc', command],
       cwd: repo.path,
-      meta: { action: 'deploy', prNumber },
+      meta: {
+        action: 'deploy',
+        prNumber,
+        repo: repo.name,
+        issueNumber: n,
+        subject: pr.title || `PR #${prNumber}`,
+      },
       onDone: async (j) => {
         const success = j.exitCode === 0;
         const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
@@ -962,7 +1325,8 @@ app.post('/api/repos/:name/issues/:n/deploy/:pr/cancel', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Action: Merge a specific PR (gh pr merge --merge --delete-branch)
+// Action: Merge a specific PR. A failed gh merge automatically starts Copilot
+// to investigate, resolve branch conflicts, push, and retry the merge.
 // ---------------------------------------------------------------------------
 
 app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
@@ -996,28 +1360,89 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
     }
   }
 
+  const busyKey = findOtherRepoBusyKey(repo.name, key);
+  if (busyKey) {
+    const message = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`;
+    return sendSseBlocked(res, { action: 'merge', prNumber, status: 'blocked', message });
+  }
+
   store.updateMerge(repo.name, n, prNumber, (m) => {
     m.status = 'merging';
     m.forced = force;
     m.startedAt = new Date().toISOString();
     m.finishedAt = null;
     m.conversation = '';
+    m.sessionId = null;
+    m.recoveryAttempted = false;
+    m.conflictResolved = false;
+    m.recoveryMessage = null;
   });
 
-  const baseRefName = await gh.getPr(repo.ownerRepo, prNumber).then((pr) => pr?.baseRefName || null);
-
   const job = jobs.startJob(key, {
-    bin: gh.GH_BIN,
-    args: ['pr', 'merge', String(prNumber), '--repo', repo.ownerRepo, '--merge', '--delete-branch'],
+    bin: process.execPath,
+    args: [
+      path.join(__dirname, 'lib', 'mergeRunner.js'),
+      gh.GH_BIN,
+      COPILOT_BIN,
+      repo.ownerRepo,
+      String(prNumber),
+      resolveModel(),
+    ],
     cwd: repo.path,
-    meta: { action: 'merge', prNumber },
+    meta: {
+      action: 'merge',
+      prNumber,
+      repo: repo.name,
+      issueNumber: n,
+      subject: cachedPrTitle(repo, prNumber) || `PR #${prNumber}`,
+    },
+    onSession: (id) =>
+      store.updateMerge(repo.name, n, prNumber, (m) => {
+        m.sessionId = id;
+      }),
+    onProgress: (j) =>
+      store.updateMerge(repo.name, n, prNumber, (m) => {
+        m.conversation = j.conversation;
+        if (j.sessionId) m.sessionId = j.sessionId;
+      }),
     onDone: async (j) => {
-      const success = j.exitCode === 0;
-      const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
+      const mergedAfterCancellation = j.cancelled
+        ? await gh.getPr(repo.ownerRepo, prNumber).then((pr) => pr?.state === 'MERGED')
+        : false;
+      const success = j.exitCode === 0 || mergedAfterCancellation;
+      const status = success ? 'success' : j.cancelled ? 'aborted' : 'failed';
+      const markerMatches = [
+        ...j.conversation.matchAll(/\[cloud-copilot merge recovery\] (\{[^\n]+\})/g),
+      ];
+      let recovery = {};
+      if (markerMatches.length) {
+        try {
+          recovery = JSON.parse(markerMatches.at(-1)[1]);
+        } catch {
+          recovery = {};
+        }
+      }
+      const recoveryAttempted = Boolean(recovery.attempted);
+      const conflictResolved = Boolean(
+        success && (recovery.conflictResolved || (mergedAfterCancellation && recovery.conflictDetected)),
+      );
+      const baseRefName =
+        typeof recovery.baseRefName === 'string' && recovery.baseRefName ? recovery.baseRefName : null;
+      const recoveryMessage = conflictResolved
+        ? 'Merged after Copilot resolved conflicts'
+        : recoveryAttempted && success
+          ? 'Merged after Copilot recovery'
+          : recoveryAttempted
+            ? 'Copilot recovery did not complete the merge'
+            : null;
       store.updateMerge(repo.name, n, prNumber, (m) => {
         m.status = status;
         m.exitCode = j.exitCode;
         m.conversation = j.conversation;
+        m.sessionId = j.sessionId;
+        m.recoveryAttempted = recoveryAttempted;
+        m.conflictResolved = conflictResolved;
+        m.recoveryMessage = recoveryMessage;
         m.finishedAt = new Date().toISOString();
       });
       if (success && baseRefName) {
@@ -1034,7 +1459,14 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
           /* best-effort only — merge itself already succeeded */
         }
       }
-      return { action: 'merge', prNumber, status };
+      return {
+        action: 'merge',
+        prNumber,
+        status,
+        recoveryAttempted,
+        conflictResolved,
+        recoveryMessage,
+      };
     },
   });
 
@@ -1147,7 +1579,15 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
     bin: COPILOT_BIN,
     args,
     cwd: repo.path,
-    meta: { action: 'chat', prNumber, mode, model },
+    meta: {
+      action: 'chat',
+      prNumber,
+      mode,
+      model,
+      repo: repo.name,
+      issueNumber: n,
+      chatTitle: store.titleFromMessage(message),
+    },
     onSession: (id) =>
       store.updateRecord(repo.name, n, (r) => {
         const pr2 = r.prs[prNumber];
@@ -1303,7 +1743,16 @@ app.post('/api/admin/chat', (req, res) => {
     bin: COPILOT_BIN,
     args,
     cwd,
-    meta: { action: 'admin', turnId, repo: repoName || null, model },
+    meta: {
+      action: 'admin',
+      turnId,
+      repo: repoName || null,
+      model,
+      sessionId,
+      chatTitle: store.titleFromMessage(
+        (sessionId && store.getAdminChat(sessionId)?.title) || message,
+      ),
+    },
     onSession: (sid) => store.updateAdminTurnProgress(turnId, { sessionId: sid }),
     onProgress: (j) => store.updateAdminTurnProgress(turnId, { assistantText: j.conversation, sessionId: j.sessionId }),
     onDone: async (j) => {
@@ -1382,10 +1831,70 @@ app.delete('/api/admin/chats/:sessionId', (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------------------------------------------------------------------------
+// Hourly background sync — keeps the L2 cache warm so the dashboard is never
+// showing data older than an hour, even if nobody opened the page.
+// ---------------------------------------------------------------------------
+
+const BG_SYNC_INTERVAL_MS = Number(process.env.GH_SYNC_INTERVAL_MS || 60 * 60 * 1000);
+// Delay the first pass so a restart doesn't fire N `gh` calls while the user is
+// still loading the page they just restarted for.
+const BG_SYNC_FIRST_DELAY_MS = Number(process.env.GH_SYNC_FIRST_DELAY_MS || 60 * 1000);
+
+let nextBackgroundSync = Date.now() + BG_SYNC_FIRST_DELAY_MS;
+function nextBackgroundSyncAt() {
+  return nextBackgroundSync;
+}
+
+// Repos are synced one at a time, not in parallel: four concurrent `gh`
+// processes on a laptop is a lot of noise for a background job nobody is
+// waiting on. A repo with a running job is skipped and picked up next hour.
+async function runBackgroundSync() {
+  let repos;
+  try {
+    repos = gh.listRepos(REPOS_ROOT).filter((r) => r.github);
+  } catch (err) {
+    console.warn(`[gh-sync] could not enumerate repos: ${err.message}`);
+    return;
+  }
+  let synced = 0;
+  let skipped = 0;
+  for (const repo of repos) {
+    if (findOtherRepoBusyKey(repo.name, null)) {
+      skipped += 1;
+      continue;
+    }
+    try {
+      await syncRepoFromGitHub(repo, { force: true });
+      synced += 1;
+    } catch (err) {
+      // Leave the previous (stale) cache entry in place — stale data beats no
+      // data, and the next pass will try again.
+      console.warn(`[gh-sync] ${repo.name}: ${err.message}`);
+    }
+  }
+  console.log(`[gh-sync] refreshed ${synced}/${repos.length} repo(s)${skipped ? `, skipped ${skipped} busy` : ''}`);
+}
+
+function scheduleBackgroundSync(delayMs) {
+  nextBackgroundSync = Date.now() + delayMs;
+  setTimeout(async () => {
+    await runBackgroundSync();
+    scheduleBackgroundSync(BG_SYNC_INTERVAL_MS);
+  }, delayMs).unref();
+}
+
 app.listen(PORT, HOST, () => {
   console.log(`cloud-copilot running at http://${HOST}:${PORT}`);
   console.log(`Authorized repos root: ${REPOS_ROOT}`);
   console.log(`Copilot binary: ${COPILOT_BIN}`);
+  const cacheInfo = gh.cache.load();
+  console.log(
+    cacheInfo.restored
+      ? `GitHub cache: restored ${cacheInfo.repos} repo(s) from ${gh.cache.CACHE_FILE}`
+      : 'GitHub cache: starting cold',
+  );
+  scheduleBackgroundSync(BG_SYNC_FIRST_DELAY_MS);
   // Recover any admin turn that was still in-flight when the previous
   // process died (e.g. a chat turn triggered its own restart mid-reply) so
   // it shows up as an "interrupted" turn instead of silently vanishing.

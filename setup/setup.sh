@@ -31,6 +31,8 @@ GLOBAL_SKILLS="$HOME/.agents/skills"
 CONFIG_DIR="$HOME/.config/cloud-copilot"
 DEPLOY_ENV="$CONFIG_DIR/deploy.env"
 DEPLOY_ENV_EXAMPLE="$REPO_DIR/setup/deploy.env.example"
+NOTIFY_ENV="$CONFIG_DIR/notify.env"
+NOTIFY_ENV_EXAMPLE="$REPO_DIR/setup/notify.env.example"
 
 SKILLS_SCOPE="global"
 OVERRIDE_SKILLS=""
@@ -173,6 +175,22 @@ if [[ -f "$DEPLOY_ENV" ]] && source "$DEPLOY_ENV" 2>/dev/null; then
   fi
 else
   warn "could not source $DEPLOY_ENV"
+fi
+
+# --------------------------------------------------------------------------
+section "4b. Phone pushes (ntfy)"
+# --------------------------------------------------------------------------
+# Optional: with no topic set, cloud-copilot simply never pushes.
+if [[ ! -f "$NOTIFY_ENV" ]]; then
+  cp "$NOTIFY_ENV_EXAMPLE" "$NOTIFY_ENV"
+  warn "created $NOTIFY_ENV from template — set NTFY_TOPIC + APP_BASE_URL to get phone pushes"
+else
+  NTFY_TOPIC_VALUE="$(sed -n 's/^NTFY_TOPIC=//p' "$NOTIFY_ENV" | tail -1 | tr -d "\"' ")"
+  if [[ -n "$NTFY_TOPIC_VALUE" ]]; then
+    ok "notify.env present with a topic ($NOTIFY_ENV)"
+  else
+    warn "notify.env has no NTFY_TOPIC — phone pushes stay off"
+  fi
 fi
 
 # --------------------------------------------------------------------------

@@ -7,8 +7,10 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "scheduler": "node scheduler-server.js",
     "test": "node --test test/*.test.js",
-    "cc:restart": "bash scripts/restart.sh"
+    "cc:restart": "bash scripts/restart.sh",
+    "cc:restart-scheduler": "bash scripts/restart-scheduler.sh"
   },
   "dependencies": {
     "express": "^4.19.2"

@@ -36,7 +36,7 @@ const { cleanupAfterMerge } = require('./lib/mergeCleanup');
 const worktrees = require('./lib/worktrees');
 const worktreePool = require('./lib/worktreePool');
 const portPool = require('./lib/portPool');
-const scheduler = require('./lib/scheduler');
+const supervisorClient = require('./lib/supervisorClient');
 
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 8787);
@@ -76,6 +76,23 @@ function resolveCopilotBin() {
     }
   } catch {
     /* no nvm */
+  }
+  // fnm, by its stable installation path rather than the per-shell symlink farm
+  // under ~/.local/state/fnm_multishells/<pid>_<ts>/. That path is what `which`
+  // reports, and it disappears when the shell that made it exits — which is
+  // exactly what the supervisor on :8788 would be left holding after a restart.
+  const fnmDir = path.join(os.homedir(), '.local', 'share', 'fnm', 'node-versions');
+  try {
+    const versions = fs
+      .readdirSync(fnmDir)
+      .filter((v) => v.startsWith('v'))
+      .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+    for (const v of versions) {
+      const candidate = path.join(fnmDir, v, 'installation', 'bin', 'copilot');
+      if (isExecutable(candidate)) return candidate;
+    }
+  } catch {
+    /* no fnm */
   }
   for (const p of [
     '/opt/homebrew/bin/copilot',
@@ -204,6 +221,19 @@ async function leaseWorktree(repo, opts) {
   return worktreePool.acquire(repo, opts);
 }
 
+/**
+ * How to report a lease that could not be taken.
+ *
+ * "Every slot is busy" and "another task already holds this branch" are states
+ * of the machine, not defects of the run: the same request will work in a few
+ * minutes. They are therefore `blocked`, which the scheduler retries next sweep
+ * instead of counting against the issue's retry budget (three `failed` runs
+ * flag it for a human).
+ */
+function leaseFailureStatus(err) {
+  return err && (err.code === 'BRANCH_BUSY' || err.code === 'NO_CAPACITY') ? 'blocked' : 'failed';
+}
+
 function releaseLease(lease, { fallbackRef = null } = {}) {
   if (!lease) return [];
   try {
@@ -211,6 +241,34 @@ function releaseLease(lease, { fallbackRef = null } = {}) {
   } catch {
     return [];
   }
+}
+
+/**
+ * Start a job that owns a worktree lease, and make sure the lease is given back
+ * when the job never actually starts.
+ *
+ * Both ways that can happen are silent otherwise:
+ *   - `startJob` throws ("job already running") when two requests for the same
+ *     key race past the earlier check — there is an `await` between them, so
+ *     two taps on one button are enough;
+ *   - a spawn failure returns a job that is already `done` and never calls
+ *     `onDone`, which is where every lease is normally released.
+ * Either way the worktree and its port would be held until the process exits.
+ *
+ * @returns {import('./lib/jobs').Job|null} null when the job never started, in
+ *   which case `onFail` has already answered the request.
+ */
+function startLeasedJob(lease, key, options, { fallbackRef = null, onFail = null } = {}) {
+  let job;
+  try {
+    job = jobs.startJob(key, options);
+  } catch (err) {
+    releaseLease(lease, { fallbackRef });
+    if (onFail) onFail(err);
+    return null;
+  }
+  if (job.status !== 'running') releaseLease(lease, { fallbackRef });
+  return job;
 }
 
 // One sentence appended to every prompt that runs inside a lease, so the agent
@@ -399,6 +457,32 @@ function git(repoPath, args, timeout = 20000) {
     timeout,
     maxBuffer: 4 * 1024 * 1024,
   }).trim();
+}
+
+/**
+ * The sha `origin/<branch>` points at in this clone.
+ *
+ * Every worktree of the repo shares this object store, so a push from any of
+ * them updates the ref this reads — which makes it both free and authoritative
+ * right after a run, unlike GitHub's API.
+ */
+function branchHeadSha(repoPath, branch, { fetch = false } = {}) {
+  if (!branch) return null;
+  if (fetch) {
+    try {
+      execFileSync('git', ['-C', repoPath, 'fetch', '--quiet', 'origin', branch], {
+        timeout: 60000,
+        stdio: 'ignore',
+      });
+    } catch {
+      /* the remote-tracking ref may still be current from the push itself */
+    }
+  }
+  try {
+    return git(repoPath, ['rev-parse', `origin/${branch}`], 15000) || null;
+  } catch {
+    return null;
+  }
 }
 
 function isDirty(repoPath) {
@@ -1212,7 +1296,7 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
   } catch (err) {
     return sendSseBlocked(res, {
       action: 'work',
-      status: 'failed',
+      status: leaseFailureStatus(err),
       message: `Could not start: ${err.message}`,
     });
   }
@@ -1233,7 +1317,7 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
     r.work.prNumber = null;
   });
 
-  const job = jobs.startJob(key, {
+  const job = startLeasedJob(lease, key, {
     bin: COPILOT_BIN,
     args,
     cwd: lease.path,
@@ -1338,7 +1422,16 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
         worktreeCleanup: cleanup,
       };
     },
+  }, {
+    fallbackRef: `origin/${baseRef}`,
+    onFail: (err) =>
+      sendSseBlocked(res, {
+        action: 'work',
+        status: 'failed',
+        message: `Could not start: ${err.message}`,
+      }),
   });
+  if (!job) return;
 
   jobs.subscribe(job, res);
 });
@@ -1935,6 +2028,9 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/update', async (req, res) => {
     return sendSseBlocked(res, { action: 'update', prNumber, status: 'blocked', message: closed });
   }
   if (prInfo.state === 'MERGED') {
+    // Persist it: otherwise a stale local record keeps the scheduler coming
+    // back to this PR every sweep only to be blocked here again.
+    store.upsertPr(repo.name, n, { prNumber, state: 'MERGED' });
     const message = `Blocked: PR #${prNumber} is already merged — there is nothing to update.`;
     return sendSseBlocked(res, { action: 'update', prNumber, status: 'blocked', message });
   }
@@ -1955,7 +2051,7 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/update', async (req, res) => {
     });
   } catch (err) {
     const message = `Failed to check out branch "${headRefName}": ${err.message}`;
-    return sendSseBlocked(res, { action: 'update', prNumber, status: 'failed', message });
+    return sendSseBlocked(res, { action: 'update', prNumber, status: leaseFailureStatus(err), message });
   }
   const workCwd = lease.path;
 
@@ -1975,7 +2071,7 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/update', async (req, res) => {
     u.message = null;
   });
 
-  const job = jobs.startJob(key, {
+  const job = startLeasedJob(lease, key, {
     bin: COPILOT_BIN,
     args: [
       '-p',
@@ -2073,7 +2169,17 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/update', async (req, res) => {
         worktreeCleanup: cleanup,
       };
     },
+  }, {
+    fallbackRef: `origin/${baseRefName}`,
+    onFail: (err) =>
+      sendSseBlocked(res, {
+        action: 'update',
+        prNumber,
+        status: 'failed',
+        message: `Could not start the update: ${err.message}`,
+      }),
   });
+  if (!job) return;
 
   jobs.subscribe(job, res);
 });
@@ -2156,13 +2262,16 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/review', async (req, res) => {
     return sendSseBlocked(res, { action: 'review', prNumber, status: 'blocked', message: closed });
   }
   if (prInfo.state === 'MERGED') {
+    // Remember it: a stale local record would otherwise send the scheduler back
+    // here on every single sweep, blocked in exactly the same way.
+    store.upsertPr(repo.name, n, { prNumber, state: 'MERGED' });
     const message = `Blocked: PR #${prNumber} is already merged — there is nothing left to review.`;
     return sendSseBlocked(res, { action: 'review', prNumber, status: 'blocked', message });
   }
 
   const baseRefName = prInfo.baseRefName || defaultBranchOf(repo.path);
   const headRefName = prInfo.headRefName;
-  const headSha = prInfo.headRefOid || null;
+  const headSha = prInfo.headRefOid || branchHeadSha(repo.path, prInfo.headRefName);
 
   let lease;
   try {
@@ -2176,7 +2285,7 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/review', async (req, res) => {
     });
   } catch (err) {
     const message = `Failed to check out branch "${headRefName}": ${err.message}`;
-    return sendSseBlocked(res, { action: 'review', prNumber, status: 'failed', message });
+    return sendSseBlocked(res, { action: 'review', prNumber, status: leaseFailureStatus(err), message });
   }
 
   store.updateReview(repo.name, n, prNumber, (rv) => {
@@ -2190,7 +2299,7 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/review', async (req, res) => {
     rv.message = null;
   });
 
-  const job = jobs.startJob(key, {
+  const job = startLeasedJob(lease, key, {
     bin: COPILOT_BIN,
     args: [
       '-p',
@@ -2223,13 +2332,23 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/review', async (req, res) => {
       const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
       // Whether the review changed anything is decided by git, not by the
       // transcript: a review that pushed commits moved the head SHA.
-      let newHeadSha = headSha;
-      try {
-        const after = await gh.getPr(repo.ownerRepo, prNumber);
-        if (after && after.headRefOid) newHeadSha = after.headRefOid;
-      } catch {
-        /* keep the pre-run SHA */
+      //
+      // Local git first, and `gh` only as a fallback, because the scheduler
+      // decides "has this commit been reviewed?" by comparing
+      // `lastReviewedSha` against local `origin/<branch>`. Recording a sha from
+      // a different source is what makes the two disagree — and a `gh` call
+      // that fails or omits `headRefOid` would store the stale (or a null) sha
+      // and hand the same PR back to the very next sweep, forever.
+      let newHeadSha = branchHeadSha(repo.path, headRefName, { fetch: true });
+      if (!newHeadSha) {
+        try {
+          const after = await gh.getPr(repo.ownerRepo, prNumber);
+          if (after && after.headRefOid) newHeadSha = after.headRefOid;
+        } catch {
+          /* keep the pre-run SHA */
+        }
       }
+      if (!newHeadSha) newHeadSha = headSha;
       const improved = Boolean(headSha && newHeadSha && newHeadSha !== headSha);
       const message =
         status === 'success'
@@ -2272,7 +2391,17 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/review', async (req, res) => {
         worktreeCleanup: cleanup,
       };
     },
+  }, {
+    fallbackRef: `origin/${baseRefName}`,
+    onFail: (err) =>
+      sendSseBlocked(res, {
+        action: 'review',
+        prNumber,
+        status: 'failed',
+        message: `Could not start the review: ${err.message}`,
+      }),
   });
+  if (!job) return;
 
   jobs.subscribe(job, res);
 });
@@ -2359,7 +2488,13 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
     });
   } catch (err) {
     const message2 = `Failed to check out branch "${prInfo.headRefName}": ${err.message}`;
-    return sendSseBlocked(res, { action: 'chat', prNumber, mode, status: 'failed', message: message2 });
+    return sendSseBlocked(res, {
+      action: 'chat',
+      prNumber,
+      mode,
+      status: leaseFailureStatus(err),
+      message: message2,
+    });
   }
   const workCwd = lease.path;
 
@@ -2391,7 +2526,7 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
     args.push('-p', prompt, '--allow-all', ...modelFlags(model));
   }
 
-  const job = jobs.startJob(key, {
+  const job = startLeasedJob(lease, key, {
     bin: COPILOT_BIN,
     args,
     cwd: workCwd,
@@ -2434,7 +2569,18 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
       }
       return { action: 'chat', prNumber, mode, status, sessionId: j.sessionId, model };
     },
+  }, {
+    fallbackRef: `origin/${prInfo.baseRefName || defaultBranchOf(repo.path)}`,
+    onFail: (err) =>
+      sendSseBlocked(res, {
+        action: 'chat',
+        prNumber,
+        mode,
+        status: 'failed',
+        message: `Could not start this chat turn: ${err.message}`,
+      }),
   });
+  if (!job) return;
 
   jobs.subscribe(job, res);
 });
@@ -2459,31 +2605,114 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat/cancel', (req, res) => {
 // stops being obvious from the issue list alone. This is the panel's whole data
 // source: one cheap in-memory read, no `gh` and no git, so the client can poll
 // it every few seconds.
+//
+// Since the supervisor moved to :8788 this also reports sessions this process
+// does not (yet) have a job for — the ones that outlived a restart. Without
+// that, a Stop button on a live task would keep answering 404, which is exactly
+// the bug the split was meant to end.
 // ---------------------------------------------------------------------------
 
-app.get('/api/jobs', (req, res) => {
+/**
+ * The scheduler's state, or a stand-in explaining why it is unknown.
+ *
+ * The switch and its "run now" button live on the dashboard but the loop lives
+ * on :8788, so an unreachable scheduler must be visibly unreachable — a panel
+ * that quietly renders "off" would invite someone to turn on automation that is
+ * already on.
+ *
+ * One missed poll is not "unreachable", though. This process blocks its own
+ * event loop for seconds at a time (every `gh` and `git` call is synchronous),
+ * and treating that as the scheduler being down would make the switch flicker
+ * and disable itself at random. So the last good answer stands in, marked
+ * stale, until the failures have lasted long enough to mean something.
+ */
+let lastSchedulerState = null;
+let schedulerUnreachableSince = null;
+const SCHEDULER_GRACE_MS = 20000;
+
+async function schedulerState() {
+  try {
+    lastSchedulerState = await supervisorClient.getJson('/api/scheduler', { timeout: 8000 });
+    schedulerUnreachableSince = null;
+    return lastSchedulerState;
+  } catch (err) {
+    if (!schedulerUnreachableSince) schedulerUnreachableSince = Date.now();
+    const outage = Date.now() - schedulerUnreachableSince;
+    if (lastSchedulerState && outage < SCHEDULER_GRACE_MS) {
+      return { ...lastSchedulerState, stale: true };
+    }
+    return {
+      enabled: false,
+      repos: {},
+      running: false,
+      unreachable: true,
+      error: `cloud-scheduler (${supervisorClient.BASE}) is not answering: ${err.message}`,
+    };
+  }
+}
+
+app.get('/api/jobs', async (req, res) => {
+  const local = jobs.listRunning();
+  const known = new Set(local.map((j) => j.key));
+  let supervised = [];
+  try {
+    const { sessions } = await supervisorClient.listSessions();
+    supervised = (sessions || [])
+      .filter((s) => s.key && !known.has(s.key))
+      .map((s) => ({
+        key: s.key,
+        startedAt: s.startedAt,
+        elapsedMs: s.elapsedMs,
+        sessionId: s.sessionId,
+        sessionRef: s.id,
+        supervised: true,
+        detachedFromDashboard: true,
+        pid: s.pid,
+        cwd: s.cwd,
+        subscribers: 0,
+        ...(s.meta || {}),
+      }));
+  } catch {
+    /* the panel still works from local jobs alone */
+  }
   res.json({
     at: Date.now(),
-    jobs: jobs.listRunning(),
+    jobs: [...local, ...supervised],
     worktrees: worktreePool.list(),
     limits: { perRepo: worktreePool.MAX_PER_REPO, global: worktreePool.MAX_GLOBAL },
-    scheduler: scheduler.status(),
+    scheduler: await schedulerState(),
+    supervisor: { base: supervisorClient.BASE, sessions: supervised.length + local.length },
   });
 });
 
 // Stop one running task by its job key. The panel needs this because a task can
 // be started from another device (or by the scheduler) and therefore has no
 // action-specific cancel button on screen here.
-app.post('/api/jobs/cancel', (req, res) => {
+app.post('/api/jobs/cancel', async (req, res) => {
   const key = typeof req.body?.key === 'string' ? req.body.key : '';
   if (!key) return res.status(400).json({ error: 'key is required' });
   const job = jobs.getJob(key);
-  if (!job || job.status !== 'running') return res.status(404).json({ error: 'no such running job' });
-  res.json({ cancelled: jobs.cancelJob(key) });
+  if (job && job.status === 'running') {
+    return res.json({ cancelled: jobs.cancelJob(key) });
+  }
+  // No local job: the process may still be very much alive under the
+  // supervisor — a restart between starting it and stopping it is the normal
+  // case, not an error.
+  try {
+    const out = await supervisorClient.abortByKey(key);
+    return res.json({ cancelled: Boolean(out && out.ok), via: 'supervisor' });
+  } catch (err) {
+    return res.status(404).json({ error: `no such running job (${err.message})` });
+  }
 });
 
 // ---------------------------------------------------------------------------
 // Committed issues + the automatic scheduler (issue #64)
+//
+// The scheduler itself runs in the cloud-scheduler process on :8788 so that
+// restarting this one cannot stop it. These endpoints are kept as proxies: the
+// browser's contract is unchanged, and the settings panel needs no idea that
+// two servers are involved.
 // ---------------------------------------------------------------------------
 
 app.post('/api/repos/:name/issues/:n/committed', async (req, res) => {
@@ -2498,22 +2727,29 @@ app.post('/api/repos/:name/issues/:n/committed', async (req, res) => {
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
-  // Un-committing clears the retry budget, so re-committing later starts from a
-  // clean slate instead of resuming a backoff the user cannot see.
-  if (!committed) {
-    store.updateAuto(repo.name, n, (a) => {
-      a.attempts = 0;
-      a.lastError = null;
-      a.nextAttemptAt = null;
-      a.needsAttention = false;
-    });
-  }
   // Committing something and watching nothing happen for up to ten minutes
-  // looks exactly like a broken button, so bring the next sweep forward. It is
-  // a no-op while the scheduler is off, and `runSoon` only reschedules the
+  // looks exactly like a broken button, so bring the next sweep forward. A
+  // sweep is a no-op while automation is off, and `runNow` only reschedules the
   // existing timer — a burst of clicks cannot start a burst of sweeps.
-  const scheduled = committed && store.isSchedulerEnabledFor(repo.name);
-  if (scheduled) scheduler.runSoon();
+  let scheduled = false;
+  if (committed) {
+    try {
+      const { enabled } = await supervisorClient.getJson(
+        `/api/scheduler/enabled/${encodeURIComponent(repo.name)}`,
+        { timeout: 3000 },
+      );
+      scheduled = Boolean(enabled);
+      if (scheduled) await supervisorClient.postJson('/api/scheduler', { runNow: true });
+    } catch {
+      /* the scheduler's next sweep will pick it up regardless */
+    }
+  } else {
+    // Un-committing clears the retry budget, so re-committing later starts from
+    // a clean slate instead of resuming a backoff the user cannot see.
+    supervisorClient
+      .postJson('/api/scheduler', { reset: { repo: repo.name, issueNumber: n } })
+      .catch(() => {});
+  }
   res.json({
     committed,
     label: gh.COMMITTED_LABEL,
@@ -2524,18 +2760,18 @@ app.post('/api/repos/:name/issues/:n/committed', async (req, res) => {
   });
 });
 
-app.get('/api/settings/scheduler', (req, res) => {
-  res.json({ ...store.getSchedulerSettings(), ...scheduler.status() });
+app.get('/api/settings/scheduler', async (req, res) => {
+  res.json(await schedulerState());
 });
 
-app.post('/api/settings/scheduler', (req, res) => {
-  const body = req.body || {};
-  if (typeof body.enabled === 'boolean') store.setSchedulerEnabled(body.enabled);
-  if (typeof body.repo === 'string' && body.repo) {
-    store.setRepoSchedulerEnabled(body.repo, body.repoEnabled === null ? null : Boolean(body.repoEnabled));
+app.post('/api/settings/scheduler', async (req, res) => {
+  try {
+    res.json(await supervisorClient.postJson('/api/scheduler', req.body || {}, { timeout: 5000 }));
+  } catch (err) {
+    res.status(502).json({
+      error: `cloud-scheduler (${supervisorClient.BASE}) is not answering: ${err.message}`,
+    });
   }
-  if (body.runNow) scheduler.runSoon();
-  res.json({ ...store.getSchedulerSettings(), ...scheduler.status() });
 });
 
 // ---------------------------------------------------------------------------
@@ -2877,6 +3113,195 @@ function schedulePrSyncSweep(delayMs) {
   }, delayMs).unref();
 }
 
+// ---------------------------------------------------------------------------
+// Surviving our own restart (cloud-scheduler, :8788)
+//
+// This process is replaced constantly — it deploys itself, and the agents it
+// starts edit its code. Every one of those restarts used to strand the work in
+// flight: the detached children kept running, but the only record of them was
+// an object in the dead process's memory, so the browser showed a task frozen
+// at "Deploying…" with an empty log and a Stop button that answered 404.
+//
+// Now the processes belong to the supervisor on :8788, and the two functions
+// below are how this process rejoins them: `adoptedCallbacksFor` supplies the
+// persistence a re-attached job still owes, and `reconcileOrphanedRecords`
+// settles the rows whose process really is gone, so nothing stays "working"
+// forever.
+// ---------------------------------------------------------------------------
+
+/** `<repo>#<issue>:<action>[:<pr>]` → its parts, or null for other key shapes. */
+function parseJobKey(key) {
+  const m = /^(.+)#(\d+):([a-z]+)(?::(\d+))?$/.exec(key || '');
+  if (!m) return null;
+  return { repo: m[1], issueNumber: Number(m[2]), action: m[3], prNumber: m[4] ? Number(m[4]) : null };
+}
+
+// Which sub-record each action writes, and what its "still going" status is
+// called. Every one of these has the same {status, conversation, exitCode,
+// finishedAt} shape, which is what lets one recovery path serve them all.
+const ACTION_SLOTS = {
+  work: { busy: 'working', update: (p, patch) => store.updateRecord(p.repo, p.issueNumber, (r) => patch(r.work)) },
+  deploy: { busy: 'deploying', update: (p, patch) => store.updateDeploy(p.repo, p.issueNumber, p.prNumber, patch) },
+  merge: { busy: 'merging', update: (p, patch) => store.updateMerge(p.repo, p.issueNumber, p.prNumber, patch) },
+  update: { busy: 'updating', update: (p, patch) => store.updateBranchUpdate(p.repo, p.issueNumber, p.prNumber, patch) },
+  review: { busy: 'reviewing', update: (p, patch) => store.updateReview(p.repo, p.issueNumber, p.prNumber, patch) },
+};
+
+/**
+ * The persistence an adopted job still owes.
+ *
+ * Deliberately less than the original `onDone`: the run's lease, its base
+ * branch and the PR it was about to create all lived in the closure of a
+ * request this process never served. What can still be done honestly is done —
+ * the transcript, the exit code, the status, and for Create PR the PR itself,
+ * which GitHub can be asked about. Anything richer would be invention.
+ */
+function adoptedCallbacksFor(session) {
+  const parts = parseJobKey(session.key || (session.meta || {}).key || '');
+  if (!parts || !ACTION_SLOTS[parts.action]) return {};
+  const slot = ACTION_SLOTS[parts.action];
+  const flush = (j, final) => {
+    slot.update(parts, (s) => {
+      s.conversation = j.conversation;
+      if (j.sessionId) s.sessionId = j.sessionId;
+      if (final) {
+        s.status = final;
+        s.exitCode = j.exitCode;
+        s.finishedAt = new Date().toISOString();
+      }
+    });
+  };
+  return {
+    onSession: () => {},
+    onProgress: (j) => flush(j, null),
+    onDone: async (j) => {
+      const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
+      // A Create PR that finished while we were away has a PR on GitHub and
+      // nothing pointing at it; without this the issue would look untouched and
+      // the scheduler would cheerfully implement it a second time.
+      if (parts.action === 'work' && status === 'success') {
+        try {
+          const repo = resolveRepo(parts.repo);
+          const found = repo && (await gh.findPrForIssue(repo.ownerRepo, parts.issueNumber));
+          if (found) {
+            store.updateRecord(parts.repo, parts.issueNumber, (r) => {
+              r.work.prUrl = found.url;
+              r.work.prNumber = found.number;
+            });
+            store.upsertPr(parts.repo, parts.issueNumber, {
+              prNumber: found.number,
+              prUrl: found.url,
+              source: 'work',
+              state: 'OPEN',
+            });
+          }
+        } catch {
+          /* the hourly sync will find it */
+        }
+      }
+      flush(j, status);
+      return { action: parts.action, prNumber: parts.prNumber, status, sessionId: j.sessionId, adopted: true };
+    },
+  };
+}
+
+/**
+ * Settle every record still claiming to be busy with a process that is gone.
+ *
+ * A row stuck at "Deploying…" is worse than a failed one: it hides the action
+ * buttons, blocks the repo, and gives the scheduler a reason to skip the issue
+ * forever. `liveKeys` is the set the supervisor vouches for; anything else that
+ * says it is running has, by definition, stopped.
+ */
+function reconcileOrphanedRecords(repos, liveKeys) {
+  const settled = [];
+  const note = '\n[interrupted] The dashboard restarted and this task was no longer running.\n';
+  for (const repo of repos) {
+    for (const record of store.listRecords(repo.name)) {
+      const n = record.issueNumber;
+      const check = (action, prNumber, slotValue) => {
+        const slot = ACTION_SLOTS[action];
+        if (!slot || !slotValue || slotValue.status !== slot.busy) return;
+        const key = prNumber ? `${repo.name}#${n}:${action}:${prNumber}` : `${repo.name}#${n}:${action}`;
+        if (liveKeys.has(key)) return;
+        slot.update({ repo: repo.name, issueNumber: n, prNumber }, (s) => {
+          s.status = 'failed';
+          s.finishedAt = new Date().toISOString();
+          if (!s.conversation || !s.conversation.includes('[interrupted]')) {
+            s.conversation = (s.conversation || '') + note;
+          }
+        });
+        settled.push(key);
+      };
+      check('work', null, record.work);
+      for (const pr of Object.values(record.prs || {})) {
+        check('deploy', pr.prNumber, pr.deploy);
+        check('merge', pr.prNumber, pr.merge);
+        check('update', pr.prNumber, pr.update);
+        check('review', pr.prNumber, pr.review);
+      }
+    }
+  }
+  return settled;
+}
+
+/**
+ * Bring this process back in sync with the work that outlived it.
+ *
+ * Order matters: start the supervisor if it is not there, adopt what it holds,
+ * and only then decide which records are orphaned — reconciling first would
+ * mark a perfectly healthy running task as failed.
+ *
+ * `gh.listRepos` is deliberately called once and passed around: it shells out
+ * to git per repo and blocks the event loop for seconds, so calling it in each
+ * step made the first request after a restart look like a hung server.
+ */
+async function rejoinSupervisedWork() {
+  const ensured = await supervisorClient.ensureRunning({ root: __dirname });
+  if (ensured.started) console.log(`[supervisor] started cloud-scheduler (pid ${ensured.pid})`);
+  else if (ensured.reason !== 'already running') {
+    console.warn(`[supervisor] ${supervisorClient.BASE} unavailable: ${ensured.reason}`);
+  }
+
+  jobs.setAdoptHandler(adoptedCallbacksFor);
+  const { adopted, sessions, error } = await jobs.adoptRunning();
+  if (error) console.warn(`[supervisor] could not list sessions: ${error}`);
+  if (adopted) {
+    console.log(
+      `[supervisor] re-attached ${adopted} running session(s): ${sessions.map((s) => s.key).join(', ')}`,
+    );
+  }
+
+  let repos = [];
+  try {
+    repos = gh.listRepos(REPOS_ROOT);
+  } catch (err) {
+    console.warn(`[recovery] could not list repos: ${err.message}`);
+    return;
+  }
+
+  const running = jobs.listRunning();
+  const settled = reconcileOrphanedRecords(repos, new Set(running.map((j) => j.key)));
+  if (settled.length) {
+    console.log(`[recovery] settled ${settled.length} orphaned task(s): ${settled.join(', ')}`);
+  }
+
+  // Worktrees this pool created but no longer owns are leftovers from a crash
+  // or a restart. Removing them keeps `.worktrees/` from growing without bound;
+  // anything holding unpushed work is deliberately kept — and so is anything an
+  // adopted session is still writing to, whose lease died with the previous
+  // process even though the work did not.
+  try {
+    const inUse = new Set(running.map((j) => j.worktree).filter(Boolean));
+    const orphans = worktreePool.sweepOrphans(repos, { keep: inUse });
+    if (orphans.length) {
+      console.log(`[worktrees] removed ${orphans.length} orphaned worktree(s) from a previous run`);
+    }
+  } catch (err) {
+    console.warn(`[worktrees] startup sweep failed: ${err.message}`);
+  }
+}
+
 app.listen(PORT, HOST, () => {
   console.log(`cloud-copilot running at http://${HOST}:${PORT}`);
   console.log(`Authorized repos root: ${REPOS_ROOT}`);
@@ -2890,39 +3315,12 @@ app.listen(PORT, HOST, () => {
   scheduleBackgroundSync(BG_SYNC_FIRST_DELAY_MS);
   schedulePrSyncSweep(PR_SYNC_FIRST_DELAY_MS);
 
-  // Worktrees this pool created but no longer owns are leftovers from a crash
-  // or a restart. Removing them at startup keeps `.worktrees/` from growing
-  // without bound; anything holding unpushed work is deliberately kept.
-  try {
-    const orphans = worktreePool.sweepOrphans(gh.listRepos(REPOS_ROOT));
-    if (orphans.length) {
-      console.log(`[worktrees] removed ${orphans.length} orphaned worktree(s) from a previous run`);
-    }
-  } catch (err) {
-    console.warn(`[worktrees] startup sweep failed: ${err.message}`);
-  }
+  // The supervisor owns every running Copilot process, so rejoining it is the
+  // first thing this process does — it re-attaches the live sessions, settles
+  // the records whose process really is gone, and only then sweeps worktrees,
+  // which must not delete a checkout an adopted session is still using.
+  rejoinSupervisedWork().catch((err) => console.warn(`[supervisor] rejoin failed: ${err.message}`));
 
-  // The automatic scheduler drives `committed` issues on its own. It triggers
-  // the very same HTTP endpoints the browser does, so it needs this server's
-  // port — and it must never fight a person for a repo, hence `isRepoBusy`.
-  scheduler.init({
-    port: PORT,
-    gh,
-    store,
-    listRepos: () => gh.listRepos(REPOS_ROOT),
-    isRepoBusy: (repoName) =>
-      jobs.listRunning().some((j) => j.repo === repoName && !j.auto),
-    // Lets a sweep get a base-branch comparison for a PR that has none yet,
-    // instead of waiting up to three minutes for the periodic sweep.
-    syncRepo: (repo) => sweepRepoSync(repo),
-  });
-  scheduler.start();
-  const schedulerSettings = store.getSchedulerSettings();
-  console.log(
-    schedulerSettings.enabled
-      ? `Scheduler: ON (every ${Math.round(scheduler.INTERVAL_MS / 60000)} min)`
-      : 'Scheduler: off',
-  );
   // Recover any admin turn that was still in-flight when the previous
   // process died (e.g. a chat turn triggered its own restart mid-reply) so
   // it shows up as an "interrupted" turn instead of silently vanishing.

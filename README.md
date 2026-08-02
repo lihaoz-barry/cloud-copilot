@@ -582,8 +582,13 @@ Create PR, Update, Review and Chat no longer take over the repo's checkout, so
 - **Isolated state.** Each lease also sets `CC_DATA_DIR=<worktree>/.cc-data`, so a
   nested tool run inside a worktree can never scribble on the real
   `data/state.json`.
-- **Limits.** 3 concurrent leases per repo, 6 in total (`CC_MAX_WORKTREES*`).
-  Beyond that a run waits in a FIFO queue instead of failing.
+- **Limits.** 3 concurrent leases per repo, 6 in total (`CC_MAX_WORKTREES_PER_REPO`
+  / `CC_MAX_WORKTREES_GLOBAL`). Beyond that a run waits in a FIFO queue instead
+  of failing.
+- **One branch, one run.** A branch that a running task already holds is never
+  handed to a second one: two agents in one checkout would overwrite each
+  other's edits. The second run is refused with a "branch is busy" message and
+  can simply be retried.
 - **Never lose work.** Release reuses the existing disposability check: a worktree
   is only removed when it is clean and provably has no unpushed commits.
   Anything else is left on disk for you. Crash leftovers are swept at startup.
@@ -598,6 +603,70 @@ worktree and port it holds, whether it was started by you or automatically, a
 link to the issue, and a **Stop** button per row. The button carries a badge with
 the number of running jobs and polls every 3 seconds while open. The scheduler's
 switch and a **Run a sweep now** button live at the bottom of the same panel.
+
+## Two processes: the dashboard and cloud-scheduler
+
+cloud-copilot runs as **two servers**, and the split is the whole reason a
+restart is now uneventful:
+
+| | port | owns | restarts |
+| - | ---- | ---- | -------- |
+| **dashboard** (`server.js`) | 8787 | the UI, GitHub state, `data/state.json` | constantly — it deploys itself, and the agents it starts edit its own code |
+| **cloud-scheduler** (`scheduler-server.js`) | 8788 | every running Copilot process, their logs, and the committed-issue loop | almost never, on purpose |
+
+Before the split, both jobs lived in one process, and every self-deploy stranded
+the work in flight. The children were detached and kept running, but the only
+record of them was an object in the dead process's memory — so the browser
+showed a task frozen at *Deploying…* with an **empty log**, and its **Stop**
+button answered `404 no such running job` about a process that was very much
+alive.
+
+Now the dashboard *asks* :8788 to start a process and streams the log back.
+What that buys:
+
+- **Sessions outlive the dashboard.** Restart it as often as you like; on boot
+  it re-attaches to whatever is still running (`re-attached N running
+  session(s)` in the log) and the ⚡ panel, the live log and Stop all work again.
+- **Abort is one signal, not a lookup.** Each session is spawned `detached`, so
+  it leads its own process group; aborting sends `SIGTERM` (then `SIGKILL`) to
+  the *group*, which takes down copilot and everything under it — fastlane,
+  xcodebuild, `npm test`, playwright. The group id is on disk, so this works for
+  a session started by a dashboard that has since been replaced, and for one
+  adopted by a supervisor that has itself restarted.
+- **Logs are files, not buffers.** A session's stdout/stderr *is*
+  `data/sessions/<id>.log` — the child holds that file descriptor directly, so
+  the transcript keeps being written even when nothing is watching. (A pipe
+  would have been simpler and exactly wrong: killing the reader would kill the
+  writer.)
+- **Nothing stays "working" forever.** On boot the dashboard settles every
+  record that claims to be mid-action but has no live session, so a row can no
+  longer be stuck in a state with no process behind it.
+
+`npm start` starts the dashboard **and** launches cloud-scheduler if :8788 is
+free, detached, so it survives the next restart. To run or restart it by itself:
+
+```bash
+npm run scheduler             # foreground
+npm run cc:restart-scheduler  # replace the running one (sessions keep going)
+```
+
+### The cloud-scheduler dashboard (http://localhost:8788)
+
+A separate, deliberately plain page:
+
+- **Sessions** — everything running on this machine, with elapsed time, pid,
+  worktree port, its share of the CPU, a **Log** button that streams the real
+  file, and an **Abort** button. Tick *include finished* to see what recently
+  ended and why.
+- **Automation** — the same on/off switch and *Sweep now* as the ⚡ panel;
+  both edit the same state, which now lives in `data/scheduler.json`.
+- **Machine** — CPU (overall and per core), memory, GPU utilisation, disk, and
+  **how much of the machine the Copilot sessions themselves are using**.
+  Nothing is sampled until you press **Measure now**, because measuring costs
+  CPU too; **Push to phone** sends the same summary as an ntfy notification.
+
+Everything on :8788 is loopback-only by default (`SCHEDULER_HOST`) — it is an
+API that can start processes, so it has no business listening on a network.
 
 ## Committed issues and the scheduler
 
@@ -622,12 +691,17 @@ repo and, for each committed issue, does the highest-priority thing that is due:
    push makes the PR eligible again; the reviewed SHA is read from git, not from
    the hourly PR cache, so a review can never loop on its own push.
 
-Repos run in parallel, tasks within a repo run one at a time, and **you always
-win**: a repo with any manually started job is skipped for that sweep. Failures
-back off exponentially and, after 3 attempts, the record is flagged
-`needsAttention` and left alone. Every automatic run is a normal job — it shows
-up in the ⚡ panel, streams into the same log, and sends the same ntfy push
-(prefixed `自动 ·`).
+At most **3 runs happen at once** machine-wide (`SCHEDULER_MAX_CONCURRENT`).
+Each gets its own worktree and test port, so they genuinely run in parallel —
+but each is also a full model session plus whatever build it starts, and past
+three this machine stops being usable for the person sitting at it. Watch the
+*Machine* panel on :8788 and lower it if your hardware disagrees.
+
+**You always win**: a repo with any manually started job is skipped for that
+sweep. Failures back off exponentially and, after 3 attempts, the issue is
+flagged `needsAttention` and left alone. Every automatic run is a normal job —
+it shows up in the ⚡ panel, streams into the same log, and sends the same ntfy
+push (prefixed `自动 ·`).
 
 Ticking the checkbox **brings the next sweep forward** instead of waiting out
 the interval — committing something and watching nothing happen for ten minutes
@@ -635,12 +709,13 @@ is indistinguishable from a broken button. The checkbox shows a short `queued`
 hint when that happens. Clicking repeatedly cannot start a burst of sweeps: it
 only reschedules the one timer.
 
-The global switch is off by default and is **persisted**; on restart the
-scheduler restores it and re-checks GitHub before creating anything, so a server
-bounce never produces a duplicate PR. Under it sits one checkbox per GitHub
-repo, for keeping the scheduler off a single repo while it runs everywhere else.
-Those are opt-*outs*: a repo with no entry follows the global switch, so
-enabling a newly cloned repo is never something you can forget to do.
+The global switch is off by default and is **persisted** (in
+`data/scheduler.json`, migrated once from `state.json`); it lives in the
+cloud-scheduler process, so restarting the dashboard no longer stops or restarts
+the automation. Under it sits one checkbox per GitHub repo, for keeping the
+scheduler off a single repo while it runs everywhere else. Those are opt-*outs*:
+a repo with no entry follows the global switch, so enabling a newly cloned repo
+is never something you can forget to do.
 
 
 ## API
@@ -673,11 +748,27 @@ enabling a newly cloned repo is never something you can forget to do.
 | POST | `/api/repos/:name/issues/:n/prs/:pr/review/cancel` | Abort the running review for that PR. |
 | POST | `/api/repos/:name/issues/:n/committed` | Toggle the **committed** label on the issue. Body: `{ "committed": true }`. Writes the label on GitHub — that label *is* the state. Answers `{ committed, label, scheduled, labels }`: `labels` is the issue's full label set as the server now knows it (the client writes that into its own cache rather than guessing a patch), and `scheduled` says whether the next sweep was brought forward. |
 | GET  | `/api/version` | What code this process is actually running: `{ boot, disk, stale, reasons, committedLabel }`. `stale` compares a **content hash** of `server.js` + `lib/` against the one taken at boot — not the commit sha, which would fire on every commit of already-running code. Polled every 60s; when it says `stale`, the dashboard shows a banner, because at that point the page is talking to an API older than itself. |
-| GET  | `/api/jobs` | Everything currently running: `{ jobs, worktrees, limits, scheduler }`. Backs the ⚡ task panel; polled every 3s while it is open. |
-| POST | `/api/jobs/cancel` | Stop one running job. Body: `{ "key": "<repo>#<n>:<action>" }`. |
-| GET  | `/api/settings/scheduler` | Scheduler state: `{ enabled, repos, running, intervalMs, nextRunAt, lastRunAt, lastSummary }`. |
-| POST | `/api/settings/scheduler` | Turn the scheduler on/off (`{ enabled }`), per repo (`{ repo, enabled }`), or run a sweep now (`{ runNow: true }`). Persisted to `data/state.json` and restored on restart. |
+| GET  | `/api/jobs` | Everything currently running: `{ jobs, worktrees, limits, scheduler, supervisor }`. Includes supervised sessions this process has no job for (i.e. ones that outlived a restart). Backs the ⚡ task panel; polled every 3s while it is open. |
+| POST | `/api/jobs/cancel` | Stop one running job. Body: `{ "key": "<repo>#<n>:<action>" }`. Falls through to cloud-scheduler when this process has no record of it, so Stop works on a task that outlived a restart. |
+| GET  | `/api/settings/scheduler` | Scheduler state, proxied from :8788: `{ enabled, repos, running, intervalMs, maxConcurrent, nextRunAt, lastRunAt, lastSummary }`. `unreachable: true` when cloud-scheduler is not answering. |
+| POST | `/api/settings/scheduler` | Turn the scheduler on/off (`{ enabled }`), per repo (`{ repo, repoEnabled }`), or run a sweep now (`{ runNow: true }`). Proxied to :8788 and persisted in `data/scheduler.json`. |
 | POST | `/api/run` | Simple one-shot demo (prompt + optional `sessionId` resume). |
+
+### cloud-scheduler API (port 8788)
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| GET  | `/api/health` | `{ ok, pid, startedAt, uptimeMs, sessions, dashboard }`. |
+| POST | `/api/sessions` | Start a supervised process. Body: `{ key, bin, args, cwd, env, meta }`. `409` (with the existing session) when `key` is already running — which is what stops a retried request from duplicating a PR. |
+| GET  | `/api/sessions[?all=1]` | Running sessions, or every session on record. |
+| GET  | `/api/sessions/:id` | One session, including `pid`, `pgid`, `exitCode` and whether it is `alive`. |
+| GET  | `/api/sessions/:id/log[?tail=N]` | The transcript as plain text, straight off disk. |
+| GET  | `/api/sessions/:id/stream` | SSE: `meta` → replayed `chunk`s → `live` → live `chunk`s → `exit`. The `live` marker is what lets a reconnecting *server* tell replay from new output instead of duplicating its transcript. |
+| POST | `/api/sessions/:id/abort` | `SIGTERM` then `SIGKILL` the whole process group. |
+| POST | `/api/sessions/abort-by-key` | The same, addressed by job key. |
+| GET  | `/api/metrics` | CPU (overall + per core), load, memory, GPU, disk, and per-session CPU/RSS by process group. |
+| POST | `/api/metrics/push` | Send the metrics summary to your phone via ntfy. |
+| GET  | `/api/scheduler` | Scheduler state (what `/api/settings/scheduler` proxies). `POST` to change it. |
 
 ### SSE events
 
@@ -896,7 +987,8 @@ Other optional env vars:
 | `HOST`       | `0.0.0.0`      | Bind address (`127.0.0.1` for local-only)|
 | `MERGE_AUTO_CLEANUP` | `1`    | `0` disables closing the issue + superseded PRs after a merge |
 | `CC_MAX_WORKTREES_PER_REPO` | `3` | Concurrent worktree leases allowed per repo |
-| `CC_MAX_WORKTREES` | `6`     | Concurrent worktree leases allowed across all repos |
+| `CC_MAX_WORKTREES_GLOBAL` | `6` | Concurrent worktree leases allowed across all repos |
+| `CC_WORKTREE_ACQUIRE_TIMEOUT_MS` | `600000` | How long a run waits in the queue for a free worktree slot |
 | `CC_PORT_RANGE_START` | `8000` | First port handed to a worktree (`PORT`/`CC_TEST_PORT` inside it) |
 | `CC_PORT_RANGE_END` | `8888`  | Last port of that range |
 | `CC_COMMITTED_LABEL` | `committed` | GitHub label that marks an issue as committed |

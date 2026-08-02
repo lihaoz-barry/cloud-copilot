@@ -7,6 +7,8 @@ data/
 data/gh-cache.json
 server.js.bak
 server.log
+# cloud-scheduler (:8788) — its own log; session transcripts live in data/
+scheduler.log
 
 # per-run isolated checkouts created by lib/worktreePool.js
 .worktrees/

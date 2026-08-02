@@ -132,6 +132,28 @@
     a.wfnum { font-weight: 700; color: inherit; }
     a.wfnum:hover { text-decoration: underline; }
     .wfnum.empty { opacity: .4; }
+    /* Base-branch sync badge (issue #58), pinned at the very left of the lead:
+       ⇣N = behind by N commits, ⚠ = GitHub says the merge would conflict,
+       a faint ✓ = in sync, ? = GitHub hasn't told us (never faked as clean).
+       Fixed width so the chevron bar still starts at the same x on every row. */
+    .wfsync {
+      flex: none; width: 26px; min-height: 22px; padding: 1px 2px; border-radius: 7px;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: .68rem; font-weight: 700; font-variant-numeric: tabular-nums;
+      border: 1px solid transparent; background: transparent; color: inherit;
+      font-family: inherit; line-height: 1; touch-action: manipulation;
+    }
+    button.wfsync { cursor: pointer; }
+    button.wfsync:hover { filter: brightness(1.08); }
+    .wfsync-clean { color: #16a34a; opacity: .45; }
+    .wfsync-unknown { color: #888; opacity: .55; }
+    .wfsync-behind { background: #eab30833; border-color: #eab30855; color: #a16207; }
+    .wfsync-conflict { background: #dc262622; border-color: #dc262655; color: #b91c1c; }
+    .wfsync-updating { background: #2563eb22; border-color: #2563eb55; color: #1d4ed8; animation: pulse 1s infinite; }
+    .wfsync-failed { background: #dc262622; border-color: #dc262655; color: #b91c1c; }
+    /* Its log/abort controls sit at the left end of the tools line, under the
+       badge itself — `flex: none` so the three stage columns keep their widths. */
+    .chevtool-update { flex: none; gap: 4px; margin-right: 6px; }
     /* "⋯" reveals the per-stage log/abort/timing line, which is collapsed by
        default and force-opened while a stage is running. */
     .wfmore {
@@ -152,7 +174,7 @@
        the chevron bar above it. */
     .wfcommit {
       display: flex; align-items: baseline; gap: 6px; min-width: 0;
-      margin: 1px 0 2px 62px; font-size: .68rem; color: #888;
+      margin: 1px 0 2px 89px; font-size: .68rem; color: #888;
     }
     .wfcommit[hidden] { display: none; }
     .wfbranch {
@@ -223,7 +245,7 @@
     .chev-failed, .chev-aborted { background: #dc2626; }
     .chev-locked   { background: #93a3b8; color: #eef2f7; opacity: .85; }
     .chevtools {
-      display: flex; margin: 3px 0 3px 62px; font-size: .74rem; color: #888;
+      display: flex; margin: 3px 0 3px 89px; font-size: .74rem; color: #888;
     }
     .chevtool { flex: 1; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
     .chevtool:first-child { justify-content: flex-start; }
@@ -503,10 +525,10 @@
       }
       .labels { order: 4; max-width: 100%; }
       .wfnum { width: 34px; }
-      .chevtools { margin-left: 50px; }
+      .chevtools { margin-left: 77px; }
       /* On a phone the commit headline says more than the branch name, and
          there is only room for one — the branch is still in the ↗ target. */
-      .wfcommit { margin-left: 52px; }
+      .wfcommit { margin-left: 79px; }
       .wfbranch { display: none; }
       /* The header line already wraps on a phone; a commit chip there would
          push the repo name onto a third row. */
@@ -1044,6 +1066,56 @@ const CHEV_CLASS = {
   idle: 'chev-idle', working: 'chev-working', deploying: 'chev-deploying', merging: 'chev-merging',
   success: 'chev-success', failed: 'chev-failed', aborted: 'chev-aborted',
 };
+
+// ---- base-branch sync badge (issue #58) ------------------------------------
+// One place decides what the little box left of a PR number says, so the issue
+// list and any future view can never disagree about what "clean" means.
+// `sync` is the server-collected { state, behindBy, aheadBy, mergeable, ... }
+// (null until the first collection) and `update` is the local update job.
+function syncBadgeView(sync, update) {
+  const us = (update && update.status) || 'idle';
+  if (us === 'updating') {
+    return {
+      text: '⟳', cls: 'wfsync-updating', clickable: true,
+      title: 'Copilot is merging the base branch into this PR — click to show the log',
+    };
+  }
+  const s = (sync && sync.state) || 'unknown';
+  const behind = sync && typeof sync.behindBy === 'number' ? sync.behindBy : null;
+  const ahead = sync && typeof sync.aheadBy === 'number' ? sync.aheadBy : null;
+  const base = (sync && sync.baseRefName) || 'base';
+  const head = (sync && sync.headRefName) || 'this branch';
+  const lines = [
+    `${base} → ${head}`,
+    behind != null ? `${behind} behind` + (ahead != null ? `, ${ahead} ahead` : '') : 'ahead/behind unknown',
+    `mergeable: ${(sync && sync.mergeable) || 'UNKNOWN'}`,
+    sync && sync.at ? `checked ${new Date(sync.at).toLocaleString()}` : 'never checked',
+  ];
+  if (us === 'failed' || us === 'aborted') lines.push(`last update ${us}${update.message ? `: ${update.message}` : ''}`);
+  const failedRun = us === 'failed' || us === 'aborted';
+  if (s === 'conflict') {
+    return {
+      text: '⚠', cls: 'wfsync-conflict', clickable: true,
+      title: `Conflicts with ${base} — click to let Copilot resolve them on this branch\n${lines.join('\n')}`,
+    };
+  }
+  if (s === 'behind') {
+    return {
+      text: `⇣${behind}`, cls: 'wfsync-behind', clickable: true,
+      title: `${behind} commit(s) behind ${base} — click to merge ${base} into this branch\n${lines.join('\n')}`,
+    };
+  }
+  if (s === 'clean') {
+    return {
+      text: failedRun ? '!' : '✓', cls: failedRun ? 'wfsync-failed' : 'wfsync-clean', clickable: failedRun,
+      title: `In sync with ${base}\n${lines.join('\n')}`,
+    };
+  }
+  return {
+    text: '?', cls: failedRun ? 'wfsync-failed' : 'wfsync-unknown', clickable: true,
+    title: `Sync status unknown — GitHub hasn't reported it yet. Click to merge ${base} into this branch anyway.\n${lines.join('\n')}`,
+  };
+}
 
 // ---- pipeline auto-run depth (persisted in localStorage) -------------------
 const LS_DEPTH = 'cc.pipelineDepth';
@@ -1986,6 +2058,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   for (const pr of st.prs) {
     if (pr.deploy && pr.deploy.status === 'deploying') reconcileDeploy(pr.prNumber);
     if (pr.merge && pr.merge.status === 'merging') reconcileMerge(pr.prNumber);
+    if (pr.update && pr.update.status === 'updating') reconcileUpdate(pr.prNumber);
   }
 
   // --- blocking -------------------------------------------------------------
@@ -2124,9 +2197,13 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     ghSlot.className = 'wfgh';
     ghSlot.style.visibility = 'hidden';
     ghSlot.textContent = '↗';
+    const syncSlot = document.createElement('span');
+    syncSlot.className = 'wfsync';
+    syncSlot.style.visibility = 'hidden';
+    syncSlot.textContent = '✓';
     const lead = document.createElement('span');
     lead.className = 'wflead';
-    lead.append(num, ghSlot);
+    lead.append(syncSlot, num, ghSlot);
 
     const chevbar = document.createElement('div');
     chevbar.className = 'chevbar';
@@ -2182,6 +2259,14 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     prlog.className = 'prlog panel';
     const mergelog = document.createElement('div');
     mergelog.className = 'mergelog panel';
+    const updatelog = document.createElement('div');
+    updatelog.className = 'updatelog panel';
+
+    // Base-branch sync badge. Clicking it NEVER merges the PR into main — it
+    // starts a Copilot session that merges the base branch INTO this PR.
+    const syncBtn = document.createElement('button');
+    syncBtn.className = 'wfsync';
+    syncBtn.addEventListener('click', () => onUpdateBranch(pr.prNumber));
 
     const chevbar = document.createElement('div');
     chevbar.className = 'chevbar';
@@ -2278,7 +2363,32 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     mergeLogBtn.addEventListener('click', toggleMergeLog);
     mergeTool.append(mergeLogBtn, mergeAbortBtn, mergeTiming);
 
-    tools.append(prTool, deployTool, mergeTool);
+    const updateTool = document.createElement('span');
+    updateTool.className = 'chevtool chevtool-update';
+    const updateLogBtn = document.createElement('button');
+    updateLogBtn.className = 'iconbtn updatelog-toggle';
+    updateLogBtn.textContent = '▤';
+    updateLogBtn.title = 'Show the base-branch update log';
+    const updateAbortBtn = document.createElement('button');
+    updateAbortBtn.className = 'iconbtn abortbtn';
+    updateAbortBtn.textContent = '⨯';
+    updateAbortBtn.title = 'Abort this branch update';
+    updateAbortBtn.addEventListener('click', () => onUpdateAbort(pr.prNumber));
+    const updateTiming = document.createElement('span');
+    updateTiming.className = 'timing';
+    if (pr.update && pr.update.durationMs != null) updateTiming.textContent = `ran ${fmtDur(pr.update.durationMs)}`;
+    updateLogBtn.addEventListener('click', async () => {
+      const show = !updatelog.classList.contains('show');
+      updatelog.classList.toggle('show', show);
+      const cur = findPr(pr.prNumber);
+      const s = cur && cur.update && cur.update.status;
+      if (show && !updatelog.textContent.trim() && (s === 'success' || s === 'failed' || s === 'aborted')) {
+        await loadUpdateTranscript(pr.prNumber);
+      }
+    });
+    updateTool.append(updateLogBtn, updateAbortBtn, updateTiming);
+
+    tools.append(updateTool, prTool, deployTool, mergeTool);
 
     // "⋯" reveals the tools line; a running stage force-opens it so Abort and
     // the live log are one tap away without hunting for the toggle.
@@ -2299,10 +2409,10 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
 
     const lead = document.createElement('span');
     lead.className = 'wflead';
-    lead.append(link, ghIcon);
+    lead.append(syncBtn, link, ghIcon);
 
     row.append(lead, chevbar, more);
-    item.append(row, makeCommitLine(pr), tools, prlog, mergelog);
+    item.append(row, makeCommitLine(pr), tools, prlog, mergelog, updatelog);
 
     // Initial paint. The "Create PR" cell always reads success: this row only
     // exists because a PR was found, so its own creation is a done deal —
@@ -2327,7 +2437,12 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     const showMergeLog0 = m0 === 'merging' || (pr.merge && pr.merge.hasConversation) || m0 === 'success' || m0 === 'failed' || m0 === 'aborted';
     mergeLogBtn.hidden = !showMergeLog0;
     mergeAbortBtn.hidden = m0 !== 'merging';
-    if (s0 === 'deploying' || m0 === 'merging') item.classList.add('tools-open');
+    const u0 = (pr.update && pr.update.status) || 'idle';
+    paintSyncBadge(syncBtn, pr);
+    const showUpdateLog0 = u0 === 'updating' || (pr.update && pr.update.hasConversation) || u0 === 'success' || u0 === 'failed' || u0 === 'aborted';
+    updateLogBtn.hidden = !showUpdateLog0;
+    updateAbortBtn.hidden = u0 !== 'updating';
+    if (s0 === 'deploying' || m0 === 'merging' || u0 === 'updating') item.classList.add('tools-open');
     updateMoreBtn(item);
 
     return item;
@@ -2407,6 +2522,50 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   }
 
 
+  // --- base-branch sync badge ----------------------------------------------
+  function syncBadgeEl(prNumber) {
+    return prlist.querySelector(`.pritem[data-pr="${prNumber}"] .wfsync`);
+  }
+  function updatePanel(prNumber) {
+    return prlist.querySelector(`.pritem[data-pr="${prNumber}"] .updatelog`);
+  }
+
+  function paintSyncBadge(el, pr) {
+    if (!el) return;
+    // A merged PR has nothing left to sync — hide the badge but keep its slot
+    // so the chevron bar stays aligned with the rows above and below.
+    if (pr.state === 'MERGED') {
+      el.className = 'wfsync';
+      el.textContent = '✓';
+      el.title = '';
+      el.disabled = true;
+      el.style.visibility = 'hidden';
+      return;
+    }
+    el.style.visibility = '';
+    const view = syncBadgeView(pr.sync, pr.update);
+    el.className = `wfsync ${view.cls}`;
+    el.textContent = view.text;
+    el.title = view.title;
+    el.disabled = !view.clickable;
+  }
+
+  function paintUpdate(prNumber) {
+    const pr = findPr(prNumber);
+    if (!pr) return;
+    paintSyncBadge(syncBadgeEl(prNumber), pr);
+    const us = (pr.update && pr.update.status) || 'idle';
+    const showLog = us === 'updating' || (pr.update && pr.update.hasConversation) || us === 'success' || us === 'failed' || us === 'aborted';
+    const tool = toolEl(prNumber, 'update');
+    if (tool) {
+      const logBtn = tool.querySelector('.updatelog-toggle'); if (logBtn) logBtn.hidden = !showLog;
+      const abort = tool.querySelector('.abortbtn'); if (abort) abort.hidden = us !== 'updating';
+      const t = tool.querySelector('.timing');
+      if (t && pr.update && pr.update.durationMs != null) t.textContent = `ran ${fmtDur(pr.update.durationMs)}`;
+    }
+    setToolsOpen(prNumber, us === 'updating');
+  }
+
   function setPrTiming(prNumber, durationMs) {
     const t = prlist.querySelector(`.pritem[data-pr="${prNumber}"] .chevtool-deploy .timing`);
     if (t && durationMs != null) t.textContent = `ran ${fmtDur(durationMs)}`;
@@ -2435,8 +2594,12 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         state: p.state || (ex && ex.state) || null,
         headRefName: p.headRefName || (ex && ex.headRefName) || null,
         headCommit: p.headCommit || (ex && ex.headCommit) || null,
+        // Freshly collected sync status wins; a refresh that couldn't collect
+        // it keeps the previous value rather than blanking the badge.
+        sync: p.sync || (ex && ex.sync) || null,
         deploy: ex ? ex.deploy : (p.deploy || { status: 'idle' }),
         merge: ex ? ex.merge : (p.merge || { status: 'idle' }),
+        update: (ex && ex.update) || p.update || { status: 'idle' },
       };
     });
     renderPrs();
@@ -2444,7 +2607,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
 
   function upsertLocalPr(p) {
     if (!st.prs.find((x) => x.prNumber === p.prNumber)) {
-      st.prs.unshift({ prNumber: p.prNumber, prUrl: p.prUrl, deploy: { status: 'idle' }, merge: { status: 'idle' } });
+      st.prs.unshift({ prNumber: p.prNumber, prUrl: p.prUrl, sync: null, deploy: { status: 'idle' }, merge: { status: 'idle' }, update: { status: 'idle' } });
       renderPrs();
     }
   }
@@ -2669,6 +2832,140 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     } catch { /* ignore */ }
   }
 
+  // --- Update from base branch (per PR, issue #58) ---------------------------
+  // The badge's only meaning is "bring the latest base branch INTO this PR".
+  // It must never be confused with Merge, which goes the other way, so the
+  // confirmation spells the direction out.
+  async function onUpdateBranch(prNumber) {
+    const pr = findPr(prNumber);
+    if (!pr) return;
+    const us = (pr.update && pr.update.status) || 'idle';
+    if (us === 'updating') { const p = updatePanel(prNumber); if (p) p.classList.toggle('show'); return; }
+    // Same repo-level working-tree lock the other actions honour.
+    if (repoCtx.activeWorkIssue != null && repoCtx.activeWorkIssue !== issue.number) return;
+    const sync = pr.sync || {};
+    const base = sync.baseRefName || 'the base branch';
+    const head = sync.headRefName || `the branch of PR #${prNumber}`;
+    const what = sync.state === 'conflict'
+      ? `PR #${prNumber} conflicts with ${base}.\n\nStart a Copilot session to merge ${base} into ${head} and resolve the conflicts?`
+      : sync.state === 'behind'
+        ? `PR #${prNumber} is ${sync.behindBy} commit(s) behind ${base}.\n\nMerge ${base} into ${head} with Copilot?`
+        : `Merge ${base} into ${head} with Copilot?`;
+    if (!window.confirm(`${what}\n\nThis does NOT merge the PR into ${base}.`)) return;
+    if (!pr.update) pr.update = {};
+    pr.update.status = 'updating';
+    paintUpdate(prNumber);
+    const p = updatePanel(prNumber); if (p) p.classList.add('show');
+    await streamUpdate(prNumber, false);
+  }
+
+  async function onUpdateAbort(prNumber) {
+    const pr = findPr(prNumber);
+    if (!pr || !pr.update || pr.update.status !== 'updating') return;
+    if (!window.confirm(`Abort the branch update for PR #${prNumber}?`)) return;
+    appendUpdate(prNumber, `\n[abort requested…]\n`, 'stderr');
+    try {
+      await fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/prs/${prNumber}/update/cancel`, { method: 'POST' });
+    } catch (e) {
+      appendUpdate(prNumber, `\n[abort failed: ${e.message}]\n`, 'err');
+    }
+  }
+
+  async function streamUpdate(prNumber, reconnect) {
+    const pr = findPr(prNumber);
+    if (!pr) return;
+    if (!pr.update) pr.update = {};
+    if (reconnect) {
+      pr.update.status = 'updating';
+      paintUpdate(prNumber);
+      appendUpdate(prNumber, `\n[reconnecting branch update for PR #${prNumber}…]\n`, 'stderr');
+    }
+    const url = `/api/repos/${enc(repo.name)}/issues/${issue.number}/prs/${prNumber}/update`;
+    let finalStatus = null, resultData = null;
+    try {
+      const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (!resp.ok || !resp.body) { appendUpdate(prNumber, `\n[error] HTTP ${resp.status}\n`, 'err'); return reconcileUpdate(prNumber); }
+      await pumpSSE(resp, {
+        onMeta: () => repoCtx.setActive(issue.number),
+        onChunk: (t, s) => appendUpdate(prNumber, t, s === 'stderr' ? 'stderr' : null),
+        onError: (m) => appendUpdate(prNumber, `\n[error] ${m}\n`, 'err'),
+        onResult: (d) => { finalStatus = d.status; resultData = d; },
+        notify: notifyPr('update', prNumber),
+      });
+    } catch (e) {
+      appendUpdate(prNumber, `\n[connection dropped: ${e.message}] — update still running, checking status…\n`, 'stderr');
+      return reconcileUpdate(prNumber);
+    }
+    if (finalStatus === 'blocked') {
+      pr.update.status = 'idle';
+      paintUpdate(prNumber);
+      const p = updatePanel(prNumber); if (p) p.classList.add('show');
+      appendUpdate(prNumber, `\n${(resultData && resultData.message) || 'blocked'}\n`, 'err');
+      return;
+    }
+    if (finalStatus) {
+      pr.update.status = finalStatus;
+      pr.update.hasConversation = true;
+      if (resultData) {
+        pr.update.message = resultData.message || null;
+        // The server re-collects the sync status before answering, so the
+        // badge settles on the truth without waiting for the next refresh.
+        if (resultData.sync) pr.sync = resultData.sync;
+      }
+      paintUpdate(prNumber);
+      appendUpdate(prNumber, `\n[update #${prNumber}] finished: ${finalStatus}\n`, finalStatus === 'success' ? 'ok' : 'err');
+      if (resultData && resultData.message) {
+        appendUpdate(prNumber, `[update #${prNumber}] ${resultData.message}\n`, finalStatus === 'success' ? 'ok' : 'err');
+      }
+      repoCtx.clearActive(issue.number);
+      // A successful update pushed new commits, so Deploy/Merge were reset
+      // server-side — pull the whole record back in rather than guessing.
+      await refreshAfterUpdate(prNumber);
+    } else {
+      return reconcileUpdate(prNumber);
+    }
+  }
+
+  async function reconcileUpdate(prNumber) {
+    for (let i = 0; i < 200; i++) {
+      let rec;
+      try { rec = await fetchRecord(); } catch { await sleep(3000); continue; }
+      const prRec = (rec.prs || {})[prNumber];
+      const s = prRec && prRec.update && prRec.update.status;
+      if (s === 'success' || s === 'failed' || s === 'aborted') {
+        const pr = findPr(prNumber);
+        if (pr) { pr.update = { ...prRec.update, hasConversation: Boolean(prRec.update.conversation) }; pr.sync = prRec.sync || pr.sync; }
+        paintUpdate(prNumber);
+        appendUpdate(prNumber, `\n[update #${prNumber}] finished: ${s}\n`, s === 'success' ? 'ok' : 'err');
+        repoCtx.clearActive(issue.number);
+        if (window.CCNotify) CCNotify.jobFinished(notifyPr('update', prNumber, { status: s, replayed: true }));
+        return;
+      }
+      if (rec.live && rec.live.update && rec.live.update[prNumber]) {
+        repoCtx.setActive(issue.number);
+        return streamUpdate(prNumber, true);
+      }
+      await sleep(3000);
+    }
+    appendUpdate(prNumber, `\n[update #${prNumber}] status check timed out — tap the sync badge again.\n`, 'stderr');
+  }
+
+  async function refreshAfterUpdate(prNumber) {
+    try {
+      const rec = await fetchRecord();
+      const prRec = (rec.prs || {})[prNumber];
+      const pr = findPr(prNumber);
+      if (!prRec || !pr) return;
+      pr.update = { ...prRec.update, hasConversation: Boolean(prRec.update && prRec.update.conversation) };
+      pr.sync = prRec.sync || pr.sync;
+      pr.deploy = { ...prRec.deploy, hasConversation: Boolean(prRec.deploy && prRec.deploy.conversation) };
+      pr.merge = { ...prRec.merge, hasConversation: Boolean(prRec.merge && prRec.merge.conversation) };
+      paintUpdate(prNumber);
+      paintDeploy(prNumber);
+      paintMerge(prNumber);
+    } catch { /* ignore */ }
+  }
+
   // --- Merge flow (per PR) ---------------------------------------------------
   async function onMerge(prNumber) {
     const pr = findPr(prNumber);
@@ -2804,7 +3101,8 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       .map((p) => ({
         prNumber: p.prNumber, prUrl: p.prUrl, title: p.title, createdAt: p.createdAt,
         state: p.state || null,
-        deploy: { ...p.deploy }, merge: { ...p.merge },
+        sync: p.sync || null,
+        deploy: { ...p.deploy }, merge: { ...p.merge }, update: { ...(p.update || { status: 'idle' }) },
       }));
     st.prs = arr;
     renderPrs();
@@ -2828,6 +3126,19 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     CCChat.resetText(panelEl);
     const prRec = (rec.prs || {})[prNumber];
     const conv = prRec && prRec.deploy && prRec.deploy.conversation;
+    appendTo(panelEl, conv || '(no transcript stored yet)', conv ? null : 'stderr');
+  }
+
+  async function loadUpdateTranscript(prNumber) {
+    const panelEl = updatePanel(prNumber);
+    if (!panelEl) return;
+    panelEl.classList.add('show');
+    CCChat.resetText(panelEl);
+    panelEl.innerHTML = '<span class="stderr">loading transcript…</span>';
+    const rec = await fetchRecord();
+    CCChat.resetText(panelEl);
+    const prRec = (rec.prs || {})[prNumber];
+    const conv = prRec && prRec.update && prRec.update.conversation;
     appendTo(panelEl, conv || '(no transcript stored yet)', conv ? null : 'stderr');
   }
 
@@ -2855,6 +3166,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   function appendWork(text, cls) { appendTo(worklog, text, cls); }
   function appendDeploy(prNumber, text, cls) { const p = deployPanel(prNumber); if (p) appendTo(p, text, cls); }
   function appendMerge(prNumber, text, cls) { const p = mergePanel(prNumber); if (p) appendTo(p, text, cls); }
+  function appendUpdate(prNumber, text, cls) { const p = updatePanel(prNumber); if (p) appendTo(p, text, cls); }
 
   // --- Dismiss/hide (local only — never touches GitHub) --------------------
   async function onHide(confirmMsg) {

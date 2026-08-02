@@ -64,13 +64,16 @@ the Issues + PR flow through `gh` + `copilot -p`.
 
 Per-issue state is a small machine persisted to `data/state.json`. Each issue keeps
 one **work** (Create PR) record plus a map of **PRs**, and every PR carries its own
-**deploy** and **merge** lifecycle (status, start/finish, `durationMs`, transcript):
+**deploy**, **merge** and **update** (sync with the base branch) lifecycle
+(status, start/finish, `durationMs`, transcript) plus its last collected `sync`
+status:
 
 | Stage      | idle              | running           | success         | failed / aborted                |
 | ---------- | ----------------- | ----------------- | --------------- | -------------------------------- |
 | Create PR  | `Create PR` 🔵    | `Creating PR…` 🟡  | issue turns 🟢  | `PR failed` 🔴 / `PR aborted`    |
 | Deploy     | `Deploy` 🔵       | `Deploying…` 🟡    | `Deployed` 🟢   | `Deploy failed` 🔴 / `Aborted`   |
 | Merge      | `🔒 Merge` 🔵 (dim until Deploy succeeds) | `Merging…` 🟡 | `Merged` 🟢 | `Merge failed` 🔴 / `Aborted` |
+| Update from base | `⇣N` / `⚠` / `✓` / `?` badge | `⟳` 🔵 | badge returns to `✓` | badge stays `⇣N`/`⚠`, log kept |
 
 Each PR renders as **one workflow line** across all three stages — a **Create PR |
 Deploy | Merge** pipeline, matching the state machine above: blue = planned,
@@ -404,6 +407,48 @@ Deploy is dispatched per-repo. Drop a `.cloud-copilot.json` at a repo's root:
   pointing here. cloud-copilot never guesses a shell command for an unconfigured
   repo.
 
+### Base-branch sync badge (⇣N / ⚠) — update a PR with Copilot
+
+Every open PR's workflow line starts with a small badge, left of the PR number,
+saying how that branch relates to its base branch (usually `main`):
+
+| Badge | Meaning |
+| ----- | ------- |
+| `⇣N`  | The branch is **N commits behind** its base. |
+| `⚠`   | GitHub reports `mergeable: CONFLICTING` — merging would conflict. |
+| `✓`   | In sync: mergeable, 0 behind. Deliberately low-key. |
+| `?`   | GitHub hasn't reported yet (still computing, or a fork PR whose head this repo can't compare). Never rendered as clean. |
+| `⟳`   | An update session is running right now. |
+
+Hovering the badge shows base → head, ahead/behind, the raw `mergeable` value
+and when the data was collected.
+
+The status is collected **per repo, never per PR**: two `gh api graphql` calls
+(open-PR metadata, then one aliased `ref(...).compare(...)` field per PR) that
+ride along with the same L2 cache as issues and PRs, are refreshed by `?refresh=1`
+and by the hourly background sync, and are persisted into each PR's `sync` field
+in `data/state.json`. If the collection fails, the affected PRs fall back to `?`
+— the issue list itself never fails and no PR row disappears.
+
+**Clicking `⇣N` or `⚠` starts a Copilot session that updates the PR**, in the
+direction `base → PR head` only:
+
+- It runs in the PR branch's own working tree (an existing linked worktree is
+  reused if one holds the branch) and takes the same repo working-tree lock as
+  Create PR / Deploy / Merge / Chat, so it can never race them.
+- The session fetches, merges `origin/<base>` into the PR branch, resolves
+  conflicts, runs the relevant existing checks, commits and pushes — never a
+  force-push, never `gh pr merge`, never a new PR.
+- Success is decided by git, not by the transcript: the pushed head must
+  contain the pushed base (`0` commits behind). Otherwise the run is `failed`,
+  the log stays available behind `⋯ → ▤`, and the badge keeps telling the truth.
+- Afterwards the sync status is re-collected and the badge updates itself. A
+  successful update archives the PR's previous Deploy and re-locks Merge (the
+  old build no longer reflects the branch), exactly like an applied chat turn.
+- Progress, abort (`⨯`) and the full log live on the row's `⋯` tools line, and
+  the job survives a page reload or a dropped phone connection like every other
+  action.
+
 ### Chat with a PR (plan → apply)
 
 Click any PR to open its detail page (`#/pr/<repo>/<issue>/<pr>`). Below the same
@@ -491,6 +536,8 @@ behaviour:
 | POST | `/api/repos/:name/issues/:n/deploy/:pr/cancel` | Abort the running deploy for that PR. |
 | POST | `/api/repos/:name/issues/:n/merge/:pr` | **Merge a specific PR** — SSE stream. Body: `{ "force": false }`. Blocked unless Deploy succeeded, unless `force: true`. A failed `gh pr merge` automatically starts Copilot to investigate, resolve conflicts, retry, and verify the merge. On success the issue and the issue's other open PRs are closed automatically (`MERGE_AUTO_CLEANUP=0` disables it). |
 | POST | `/api/repos/:name/issues/:n/merge/:pr/cancel` | Abort the running merge for that PR. |
+| POST | `/api/repos/:name/issues/:n/prs/:pr/update` | **Update a PR from its base branch** — SSE stream. Starts a Copilot session in the PR's working tree that merges `base` → PR head, resolves any conflicts, and pushes. Never merges the PR into the base. Takes the repo working-tree lock; success is verified with `git rev-list --count origin/<head>..origin/<base>` (must be 0), then the sync status is re-collected and returned as `sync`. |
+| POST | `/api/repos/:name/issues/:n/prs/:pr/update/cancel` | Abort the running branch update for that PR. |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat` | **Chat with a PR** — SSE stream. Body: `{ "message": "...", "mode": "plan"\|"apply", "model": "..." }`. `plan` is read-only (default approval flags); `apply` implements + pushes to the existing branch and resets Deploy/Merge on success. The optional `model` overrides the global setting for that turn only (unknown values fall back to it). |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat/cancel` | Abort the running chat turn for that PR. |
 | POST | `/api/run` | Simple one-shot demo (prompt + optional `sessionId` resume). |

@@ -130,7 +130,7 @@ function resolveRepo(name) {
 // Merge (when its automatic Copilot recovery is needed) —
 // must be mutually exclusive per repo, or concurrent runs collide on the same
 // checkout.
-const WORKING_TREE_ACTION_RE = /^(\d+):(work|deploy|chat|merge|restart)(?::(\d+))?$/;
+const WORKING_TREE_ACTION_RE = /^(\d+):(work|deploy|chat|merge|update|restart)(?::(\d+))?$/;
 
 // Working-tree locks held by actions that are NOT backed by a `jobs` child
 // process — currently just "Restart main", which runs a few short git commands
@@ -170,6 +170,7 @@ const BUSY_ACTION_LABEL = {
   deploy: 'a Deploy',
   chat: 'a chat turn',
   merge: 'a Merge',
+  update: 'a branch update from the base branch',
   restart: 'a Restart main',
 };
 
@@ -558,6 +559,10 @@ async function syncRepoFromGitHub(repo, { force = false } = {}) {
   // Best-effort branch + tip-commit annotations; an empty map just means the
   // rows render without them.
   const headCommits = await gh.listPrHeadCommits(repo.ownerRepo, { force });
+  // How far each open PR has drifted from its base branch (issue #58) —
+  // collected for the whole repo in the same pass. A failure here yields an
+  // empty map, which renders as "unknown" and never breaks this endpoint.
+  const syncByPr = await gh.listPrSync(repo.ownerRepo, { force });
   // Whole-repo PR state, so a PR cloud-copilot created itself (which the
   // per-issue body match may not find) still learns it was closed.
   const stateByNumber = {};
@@ -578,6 +583,7 @@ async function syncRepoFromGitHub(repo, { force = false } = {}) {
         headCommit: head
           ? { sha: head.sha, abbrev: head.abbrev, committedDate: head.committedDate, headline: head.headline, url: head.url }
           : undefined,
+        sync: syncByPr[String(p.number)] || undefined,
       });
     }
     // Drop previously auto-discovered PRs that no longer match (e.g. the
@@ -673,6 +679,7 @@ app.get('/api/repos/:name/issues/:n/record', (req, res) => {
     deploy: {},
     merge: {},
     chat: {},
+    update: {},
   };
   for (const pr of Object.values(record.prs || {})) {
     record.live.deploy[pr.prNumber] = Boolean(
@@ -683,6 +690,9 @@ app.get('/api/repos/:name/issues/:n/record', (req, res) => {
     );
     record.live.chat[pr.prNumber] = Boolean(
       jobs.getJob(`${repo.name}#${n}:chat:${pr.prNumber}`)?.status === 'running',
+    );
+    record.live.update[pr.prNumber] = Boolean(
+      jobs.getJob(`${repo.name}#${n}:update:${pr.prNumber}`)?.status === 'running',
     );
   }
   res.json(record);
@@ -700,6 +710,9 @@ app.get('/api/repos/:name/issues/:n/prs', async (req, res) => {
     const prs = await gh.findPrsForIssue(repo.ownerRepo, n, { force: true });
     const headCommits = await gh.listPrHeadCommits(repo.ownerRepo, { force: true });
     const { prs: allPrs } = await gh.listAllPrs(repo.ownerRepo, { force: true });
+    // Manual refresh re-collects the base-branch sync status too, so the ⇣N /
+    // ⚠ badges are as live as the rest of the row.
+    const syncByPr = await gh.listPrSync(repo.ownerRepo, { force: true });
     for (const p of prs) {
       const head = headCommits[String(p.number)] || null;
       store.upsertPr(repo.name, n, {
@@ -713,6 +726,7 @@ app.get('/api/repos/:name/issues/:n/prs', async (req, res) => {
         headCommit: head
           ? { sha: head.sha, abbrev: head.abbrev, committedDate: head.committedDate, headline: head.headline, url: head.url }
           : undefined,
+        sync: syncByPr[String(p.number)] || undefined,
       });
     }
     // An explicit "check again now" is also the user's manual way to sweep
@@ -1602,6 +1616,251 @@ app.post('/api/repos/:name/issues/:n/merge/:pr/cancel', (req, res) => {
     return res.status(400).json({ error: 'invalid PR number' });
   }
   const cancelled = jobs.cancelJob(`${repo.name}#${n}:merge:${prNumber}`);
+  res.json({ cancelled });
+});
+
+// ---------------------------------------------------------------------------
+// Action: Update a PR with the latest base branch (issue #58)
+//
+// Direction matters: this merges base → PR head. It NEVER merges the PR into
+// main — that is what the Merge action is for, and confusing the two would ship
+// unreviewed work. The actual merge (and any conflict resolution) is done by a
+// Copilot session running in the PR's own working tree, so a conflicted branch
+// is fixed here instead of sending the user to a terminal.
+// ---------------------------------------------------------------------------
+
+// How many commits `origin/<base>` has that `origin/<head>` does not. This is
+// the authoritative answer right after a push — GitHub's own `mergeable` field
+// is computed asynchronously and lags by seconds. Returns null when it cannot
+// be determined (missing ref, git error), which callers treat as "unknown".
+function behindCount(repoPath, base, head) {
+  try {
+    execFileSync('git', ['fetch', 'origin', base, head], {
+      cwd: repoPath,
+      stdio: 'ignore',
+      timeout: 60000,
+    });
+  } catch {
+    /* fall through — the refs may still be present from an earlier fetch */
+  }
+  try {
+    const out = git(repoPath, ['rev-list', '--count', `origin/${head}..origin/${base}`], 30000);
+    const n = Number(out.trim());
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+function updatePrompt({ ownerRepo, prNumber, baseRefName, headRefName, conflicting }) {
+  return [
+    `Update the branch of pull request #${prNumber} in ${ownerRepo} so that it contains the latest \`${baseRefName}\`.`,
+    `The ONLY allowed direction is \`${baseRefName}\` → \`${headRefName}\`.`,
+    `Do NOT merge the pull request into \`${baseRefName}\`, do not run \`gh pr merge\`, and do not open a new pull request.`,
+    `The branch \`${headRefName}\` is already checked out in this working directory.`,
+    `Steps: run \`git fetch origin\`, then \`git merge origin/${baseRefName}\`.`,
+    conflicting
+      ? 'GitHub reports this branch as CONFLICTING, so expect conflicts: resolve every one of them correctly, preserving the intent of BOTH sides — never discard the base branch\'s changes and never throw away this PR\'s own work.'
+      : 'If conflicts appear, resolve every one of them correctly, preserving the intent of both sides.',
+    'After resolving, verify the result builds/passes whatever existing checks are relevant to the changed files, commit the merge, and push `' +
+      headRefName +
+      '` to origin. Never force-push.',
+    `Finally verify with \`git rev-list --count origin/${headRefName}..origin/${baseRefName}\` that it prints 0.`,
+    'If you truly cannot resolve the conflicts, run `git merge --abort` so the working tree is left clean, and explain precisely what blocked you.',
+    'Do not ask the user for confirmation — work autonomously.',
+  ].join(' ');
+}
+
+app.post('/api/repos/:name/issues/:n/prs/:pr/update', async (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const n = Number(req.params.n);
+  const prNumber = Number(req.params.pr);
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    return res.status(400).json({ error: 'invalid PR number' });
+  }
+  const key = `${repo.name}#${n}:update:${prNumber}`;
+
+  writeSseHead(res);
+
+  // Reconnect to an already-running update instead of starting a second one.
+  const existing = jobs.getJob(key);
+  if (existing && existing.status === 'running') {
+    jobs.subscribe(existing, res);
+    return;
+  }
+
+  const busyKey = findOtherRepoBusyKey(repo.name, key);
+  if (busyKey) {
+    const message = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`;
+    return sendSseBlocked(res, { action: 'update', prNumber, status: 'blocked', message });
+  }
+
+  const prInfo = await gh.getPr(repo.ownerRepo, prNumber);
+  if (!prInfo || !prInfo.headRefName) {
+    const message = `Could not resolve the branch for PR #${prNumber} via gh.`;
+    return sendSseBlocked(res, { action: 'update', prNumber, status: 'failed', message });
+  }
+  const closed = refuseIfPrClosed(repo, n, prNumber, prInfo);
+  if (closed) {
+    return sendSseBlocked(res, { action: 'update', prNumber, status: 'blocked', message: closed });
+  }
+  if (prInfo.state === 'MERGED') {
+    const message = `Blocked: PR #${prNumber} is already merged — there is nothing to update.`;
+    return sendSseBlocked(res, { action: 'update', prNumber, status: 'blocked', message });
+  }
+  const baseRefName = prInfo.baseRefName || defaultBranchOf(repo.path);
+  const headRefName = prInfo.headRefName;
+
+  // The PR's branch, in its own isolated working tree when one already holds
+  // it — same rule Deploy and Chat follow, so this can never fight them for a
+  // checkout (they are mutually excluded by the repo lock above anyway).
+  let workCwd;
+  try {
+    workCwd = checkoutBranchCwd(repo.path, headRefName);
+  } catch (err) {
+    const message = `Failed to check out branch "${headRefName}": ${err.message}`;
+    return sendSseBlocked(res, { action: 'update', prNumber, status: 'failed', message });
+  }
+
+  const storedSync = (store.getRecord(repo.name, n).prs[prNumber] || {}).sync || null;
+  const conflicting =
+    (storedSync && storedSync.state === 'conflict') ||
+    (prInfo.mergeable && prInfo.mergeable === 'CONFLICTING');
+
+  store.updateBranchUpdate(repo.name, n, prNumber, (u) => {
+    u.status = 'updating';
+    u.startedAt = new Date().toISOString();
+    u.finishedAt = null;
+    u.conversation = '';
+    u.sessionId = null;
+    u.exitCode = null;
+    u.baseRefName = baseRefName;
+    u.message = null;
+  });
+
+  const job = jobs.startJob(key, {
+    bin: COPILOT_BIN,
+    args: [
+      '-p',
+      updatePrompt({ ownerRepo: repo.ownerRepo, prNumber, baseRefName, headRefName, conflicting }),
+      '--allow-all',
+      ...modelFlags(),
+    ],
+    cwd: workCwd,
+    meta: {
+      action: 'update',
+      prNumber,
+      repo: repo.name,
+      issueNumber: n,
+      subject: cachedPrTitle(repo, prNumber) || `PR #${prNumber}`,
+    },
+    onSession: (id) =>
+      store.updateBranchUpdate(repo.name, n, prNumber, (u) => {
+        u.sessionId = id;
+      }),
+    onProgress: (j) =>
+      store.updateBranchUpdate(repo.name, n, prNumber, (u) => {
+        u.conversation = j.conversation;
+        if (j.sessionId) u.sessionId = j.sessionId;
+      }),
+    onDone: async (j) => {
+      // Trust git, not the transcript: the branch is only updated if the
+      // pushed head really contains the pushed base.
+      const behind = j.cancelled ? null : behindCount(repo.path, baseRefName, headRefName);
+      const success = !j.cancelled && j.exitCode === 0 && behind === 0;
+      const status = success
+        ? 'success'
+        : j.cancelled
+          ? 'aborted'
+          : 'failed';
+      const message = success
+        ? `Merged origin/${baseRefName} into ${headRefName} and pushed — 0 commits behind.`
+        : j.cancelled
+          ? 'Update aborted.'
+          : behind == null
+            ? `Could not verify ${headRefName} against origin/${baseRefName}.`
+            : `${headRefName} is still ${behind} commit(s) behind origin/${baseRefName}.`;
+
+      // Re-collect the repo's sync status so the badge tells the truth again,
+      // whichever way the run went. Best-effort — a failure here leaves the
+      // previous (stale) value rather than a wrong one.
+      let sync = null;
+      try {
+        const fresh = await gh.listPrSync(repo.ownerRepo, { force: true });
+        sync = fresh[String(prNumber)] || null;
+        if (sync) store.setPrSync(repo.name, n, prNumber, sync);
+        else if (behind != null) {
+          // The PR left the OPEN set (merged/closed while we ran) — fall back
+          // to what git just proved rather than keeping a stale badge.
+          sync = {
+            state: behind > 0 ? 'behind' : 'unknown',
+            behindBy: behind,
+            aheadBy: null,
+            mergeable: 'UNKNOWN',
+            mergeStateStatus: null,
+            baseRefName,
+            headRefName,
+            crossRepository: false,
+            at: Date.now(),
+          };
+          store.setPrSync(repo.name, n, prNumber, sync);
+        }
+      } catch {
+        /* keep the previous value */
+      }
+
+      store.updateBranchUpdate(repo.name, n, prNumber, (u) => {
+        u.status = status;
+        u.exitCode = j.exitCode;
+        u.conversation = j.conversation;
+        u.sessionId = j.sessionId;
+        u.finishedAt = new Date().toISOString();
+        u.message = message;
+      });
+
+      // New commits on the branch mean the previous Deploy/Merge no longer
+      // describe this code — same rule an "apply" chat turn follows.
+      if (success && behind === 0) store.resetForNewCommits(repo.name, n, prNumber);
+
+      // Leave no half-open worktree behind, whatever happened.
+      const cleanup = worktrees.cleanupAfterRun(repo.path, headRefName, {
+        skipPaths: [j.cwd],
+        fallbackRef: `origin/${baseRefName}`,
+      });
+      const cleanupText = worktrees.formatCleanup(cleanup);
+      if (cleanupText) {
+        store.updateBranchUpdate(repo.name, n, prNumber, (u) => {
+          u.conversation = `${u.conversation}\n${cleanupText}\n`;
+        });
+      }
+
+      return {
+        action: 'update',
+        prNumber,
+        status,
+        message,
+        behindBy: behind,
+        baseRefName,
+        sync,
+        worktreeCleanup: cleanup,
+      };
+    },
+  });
+
+  jobs.subscribe(job, res);
+});
+
+// Abort a running base-branch update for a specific PR.
+app.post('/api/repos/:name/issues/:n/prs/:pr/update/cancel', (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const n = Number(req.params.n);
+  const prNumber = Number(req.params.pr);
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    return res.status(400).json({ error: 'invalid PR number' });
+  }
+  const cancelled = jobs.cancelJob(`${repo.name}#${n}:update:${prNumber}`);
   res.json({ cancelled });
 });
 

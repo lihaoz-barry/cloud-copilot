@@ -31,6 +31,7 @@ const { runCopilotSSE, writeSseHead } = require('./lib/runner');
 const jobs = require('./lib/jobs');
 const notifier = require('./lib/notifier');
 const changelogLib = require('./lib/changelog');
+const salvage = require('./lib/salvage');
 const { UPLOADS_DIR, saveUploadedImages, cleanupOldUploads } = require('./lib/attachments');
 const { cleanupAfterMerge } = require('./lib/mergeCleanup');
 const worktrees = require('./lib/worktrees');
@@ -1510,14 +1511,13 @@ function refuseIfPrClosed(repo, n, prNumber, pr) {
 // forgotten. An issue + PR is the durable, reviewable form of the same rescue.
 // ---------------------------------------------------------------------------
 
+// The verification gate between the two phases lives in lib/salvage.js, with
+// git and gh injected so it can be unit-tested (test/salvage.test.js) instead of
+// only ever exercised by a live deploy.
+const salvageChecks = salvage.createSalvageChecks({ git, gh });
+
 // A one-line-per-file digest of the dirty tree, for the prompt and the log.
-function dirtySummary(repoPath) {
-  try {
-    return git(repoPath, ['status', '--porcelain']);
-  } catch {
-    return '';
-  }
-}
+const dirtySummary = (repoPath) => salvageChecks.statusPorcelain(repoPath);
 
 // Phase-1 spec when the tree is dirty, or null when it is already clean.
 function salvagePhaseSpec(repo, prNumber) {
@@ -1543,79 +1543,20 @@ function salvagePhaseSpec(repo, prNumber) {
   };
 }
 
-// Whether the salvaged commit actually exists on the remote. A clean tree only
-// proves the changes left the working tree — they could be sitting in a local
-// commit that never got pushed (gh/network failure mid-salvage), which the
-// deploy's checkout would then bury on an unreferenced branch. `HEAD` is
-// reachable from some origin/* ref exactly when the work is durable.
-function headIsPushed(repoPath) {
-  try {
-    const remotes = git(repoPath, ['branch', '-r', '--contains', 'HEAD'], 15000);
-    return remotes.length > 0;
-  } catch {
-    return false;
-  }
-}
-
-// The PR the salvage session says it opened: its URL printed in the transcript
-// (step 13 of the skill), ignoring the deploy's own PR. Returns a number or null.
-function salvagePrNumberFromTranscript(conversation, ownerRepo, deployPrNumber) {
-  const escaped = String(ownerRepo).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp(`github\\.com/${escaped}/pull/(\\d+)`, 'gi');
-  for (const m of String(conversation || '').matchAll(re)) {
-    const num = Number(m[1]);
-    if (num && num !== deployPrNumber) return num;
-  }
-  return null;
-}
-
-// Confirms the salvage really produced a reviewable pull request on GitHub.
-// Trusting the transcript alone is not enough: an agent can print a URL it
-// never created, and `gh` failures leave a clean tree with nothing durable
-// behind. Returns the verified PR, or throws.
-async function verifySalvagePr(repo, job, deployPrNumber) {
-  const claimed = salvagePrNumberFromTranscript(job.conversation, repo.ownerRepo, deployPrNumber);
-  if (claimed) {
-    const pr = await gh.getPr(repo.ownerRepo, claimed);
-    if (pr && pr.number) return pr;
-  }
-  // No URL printed (or it doesn't resolve) — fall back to asking GitHub for a
-  // PR on the branch the salvage session left checked out.
-  const branch = gh.gitBranch(repo.path);
-  const onHead = branch ? await gh.listPrsForHead(repo.ownerRepo, branch) : [];
-  if (onHead.length) return onHead[0];
-  throw new Error(
-    `Salvage preflight finished with a clean tree but no pull request could be verified` +
-      (claimed ? ` (PR #${claimed} was reported but ${repo.ownerRepo} does not have it)` : '') +
-      `. Deploy aborted: the local changes may only exist as a local commit on ` +
-      `"${branch || 'the current branch'}". Check that branch before deploying again.`,
-  );
-}
-
 // Guards the transition from the salvage phase into the deploy phase. Throws
 // (which jobs.js surfaces on the stream and turns into a failed deploy) rather
-// than deploying from a tree whose local work was not safely captured.
-async function assertSalvaged(exitCode, repo, job, deployPrNumber) {
-  if (exitCode !== 0) {
-    throw new Error(
-      `Salvage preflight exited ${exitCode} — the local changes were NOT committed. ` +
-        `Deploy aborted so nothing is lost; the working tree is untouched.`,
-    );
-  }
-  if (isDirty(repo.path)) {
-    throw new Error(
-      `Salvage preflight finished but the working tree is still dirty:\n${dirtySummary(repo.path)}\n` +
-        `Deploy aborted rather than checking out over uncommitted work.`,
-    );
-  }
-  if (!headIsPushed(repo.path)) {
-    throw new Error(
-      `Salvage preflight left commits that exist only locally on ` +
-        `"${gh.gitBranch(repo.path) || 'HEAD'}" — nothing was pushed to origin. ` +
-        `Deploy aborted: checking out another branch now would hide that work.`,
-    );
-  }
-  const pr = await verifySalvagePr(repo, job, deployPrNumber);
+// than deploying from a tree whose local work was not safely captured. See
+// lib/salvage.js for what "safely captured" is made to mean.
+async function assertSalvaged(exitCode, repo, job, deployPrNumber, deployBranch) {
+  const pr = await salvageChecks.assertSalvaged({
+    exitCode,
+    repoPath: repo.path,
+    ownerRepo: repo.ownerRepo,
+    conversation: job.conversation,
+    deployPrNumber,
+    deployBranch,
+    defaultBranch: defaultBranchOf(repo.path),
+  });
   jobs.note(job, `\n[preflight] local changes salvaged into ${pr.url || `PR #${pr.number}`}\n`);
 }
 
@@ -1757,7 +1698,7 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
       },
       nextPhase: salvage
         ? async (j, code) => {
-            await assertSalvaged(code, repo, j, prNumber);
+            await assertSalvaged(code, repo, j, prNumber, pr.headRefName);
             jobs.note(j, `\n[preflight] working tree clean — checking out ${pr.headRefName} and deploying…\n`);
             const spec = await prepareDeployPhase();
             reachedDeploy = true;
@@ -1895,7 +1836,7 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
       },
       nextPhase: salvage
         ? async (j, code) => {
-            await assertSalvaged(code, repo, j, prNumber);
+            await assertSalvaged(code, repo, j, prNumber, pr.headRefName);
             jobs.note(j, `\n[preflight] working tree clean — checking out ${pr.headRefName} and deploying…\n`);
             checkout();
             reachedDeploy = true;
@@ -3428,6 +3369,24 @@ function adoptedCallbacksFor(session) {
     onSession: () => {},
     onProgress: (j) => flush(j, null),
     onDone: async (j) => {
+      // A deploy adopted mid-salvage is NOT a deploy: this process has no
+      // `nextPhase` for it, so the deploy phase never runs. Without this, a
+      // salvage session that exits 0 would be recorded as a successful deploy
+      // of a build that was never made.
+      if ((session.meta || {}).phase === 'salvage') {
+        const interrupted = j.cancelled ? 'aborted' : 'failed';
+        j.conversation +=
+          '\n[preflight] The dashboard restarted during the salvage preflight, so the deploy ' +
+          'phase never ran. The salvaged work is unaffected — re-run Deploy when ready.\n';
+        flush(j, interrupted);
+        return {
+          action: parts.action,
+          prNumber: parts.prNumber,
+          status: interrupted,
+          sessionId: j.sessionId,
+          adopted: true,
+        };
+      }
       const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
       // A Create PR that finished while we were away has a PR on GitHub and
       // nothing pointing at it; without this the issue would look untouched and

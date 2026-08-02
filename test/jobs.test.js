@@ -96,6 +96,7 @@ test('runs both phases back-to-back under one job, one done, one result', async 
   assert.strictEqual(doneCalls, 1, 'onDone fires once, after the LAST phase');
   assert.strictEqual(count(res.events.map((e) => e.event).join(','), 'done'), 1);
   assert.strictEqual(job.phase, 'deploy');
+  assert.strictEqual(job.meta.phase, 'deploy', 'meta follows the phase, so listRunning() is not stale');
   assert.strictEqual(job.exitCode, 0);
   assert.strictEqual(job.result.status, 'success');
 
@@ -225,6 +226,11 @@ test('note() lands in the transcript and on the stream', async () => {
   const job = jobs.startJob(uniqueKey('note'), { ...nodePhase('X') });
   jobs.subscribe(job, res);
   jobs.note(job, '[preflight] hello\n');
+  assert.strictEqual(
+    job._logBase,
+    job.conversation.length,
+    'a note written before the session speaks is prologue, so a replay rebuild keeps it',
+  );
   await waitDone(job);
   assert.ok(job.conversation.includes('[preflight] hello'));
   assert.ok(res.events.some((e) => e.event === 'chunk' && e.data.text.includes('[preflight] hello')));

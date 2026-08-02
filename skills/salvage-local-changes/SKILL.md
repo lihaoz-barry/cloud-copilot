@@ -67,12 +67,15 @@ A clean working tree is *not* enough: the caller also checks that
 
 - `HEAD` is contained in some `origin/*` ref — i.e. the salvaged commit was
   actually pushed, not just committed locally, and
-- the pull request really exists on GitHub (the URL you printed is looked up;
-  failing that, PRs on the branch you left checked out are).
+- a pull request that is **open**, is **not** the one being deployed, is not
+  headed by the default branch, and whose head commit **contains** the commit you
+  left at `HEAD` really exists on GitHub. Each PR URL you print is looked up (last
+  one first); failing that, open PRs on the branch you left checked out are.
 
-If either check fails the deploy is aborted and nothing is checked out, so a
-half-finished salvage (commit made, `gh`/push failed) can never bury the work.
-Push and open the PR — do not stop at a local commit.
+So printing a URL is not enough on its own — the PR has to be real and has to
+carry the work. If the check fails the deploy is aborted and nothing is checked
+out, so a half-finished salvage (commit made, `gh`/push failed) can never bury
+the work. Push and open the PR — do not stop at a local commit.
 
 ## Notes
 - Non-interactive runs need broad permissions; cloud-copilot invokes Copilot with

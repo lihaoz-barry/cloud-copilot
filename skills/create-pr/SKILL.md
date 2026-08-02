@@ -11,15 +11,22 @@ an issue number, take it from "open issue" to "PR that closes it", autonomously.
 ## Inputs
 - `OWNER/REPO` — the GitHub repository (has a `github.com` origin remote).
 - `#N` — the issue number to implement.
-- Working directory = the local clone of that repo.
+- Working directory = a checkout of that repo. When `CC_WORKTREE` is set it is a
+  **dedicated linked worktree** created just for this run, already sitting on the
+  up-to-date base branch and thrown away afterwards.
+- `CC_TEST_PORT` / `PORT` — a port reserved for **this run only**. If you need to
+  boot a server to verify the change, bind that port and nothing else: other runs
+  are happening at the same time on other ports.
 
 ## Steps
 
 1. **Read the issue.** `gh issue view N --json title,body,labels,number`. Understand
    the acceptance criteria before touching code.
-2. **Clean base.** `git status`. If there are unrelated uncommitted changes, stash
-   them (`git stash push -m "wip before #N"`). Start from an up-to-date default
-   branch: `git checkout main && git pull --quiet` (use the repo's real default).
+2. **Clean base.** `git status`. In a `CC_WORKTREE` run the tree is already clean
+   and already on the freshly fetched base commit — do **not** check out or pull
+   another branch, and do **not** stash. Otherwise start from an up-to-date default
+   branch: `git checkout main && git pull --quiet` (use the repo's real default),
+   stashing unrelated changes first (`git stash push -m "wip before #N"`).
 3. **Branch.** Create a descriptive branch: `git checkout -b fix-N-short-slug`.
 4. **Implement end-to-end.** Make the actual code changes required to satisfy the
    issue. Build/lint/test where a toolchain exists. Do not stop at a partial change.
@@ -35,7 +42,9 @@ an issue number, take it from "open issue" to "PR that closes it", autonomously.
 ## Notes
 - Non-interactive runs need broad permissions; cloud-copilot invokes Copilot with
   `--allow-all` so file edits, `git`, and `gh` run without prompts.
-- One PR-creation per repo at a time — concurrent runs would collide on the same
-  working tree. cloud-copilot enforces this lock in its UI/server.
+- **Several PR creations can run at once**, including on the same repo: each gets
+  its own worktree (`CC_WORKTREE`), its own port (`CC_TEST_PORT`) and its own data
+  directory (`CC_DATA_DIR`). Stay inside the working directory you were given and
+  never touch another worktree or the repo's main checkout.
 - If you cannot complete the issue, still push what you have and open a **draft** PR,
   and clearly state what remains.

@@ -93,3 +93,48 @@ test('opening one drawer closes the other', () => {
   assert.match(openDepth, /closeNotifyDrawer\(\)/);
   assert.match(openNotify, /closeDepthDrawer\(\)/);
 });
+
+test('sub-headings inside the scrolling body keep the compact drawer sizing', () => {
+  // The notify drawer ships a second <h3> ("📲 Phone push"). Before the
+  // head/body split it was styled by `.settings-drawer h3`; with no body rule
+  // it falls back to the UA's 1.17em / 1em-margin heading and looks broken.
+  assert.match(ruleBody('.drawer-body h3'), /font-size:\s*1rem/);
+  const bodies = html.match(/<div class="drawer-body">[\s\S]*?\n  <\/div>/g) || [];
+  const bodyH3s = bodies.reduce((n, b) => n + (b.match(/<h3/g) || []).length, 0);
+  assert.ok(bodyH3s > 0, 'expected at least one <h3> inside a .drawer-body');
+});
+
+test('Tab is trapped inside the open drawer, as aria-modal promises', () => {
+  const helper = /function drawerFocusables\(drawer\)[\s\S]*?\n\}/.exec(html);
+  assert.ok(helper, 'no drawerFocusables() helper');
+  // A radio group is a single tab stop; counting every radio puts `last` on an
+  // unreachable element and Tab escapes the drawer. The ⏩ Depth drawer is all
+  // radios, so this is not a theoretical case.
+  assert.match(helper[0], /radio/);
+  assert.match(helper[0], /checked/);
+
+  const handler = /if \(e\.key !== 'Tab'\) return;[\s\S]*?\n\}\);/.exec(html);
+  assert.ok(handler, 'no Tab handler for the drawers');
+  assert.match(handler[0], /openDrawerEl\(\)/);
+  assert.match(handler[0], /e\.preventDefault\(\)/);
+  assert.match(handler[0], /shiftKey/, 'Shift+Tab must wrap backwards too');
+});
+
+test('closing a drawer never strands focus on a hidden element', () => {
+  for (const [fn, fab, scrim] of [
+    ['closeNotifyDrawer', 'notifyFab', 'notifyScrim'],
+    ['closeDepthDrawer', 'depthFab', 'depthScrim'],
+  ]) {
+    const src = new RegExp(`function ${fn}\\(\\)[\\s\\S]*?\\n\\}`).exec(html);
+    assert.ok(src, `no ${fn}()`);
+    assert.match(src[0], new RegExp(`${fab}\\.focus\\(`), `${fn} must return focus to #${fab}`);
+    // A scrim tap blurs the focused control before the click handler runs, so
+    // document.activeElement is <body> — that must still count as "inside".
+    assert.match(src[0], /document\.body/, `${fn} must handle a blurred (body) focus`);
+    assert.match(src[0], new RegExp(scrim), `${fn} must handle focus sitting on the scrim`);
+  }
+  // Moving focus must not scroll the page behind the drawer.
+  const focusCalls = html.match(/\b(?:notifyFab|depthFab|notifyCloseBtn|depthCloseBtn)\.focus\([^)]*\)/g) || [];
+  assert.ok(focusCalls.length >= 4, 'expected focus() calls on both FABs and both ✕ buttons');
+  for (const call of focusCalls) assert.match(call, /preventScroll:\s*true/, `${call} should preventScroll`);
+});

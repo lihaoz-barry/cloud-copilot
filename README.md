@@ -788,7 +788,11 @@ just the latest one per PR. Each deploy attempt is archived into the store
 new commits to it — never overwrites the earlier build's record, even when both
 attempts report the same version string. An attempt that never reported a result
 (the server restarted mid-deploy) is archived as `aborted` with a note rather
-than dropped, so nothing that ran is missing from the list.
+than dropped, so nothing that ran is missing from the list. A PR record that
+carries builds is also never deleted by the housekeeping sweeps: `gh pr list` is
+capped at 100 PRs, so on a busy repo an older PR eventually stops being reported
+(and a closed PR is hidden rather than forgotten) — either way its record, and
+therefore its build history, is kept.
 
 Each row shows: app, version + build number, deploy status, start/finish time and
 duration, the branch and the exact commit that was shipped, the PR and issue, the

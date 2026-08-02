@@ -195,3 +195,31 @@ test('migrating a record that already pinned a commit does not wipe it', () => {
   assert.strictEqual(builds[0].commit.abbrev, 'deadbee');
   assert.strictEqual(builds[0].branch, null);
 });
+
+test('a PR that fell out of the gh scan keeps its builds instead of being deleted', () => {
+  writeState({});
+  // Both PRs were auto-discovered by the `gh pr list` scan (which is capped at
+  // 100 PRs, so an older PR eventually stops being reported).
+  store.upsertPr('app', 40, { prNumber: 41, source: 'gh', prUrl: 'https://gh/pr/41' });
+  store.upsertPr('app', 40, { prNumber: 42, source: 'gh', prUrl: 'https://gh/pr/42' });
+  store.updateDeploy('app', 40, 41, (d) => {
+    d.status = 'success';
+    d.buildNumber = 101;
+    d.version = '4.0';
+    d.startedAt = '2024-12-01T00:00:00.000Z';
+    d.finishedAt = '2024-12-01T00:06:00.000Z';
+  });
+
+  // A refresh where neither PR matches any more.
+  store.pruneStaleGhPrs('app', 40, []);
+
+  const record = store.getRecord('app', 40);
+  assert.ok(record.prs[41], 'a PR that shipped a build must not be deleted');
+  assert.strictEqual(record.prs[42], undefined, 'a PR with no local footprint is still pruned');
+  const { builds } = store.listAllBuilds();
+  assert.deepStrictEqual(
+    builds.map((b) => b.buildNumber),
+    [101],
+    'the build history must survive the prune',
+  );
+});

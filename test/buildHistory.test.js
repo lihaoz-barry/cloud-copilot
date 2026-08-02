@@ -159,6 +159,18 @@ test('summarizeFailure tolerates junk input', () => {
   assert.ok(buildHistory.summarizeFailure(long).length <= 240);
 });
 
+test('summarizeFailure only scans the tail of a huge transcript', () => {
+  // Deploy transcripts are full CLI logs; this runs for every failed build on
+  // every request, so the cost must not grow with the size of the log.
+  const noise = `${'step ok\n'.repeat(200000)}`; // ~1.6 MB
+  const transcript = `ERROR: this one is far too early to matter\n${noise}ERROR: code signing failed\ndone\n`;
+  assert.strictEqual(buildHistory.summarizeFailure(transcript), 'ERROR: code signing failed');
+  // With an explicit tiny window the early line is out of reach entirely.
+  assert.strictEqual(buildHistory.summarizeFailure(transcript, { tailBytes: 64 }), 'ERROR: code signing failed');
+  // A truncated first line is never reported as the reason.
+  assert.strictEqual(buildHistory.summarizeFailure('a-very-long-error-prefix\nplain tail', { tailBytes: 12 }), 'plain tail');
+});
+
 // --- annotateBuilds: what the /api/testflight/builds route does to the list --
 
 const iosRepo = (name) => ({ name, path: `/repos/${name}`, ownerRepo: `o/${name}` });

@@ -65,8 +65,11 @@ finish, so anything still uncommitted is destroyed.
 
 A clean working tree is *not* enough: the caller also checks that
 
-- `HEAD` is contained in some `origin/*` ref — i.e. the salvaged commit was
-  actually pushed, not just committed locally, and
+- `HEAD` is contained in an `origin/*` ref **other than the default branch** —
+  i.e. you really made a commit out of those changes and really pushed it. A tree
+  that went clean without a commit (a dropped stash, a deleted untracked file)
+  leaves `HEAD` exactly where `origin/<default>` already has it, and that is
+  rejected as "nothing was captured", and
 - a pull request that is **open**, is **not** the one being deployed, is not
   headed by the default branch, and whose head commit **contains** the commit you
   left at `HEAD` really exists on GitHub. Each PR URL you print is looked up (last

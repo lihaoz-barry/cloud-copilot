@@ -488,11 +488,16 @@ function findSelfRepo() {
 }
 
 // Argument-array git (never a shell string) against a specific repo.
+// stderr is captured rather than inherited: callers need it on `err.stderr`
+// (that is the whole point of routing the deploy checkout through here), but
+// letting it also reach this process's console would spray `git fetch` progress
+// into the server log on every deploy.
 function git(repoPath, args, timeout = 20000) {
   return execFileSync('git', ['-C', repoPath, ...args], {
     encoding: 'utf8',
     timeout,
     maxBuffer: 4 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
   }).trim();
 }
 
@@ -1588,7 +1593,10 @@ async function assertSalvaged(exitCode, repo, job, deployPrNumber, deployBranch)
     exitCode,
     repoPath: repo.path,
     ownerRepo: repo.ownerRepo,
-    conversation: job.conversation,
+    // Only the salvage session's own output: the URLs that count are the ones
+    // THIS phase printed, not anything the preflight banner or an earlier phase
+    // happens to contain.
+    conversation: jobs.phaseLog(job),
     deployPrNumber,
     deployBranch,
     defaultBranch: defaultBranchOf(repo.path),

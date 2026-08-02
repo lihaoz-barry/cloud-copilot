@@ -27,6 +27,7 @@ function fakeGit({ dirty = '', remotes = ['origin/salvage-7-fix'], ancestorOf = 
     calls.push(args.join(' '));
     if (args[0] === 'status') return dirty;
     if (args[0] === 'branch') return remotes.join('\n');
+    if (args[0] === 'rev-parse') return 'deadbee';
     if (args[0] === 'merge-base') {
       if (!ancestorOf.includes(args[3])) throw new Error(`Command failed: git merge-base ${args[3]}`);
       return '';
@@ -143,8 +144,43 @@ test('a closed or merged PR does not count as a rescue', async () => {
 
 test('a PR headed by the default branch is refused (no salvage branch was cut)', async () => {
   const checks = createSalvageChecks({
-    git: fakeGit({ remotes: ['origin/main'] }),
-    gh: fakeGh({ prs: { 77: openPr({ headRefName: 'main' }) }, branch: 'main' }),
+    git: fakeGit(),
+    gh: fakeGh({ prs: { 77: openPr({ headRefName: 'main' }) } }),
+  });
+  await rejects(checks.assertSalvaged(args()), /no pull request could be verified/);
+});
+
+test('a salvage that produced no commit at all is refused', async () => {
+  // The nastiest shape of "looks salvaged but isn't": the agent tidied the tree
+  // without committing (dropped the stash, deleted the untracked file), so HEAD
+  // never moved and origin/<default> already contains it. Every PR cut from the
+  // default branch then trivially "contains HEAD", so any URL in the transcript
+  // would otherwise satisfy the gate — and the checkout would destroy the work.
+  const checks = createSalvageChecks({
+    git: fakeGit({ remotes: ['origin/HEAD -> origin/main', 'origin/main'], ancestorOf: ['c'.repeat(40)] }),
+    gh: fakeGh({
+      prs: { 55: openPr({ number: 55, headRefName: 'someone-elses-branch', headRefOid: 'c'.repeat(40) }) },
+      branch: 'main',
+    }),
+  });
+  await rejects(
+    checks.assertSalvaged(args({ conversation: `see also https://github.com/${OWNER}/pull/55\n` })),
+    /no commit of its own.*already contained in origin\/main/s,
+  );
+});
+
+test('the default branch alone is never evidence, even when a PR is on it', () => {
+  const checks = createSalvageChecks({ git: fakeGit(), gh: fakeGh() });
+  assert.deepStrictEqual(
+    checks.salvageRemotes(['origin/HEAD', 'origin/main', 'origin/salvage-7-fix'], 'main'),
+    ['origin/salvage-7-fix'],
+  );
+});
+
+test('a PR whose state gh did not report is not proof (fail closed)', async () => {
+  const checks = createSalvageChecks({
+    git: fakeGit(),
+    gh: fakeGh({ prs: { 77: openPr({ state: undefined }) } }),
   });
   await rejects(checks.assertSalvaged(args()), /no pull request could be verified/);
 });

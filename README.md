@@ -450,12 +450,16 @@ a two-phase job, streaming into the same deploy log:
    push, and open a PR that closes the issue. It does **not** merge that PR.
 2. **Deploy** — the salvage is verified before anything is checked out: the tree
    must be clean (`git status --porcelain` empty), `HEAD` must be contained in an
-   `origin/*` ref (so the commit really was pushed, not just made locally), and an
-   **open** pull request whose head commit contains that `HEAD` must exist on
-   GitHub (each URL printed by the session is looked up, with PRs on the leftover
-   branch as a fallback). A URL the agent prints but never created therefore does
-   not pass. Only then does the PR's branch get checked out and the normal deploy
-   proceed. The gate itself lives in `lib/salvage.js` and is unit-tested.
+   `origin/*` ref **other than the default branch** (so a commit really was made
+   from those changes *and* pushed — a tree that went clean without a commit
+   leaves `HEAD` where `origin/main` already has it), and an **open** pull request
+   whose head commit contains that `HEAD` must exist on GitHub (each URL printed
+   by the session is looked up, with PRs on the leftover branch as a fallback).
+   A URL the agent prints but never created therefore does not pass, and neither
+   does an unrelated PR — once `HEAD` is known to be a commit the default branch
+   does not have, "contains `HEAD`" can only be true of the salvage's own PR.
+   Only then does the PR's branch get checked out and the normal deploy proceed.
+   The gate itself lives in `lib/salvage.js` and is unit-tested.
 
 If the salvage session fails, or the tree is still dirty afterwards, or the work
 never reached GitHub, the deploy fails **without** checking anything out — local

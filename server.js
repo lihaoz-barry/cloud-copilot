@@ -28,6 +28,7 @@ const repoConfig = require('./lib/repoConfig');
 const { runCopilotSSE, writeSseHead } = require('./lib/runner');
 const jobs = require('./lib/jobs');
 const notifier = require('./lib/notifier');
+const changelogLib = require('./lib/changelog');
 const { UPLOADS_DIR, saveUploadedImages, cleanupOldUploads } = require('./lib/attachments');
 
 const HOST = process.env.HOST || '0.0.0.0';
@@ -1029,21 +1030,8 @@ function sendSseBlocked(res, payload) {
   res.end();
 }
 
-// Builds the "What to Test" text TestFlight testers see, from the PR title
-// (falling back to a generic version/build string). Strips characters that
-// could break out of the single-quoted shell argument the agent is told to
-// pass to `fastlane beta` — the PR title comes from GitHub and is never
-// trusted as shell-safe.
-function buildChangelog(pr, issueNumber, version, buildNumber) {
-  const raw = (pr && pr.title) || '';
-  const cleaned = raw.replace(/['"`$\\]/g, '').replace(/\s+/g, ' ').trim();
-  const suffix = issueNumber ? ` (closes #${issueNumber})` : '';
-  const text = cleaned ? `${cleaned}${suffix}` : `v${version || '1.0'} (build ${buildNumber})`;
-  return text.slice(0, 500); // TestFlight "What to Test" is short; keep it well under Apple's limit
-}
-
 function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
-  gh.getPr(repo.ownerRepo, prNumber).then((pr) => {
+  gh.getPr(repo.ownerRepo, prNumber).then(async (pr) => {
     if (!pr || !pr.headRefName) {
       const message = `Could not resolve the branch for PR #${prNumber} via gh.`;
       store.updateDeploy(repo.name, n, prNumber, (d) => {
@@ -1079,9 +1067,18 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
     }
 
     const versionArg = version ? ` version:${version}` : '';
-    // "What to Test" text testers see in TestFlight — derived from the PR
-    // title so builds are self-describing instead of shipping with no notes.
-    const changelog = buildChangelog(pr, n, version, buildNumber);
+    // "What to Test" text testers see in TestFlight — one short Chinese
+    // sentence derived from the PR title, so builds are self-describing
+    // instead of shipping the raw (often English, prefixed, issue-tagged)
+    // title. Best-effort translation with a deterministic fallback; see
+    // lib/changelog.js. Awaited before the deploy job starts so the pinned
+    // text is in the prompt.
+    const changelog = await changelogLib.resolveChangelog({
+      pr,
+      version,
+      buildNumber,
+      copilotBin: COPILOT_BIN,
+    });
     const prompt =
       `The branch for PR #${prNumber} is already checked out. Deploy the current ` +
       `${repo.name} app to TestFlight using the testflight-deploy skill, running ` +

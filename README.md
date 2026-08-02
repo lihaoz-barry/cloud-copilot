@@ -476,6 +476,38 @@ encodes the correct signing team, bundle id, and App Store Connect API key for
 `ios-diet-expert`. (The generic `ios-deploy` skill is intentionally **not** used —
 `testflight-deploy` supersedes it.)
 
+### "What to Test" — one short Chinese line per build
+
+The note TestFlight testers read is pinned by the server, not left to the agent.
+[`lib/changelog.js`](lib/changelog.js) turns the PR title into it in two steps:
+
+1. **Deterministic cleanup** (always): drop characters that would break out of the
+   single-quoted `changelog:'…'` argument, strip issue references
+   (`(closes #79)`, `fixes #7`, a bare trailing `#7`) and commit-type prefixes
+   (`feat:`, `fix(ui)!:`), keep only the Chinese half of a bilingual
+   `中文 / English` title, and truncate to 40 characters.
+2. **Translation** (only when the cleaned title still isn't Chinese): one headless
+   `copilot -p` call that returns a single `WHAT_TO_TEST:` line. Best-effort — a
+   missing binary, a timeout, or a reply with no Chinese in it falls back to the
+   step-1 text, so this can never block or fail a deploy.
+
+A build with no usable title gets `v1.4 构建 63（暂无变更说明）`.
+
+| Env var | Default | Effect |
+| ------- | ------- | ------ |
+| `CHANGELOG_MODEL` | `claude-haiku-4.5` | Model for the translation hop — small and fast, since it runs inline before the deploy starts (~10s) |
+| `CHANGELOG_TIMEOUT_MS` | `60000` | Give up on the translation and use the cleaned title |
+
+Examples:
+
+| PR title | What to Test |
+| -------- | ------------ |
+| `feat: Add household size, default goal, and servings preferences to Settings (closes #39)` | 新增家庭人数和默认目标设置 |
+| `ci: wire Xcode Cloud build to CI/CD` | Xcode Cloud 构建现已接入 CI/CD 流程 |
+| `将 Cook Now 改造为可复用的做饭任务流程 / Cook Now as a reusable cooking task flow (closes #79)` | 将 Cook Now 改造为可复用的做饭任务流程 |
+
+Run `npm test` to exercise the deterministic half (`test/changelog.test.js`).
+
 ---
 
 ## Replicate on another machine
@@ -704,6 +736,7 @@ cloud-copilot/
 ├── .cloud-copilot.json # this repo's own deploy config (shell -> cc:restart)
 ├── server.js           # Express app: repos/issues/work/deploy/merge routes + state machine
 ├── lib/
+│   ├── changelog.js    # PR title -> short Chinese TestFlight "What to Test" note
 │   ├── gh.js           # enumerate repos, list issues/PRs/single-PR via `gh` (cached)
 │   ├── ghCache.js      # L2 cache for gh results, persisted to data/gh-cache.json
 │   ├── store.js        # per-issue status persisted to data/state.json
@@ -727,6 +760,8 @@ cloud-copilot/
 │   └── notify.env.example    # -> ~/.config/cloud-copilot/notify.env (ntfy pushes)
 ├── scripts/
 │   └── gen-assets.js   # regenerates public/icons + public/sounds (no deps)
+├── test/
+│   └── changelog.test.js  # `npm test` — What to Test note building (node --test)
 ├── data/               # state.json (gitignored)
 ├── .gitignore
 └── README.md

@@ -1982,6 +1982,18 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   // brand-new copilot/deploy run. Rendering the same issue twice (e.g. once
   // pinned, once in the repo list) doubles this risk, which is how a single
   // stuck "Creating PR…" turned into two real duplicate PRs (#109 and #110).
+  // A card can be told to reconcile the same action twice (page load already
+  // started polling, then Abort asks again). One poller per action is enough —
+  // a second only duplicates its "finished" line and its notification.
+  const reconciling = new Set();
+  function withReconcileGuard(tag, fn) {
+    if (reconciling.has(tag)) return Promise.resolve();
+    reconciling.add(tag);
+    return Promise.resolve()
+      .then(fn)
+      .finally(() => reconciling.delete(tag));
+  }
+
   if (st.work.status === 'working') reconcileWork();
   for (const pr of st.prs) {
     if (pr.deploy && pr.deploy.status === 'deploying') reconcileDeploy(pr.prNumber);
@@ -2496,9 +2508,27 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     if (!window.confirm(`Abort creating PR for issue #${issue.number}?`)) return;
     appendWork('\n[abort requested…]\n', 'stderr');
     try {
-      await fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/work/cancel`, { method: 'POST' });
+      const r = await fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/work/cancel`, { method: 'POST' });
+      await afterAbort(r, 'PR creation', () => reconcileWork(), (t, k) => appendWork(t, k));
     } catch (e) {
       appendWork(`\n[abort failed: ${e.message}]\n`, 'err');
+    }
+  }
+
+  // What happens after a cancel request decides whether the user sees anything
+  // at all. A live job dies and its own SSE stream reports the result, but a
+  // row left behind by a restarted server has no stream — the server just
+  // reconciled the stored record, and only a poll will repaint it. Without
+  // this, Abort looked like it did nothing.
+  async function afterAbort(resp, what, reconcile, log) {
+    let d = {};
+    try { d = await resp.json(); } catch { /* older server: assume it killed something */ }
+    if (d.reconciled) {
+      log(`\n[${what} was no longer running — the stuck row has been cleared]\n`, 'stderr');
+      reconcile();
+    } else if (d.aborted === false) {
+      log(`\n[nothing to abort — ${what} is not running]\n`, 'stderr');
+      reconcile();
     }
   }
 
@@ -2547,7 +2577,8 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     }
   }
 
-  async function reconcileWork() {
+  function reconcileWork() { return withReconcileGuard('work', reconcileWorkOnce); }
+  async function reconcileWorkOnce() {
     for (let i = 0; i < 200; i++) {
       let rec;
       try { rec = await fetchRecord(); } catch { await sleep(3000); continue; }
@@ -2592,7 +2623,8 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     if (!window.confirm(`Abort the current deploy for PR #${prNumber}?`)) return;
     appendDeploy(prNumber, `\n[abort requested…]\n`, 'stderr');
     try {
-      await fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/deploy/${prNumber}/cancel`, { method: 'POST' });
+      const r = await fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/deploy/${prNumber}/cancel`, { method: 'POST' });
+      await afterAbort(r, `the deploy for PR #${prNumber}`, () => reconcileDeploy(prNumber), (t, k) => appendDeploy(prNumber, t, k));
     } catch (e) {
       appendDeploy(prNumber, `\n[abort failed: ${e.message}]\n`, 'err');
     }
@@ -2638,7 +2670,8 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     }
   }
 
-  async function reconcileDeploy(prNumber) {
+  function reconcileDeploy(prNumber) { return withReconcileGuard(`deploy:${prNumber}`, () => reconcileDeployOnce(prNumber)); }
+  async function reconcileDeployOnce(prNumber) {
     for (let i = 0; i < 200; i++) {
       let rec;
       try { rec = await fetchRecord(); } catch { await sleep(3000); continue; }
@@ -2695,7 +2728,8 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     if (!window.confirm(`Abort the current merge for PR #${prNumber}?`)) return;
     appendMerge(prNumber, `\n[abort requested…]\n`, 'stderr');
     try {
-      await fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/merge/${prNumber}/cancel`, { method: 'POST' });
+      const r = await fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/merge/${prNumber}/cancel`, { method: 'POST' });
+      await afterAbort(r, `the merge for PR #${prNumber}`, () => reconcileMerge(prNumber), (t, k) => appendMerge(prNumber, t, k));
     } catch (e) {
       appendMerge(prNumber, `\n[abort failed: ${e.message}]\n`, 'err');
     }
@@ -2755,7 +2789,8 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     }
   }
 
-  async function reconcileMerge(prNumber) {
+  function reconcileMerge(prNumber) { return withReconcileGuard(`merge:${prNumber}`, () => reconcileMergeOnce(prNumber)); }
+  async function reconcileMergeOnce(prNumber) {
     for (let i = 0; i < 200; i++) {
       let rec;
       try { rec = await fetchRecord(); } catch { await sleep(3000); continue; }

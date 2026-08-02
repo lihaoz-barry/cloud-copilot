@@ -186,6 +186,32 @@ function describeBusyKey(repoName, busyKey) {
   return `${label}${prSuffix} is already running for issue #${issueNum} in ${repoName}`;
 }
 
+/**
+ * Abort one action, whether or not a live process is still behind it.
+ *
+ * Killing the job manager's child is only half the story: if the server was
+ * restarted (or the process died some other way) while the action was running,
+ * nothing is left to kill, yet the STORED record is still sitting at
+ * "working"/"deploying"/"merging". Before this, cancel would return
+ * `{cancelled:false}` and change nothing — the row stayed stuck forever and the
+ * Abort button visibly did nothing.
+ *
+ * So: kill the job if there is one, and in every case force the stored record
+ * out of its live status. `cancelled` says a process was actually signalled,
+ * `reconciled` says a phantom record was cleaned up; the client only needs
+ * `aborted` (either of the two) to know the row will now settle.
+ */
+function abortAction(repoName, issueNumber, action, prNumber = null) {
+  const key = prNumber == null
+    ? `${repoName}#${issueNumber}:${action}`
+    : `${repoName}#${issueNumber}:${action}:${prNumber}`;
+  const cancelled = jobs.cancelJob(key);
+  // A live job writes its own terminal state from the `close` handler, so only
+  // touch the record when there was nothing left to kill.
+  const reconciled = cancelled ? false : store.forceAbort(repoName, issueNumber, action, prNumber);
+  return { cancelled, reconciled, aborted: cancelled || reconciled };
+}
+
 // ---------------------------------------------------------------------------
 // Context for task-aware push notifications (issue #27). A push has to say
 // *which* task of *which* repo finished, so every job's `meta` carries the
@@ -1105,8 +1131,7 @@ app.post('/api/repos/:name/issues/:n/work/cancel', (req, res) => {
   const repo = resolveRepo(req.params.name);
   if (!repo) return res.status(404).json({ error: 'repo not found' });
   const n = Number(req.params.n);
-  const cancelled = jobs.cancelJob(`${repo.name}#${n}:work`);
-  res.json({ cancelled });
+  res.json(abortAction(repo.name, n, 'work'));
 });
 
 // ---------------------------------------------------------------------------
@@ -1392,10 +1417,8 @@ app.post('/api/repos/:name/issues/:n/deploy/:pr/cancel', (req, res) => {
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
     return res.status(400).json({ error: 'invalid PR number' });
   }
-  const cancelled = jobs.cancelJob(`${repo.name}#${n}:deploy:${prNumber}`);
-  res.json({ cancelled });
+  res.json(abortAction(repo.name, n, 'deploy', prNumber));
 });
-
 // ---------------------------------------------------------------------------
 // Action: Merge a specific PR. A failed gh merge automatically starts Copilot
 // to investigate, resolve branch conflicts, push, and retry the merge.
@@ -1601,8 +1624,7 @@ app.post('/api/repos/:name/issues/:n/merge/:pr/cancel', (req, res) => {
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
     return res.status(400).json({ error: 'invalid PR number' });
   }
-  const cancelled = jobs.cancelJob(`${repo.name}#${n}:merge:${prNumber}`);
-  res.json({ cancelled });
+  res.json(abortAction(repo.name, n, 'merge', prNumber));
 });
 
 // ---------------------------------------------------------------------------
@@ -2024,5 +2046,13 @@ app.listen(PORT, HOST, () => {
   const recovered = store.reconcileInterruptedAdminTurns();
   if (recovered.length) {
     console.log(`Recovered ${recovered.length} interrupted admin turn(s): ${recovered.map((r) => r.turnId).join(', ')}`);
+  }
+  // Same treatment for Create PR / Deploy / Merge: a restart kills every child,
+  // so anything still stored as running is an orphan whose terminal state will
+  // never be written. Left alone it keeps its row spinning forever and its
+  // Abort button powerless, so settle it as aborted right here.
+  const orphans = store.reconcileOrphanedJobs((k) => jobs.getJob(k)?.status === 'running');
+  if (orphans.length) {
+    console.log(`Marked ${orphans.length} interrupted job(s) as aborted: ${orphans.join(', ')}`);
   }
 });

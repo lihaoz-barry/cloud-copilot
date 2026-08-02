@@ -752,6 +752,7 @@ is never something you can forget to do.
 | POST | `/api/jobs/cancel` | Stop one running job. Body: `{ "key": "<repo>#<n>:<action>" }`. Falls through to cloud-scheduler when this process has no record of it, so Stop works on a task that outlived a restart. |
 | GET  | `/api/settings/scheduler` | Scheduler state, proxied from :8788: `{ enabled, repos, running, intervalMs, maxConcurrent, nextRunAt, lastRunAt, lastSummary }`. `unreachable: true` when cloud-scheduler is not answering. |
 | POST | `/api/settings/scheduler` | Turn the scheduler on/off (`{ enabled }`), per repo (`{ repo, repoEnabled }`), or run a sweep now (`{ runNow: true }`). Proxied to :8788 and persisted in `data/scheduler.json`. |
+| GET  | `/api/testflight/builds` | **TestFlight build history** — every deploy attempt ever recorded for `ios-testflight` repos (live + archived), newest first: `{ builds, errors, total, generatedAt }`. Each build carries version, build number, start/finish/duration, deploy status, branch + commit, PR/issue, the "What to Test" note, and a short failure reason for failed attempts. Attempts are never collapsed — several builds of the same version stay separate rows. Records that cannot be read land in `errors` instead of failing the response; `repoKnown` is false when the repo is no longer configured on this machine (its builds are still listed). A repo whose `.cloud-copilot.json` cannot be parsed also keeps its builds — the reason is reported in `errors` rather than making that app's whole history silently vanish from the page. |
 | POST | `/api/run` | Simple one-shot demo (prompt + optional `sessionId` resume). |
 
 ### cloud-scheduler API (port 8788)
@@ -776,6 +777,50 @@ is never something you can forget to do.
 (`{sessionId}`) → `result` (`{action,status,prUrl?,prNumber?}`, where `status` is
 `success`/`failed`/`aborted`, or `blocked` when the working-tree lock rejects
 an overlapping Deploy/Merge/Restart, or Merge is attempted before Deploy has succeeded) → `done` (`{exitCode}`).
+
+---
+
+## TestFlight tab — full build history
+
+The **✈️ TestFlight** tab lists *every* build the pipeline has ever shipped, not
+just the latest one per PR. Each deploy attempt is archived into the store
+(`deployHistory`) before the next one starts, so re-deploying a PR — or pushing
+new commits to it — never overwrites the earlier build's record, even when both
+attempts report the same version string. An attempt that never reported a result
+(the server restarted mid-deploy) is archived as `aborted` with a note when the
+next attempt starts, rather than dropped, so nothing that ran is missing from the
+list — while a deploy that is still running is left alone, because chat/review/
+update turns finish in their own worktrees and must not archive a build that has
+not ended. A PR record that
+carries builds is also never deleted by the housekeeping sweeps: `gh pr list` is
+capped at 100 PRs, so on a busy repo an older PR eventually stops being reported
+(and a closed PR is hidden rather than forgotten) — either way its record, and
+therefore its build history, is kept.
+
+Each row shows: app, version + build number, deploy status, start/finish time and
+duration, the branch and the exact commit that was shipped, the PR and issue, the
+"What to Test" note, and — for failed/aborted attempts — the exit code and a
+one-line reason extracted from the deploy transcript. The version, build number
+and "What to Test" note are pinned onto the record when the deploy starts, so a
+failed attempt still shows what it was trying to ship (a successful one is then
+corrected to the numbers Apple actually assigned). Superseded attempts are
+badged `attempt n/m · superseded`; only the current attempt keeps its Merge
+button, and that button is disabled with an explanation when it could only fail —
+the PR is already merged, or closed without being merged, or its repo is no
+longer configured on this machine.
+A build whose repo is no longer configured on this machine stays in the list —
+it is marked `repo not configured here`, since
+every action route keyed on that repo would 404. Only repos whose deploy type is
+readable *and* isn't `ios-testflight` are filtered off the page: an app with a
+broken `.cloud-copilot.json` keeps its history and gets a line in the warning
+banner instead.
+
+The toolbar filters by version, status, date range and app. Filtering is purely a
+view over the full in-memory history (and `↻ Refresh` re-reads the complete
+history from the server), so no filter or refresh can drop a build. Failures are
+isolated at every level: a record the server cannot read is reported in a banner
+while the rest of the history still renders, a build that cannot be rendered
+becomes a single error card, and a failed load offers a **Retry** button.
 
 ---
 
@@ -1057,6 +1102,7 @@ cloud-copilot/
 ├── scripts/restart.sh  # the restart itself: port-identified, waits, fails loudly
 ├── server.js           # Express app: repos/issues/work/deploy/merge routes + state machine
 ├── lib/
+│   ├── buildHistory.js # flattens every deploy attempt into the TestFlight build history
 │   ├── changelog.js    # PR title -> short Chinese TestFlight "What to Test" note
 │   ├── gh.js           # enumerate repos, list issues/PRs/single-PR via `gh` (cached)
 │   ├── ghCache.js      # L2 cache for gh results, persisted to data/gh-cache.json

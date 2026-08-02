@@ -31,6 +31,7 @@ const { runCopilotSSE, writeSseHead } = require('./lib/runner');
 const jobs = require('./lib/jobs');
 const notifier = require('./lib/notifier');
 const changelogLib = require('./lib/changelog');
+const buildHistory = require('./lib/buildHistory');
 const { UPLOADS_DIR, saveUploadedImages, cleanupOldUploads } = require('./lib/attachments');
 const { cleanupAfterMerge } = require('./lib/mergeCleanup');
 const worktrees = require('./lib/worktrees');
@@ -547,6 +548,32 @@ function checkoutBranchCwd(repoPath, branch) {
   return repoPath;
 }
 
+/**
+ * Snapshot of the commit a deploy is about to ship, recorded on the build so
+ * history rows stay accurate. Best-effort: any git failure yields null rather
+ * than blocking the deploy.
+ */
+function readShippedCommit(cwd, ownerRepo) {
+  try {
+    const out = execFileSync('git', ['log', '-1', '--format=%H%n%h%n%cI%n%s'], {
+      cwd,
+      encoding: 'utf8',
+      timeout: 15000,
+    }).trim();
+    const [sha, abbrev, committedDate, ...rest] = out.split('\n');
+    if (!sha) return null;
+    return {
+      sha,
+      abbrev: abbrev || sha.slice(0, 7),
+      committedDate: committedDate || null,
+      headline: rest.join(' ') || null,
+      url: ownerRepo ? `https://github.com/${ownerRepo}/commit/${sha}` : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // origin's default branch (usually `main`), falling back to "main".
 function defaultBranchOf(repoPath) {
   try {
@@ -799,34 +826,28 @@ app.post('/api/settings/self/restart-main', (req, res) => {
 // title as the "What to Test" note), and whether it's been merged yet.
 // ---------------------------------------------------------------------------
 app.get('/api/testflight/builds', (req, res) => {
-  // Resolve each repo once, not once per build: the scan behind `resolveRepo`
-  // is synchronous, so doing it per row blocked the event loop for the whole
-  // page's worth of builds.
-  const repoByName = new Map();
-  const repoFor = (name) => {
-    if (!repoByName.has(name)) repoByName.set(name, resolveRepo(name));
-    return repoByName.get(name);
-  };
-  // Likewise cache the deploy config per repo rather than re-reading it per row.
-  const deployTypeByPath = new Map();
-  const deployType = (repoPath) => {
-    if (!deployTypeByPath.has(repoPath)) {
-      deployTypeByPath.set(repoPath, repoConfig.loadDeployConfig(repoPath).type);
-    }
-    return deployTypeByPath.get(repoPath);
-  };
-  const builds = store
-    .listAllBuilds()
-    .map((b) => {
-      const repo = repoFor(b.repo);
-      return { ...b, ownerRepo: repo?.ownerRepo || null, _repo: repo };
-    })
-    // Only ever show builds shipped through the ios-testflight deploy path —
-    // repos configured for a "shell" deploy (e.g. a restart script) aren't
-    // TestFlight builds and would otherwise pollute this page.
-    .filter((b) => !b._repo || deployType(b._repo.path) === 'ios-testflight')
-    .map(({ _repo, ...b }) => b);
-  res.json({ builds });
+  let listed;
+  try {
+    listed = store.listAllBuilds();
+  } catch (err) {
+    return res.status(500).json({ error: `Could not read build history: ${err.message}`, builds: [], errors: [] });
+  }
+  const errors = [...(listed.errors || [])];
+  const annotated = buildHistory.annotateBuilds(listed.builds, {
+    resolveRepo,
+    // `loadDeployConfig` reports a broken/unreadable `.cloud-copilot.json` as
+    // `{ type: null, error }` rather than throwing. Treating that as "not a
+    // TestFlight repo" would make the app's entire build history disappear from
+    // this page without a word, so raise it: annotateBuilds then keeps the
+    // builds and surfaces the reason once.
+    deployTypeOf: (repo) => {
+      const cfg = repoConfig.loadDeployConfig(repo.path);
+      if (cfg.error) throw new Error(cfg.error);
+      return cfg.type;
+    },
+  });
+  errors.push(...annotated.errors);
+  res.json({ builds: annotated.builds, errors, total: annotated.builds.length, generatedAt: new Date().toISOString() });
 });
 
 /**
@@ -1552,6 +1573,19 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
         execFileSync('git', ['rev-list', '--count', 'HEAD'], { cwd: workCwd, encoding: 'utf8', timeout: 15000 }).trim(),
       );
       version = repoConfig.readMarketingVersion(workCwd); // null if not found — fastlane then uses its own default
+      // Pin what this attempt ships onto the deploy record right away, so the
+      // TestFlight history keeps showing the right branch/commit for this build
+      // even after the PR gets new commits (or is merged and deleted) — and so
+      // an attempt that FAILS still reports the version/build number it tried,
+      // instead of rendering as a nameless "(no build number)" row. `onDone`
+      // overwrites the two with Apple's own numbers once the upload succeeds.
+      const shipped = readShippedCommit(workCwd, repo.ownerRepo);
+      store.updateDeploy(repo.name, n, prNumber, (d) => {
+        d.branch = pr.headRefName;
+        d.commit = shipped;
+        d.buildNumber = Number.isFinite(buildNumber) ? buildNumber : null;
+        d.version = version;
+      });
     } catch (err) {
       const message = `Failed to check out branch "${pr.headRefName}" / compute build number: ${err.message}`;
       store.updateDeploy(repo.name, n, prNumber, (d) => {
@@ -1574,6 +1608,11 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
       version,
       buildNumber,
       copilotBin: COPILOT_BIN,
+    });
+    // Pin the "What to Test" note too: it is what this attempt actually sends
+    // to fastlane, so a failed build should still show what it was shipping.
+    store.updateDeploy(repo.name, n, prNumber, (d) => {
+      d.changelog = changelog;
     });
     const prompt =
       `The branch for PR #${prNumber} is already checked out. Deploy the current ` +

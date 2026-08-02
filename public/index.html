@@ -1319,8 +1319,12 @@ function readIssueCache(repoName) {
   } catch { return null; }
 }
 
-function writeIssueCache(repoName, payload) {
-  const entry = { localAt: Date.now(), serverAt: payload.serverAt ?? payload.at ?? null, payload };
+// `localAt` is overridable so a statuses-only patch can write the merged
+// payload back WITHOUT restarting the TTL clock — the GitHub half of this
+// payload is exactly as old as it was, and silently renewing it would keep the
+// issue list from ever refreshing for someone who visits often enough.
+function writeIssueCache(repoName, payload, localAt = Date.now()) {
+  const entry = { localAt, serverAt: payload.serverAt ?? payload.at ?? null, payload };
   try {
     localStorage.setItem(LS_ISSUE_CACHE + repoName, JSON.stringify(entry));
   } catch {
@@ -1605,12 +1609,59 @@ async function loadIssues(repo, body, force = false) {
   const cached = force ? null : readIssueCache(repo.name);
   if (cached) {
     renderIssueList(repo, body, cached.payload, cached.localAt);
-    // Fresh enough — render and stop. No request leaves the browser at all.
-    if (Date.now() - cached.localAt < L1_TTL_MS) return;
+    // GitHub metadata is fresh enough to reuse — but the action statuses that
+    // came along with it are live server state this browser cannot have seen
+    // change (a Create PR started on another machine, say). Paint from cache
+    // for speed, then patch the live half in. See issue #52.
+    if (Date.now() - cached.localAt < L1_TTL_MS) return void patchStatuses(repo, body);
   } else {
     body.innerHTML = '<div class="muted" style="padding:8px 4px">Loading issues…</div>';
   }
   await fetchIssues(repo, body, { force, silent: Boolean(cached) });
+}
+
+/**
+ * Re-read just the live half of an already-rendered (cache-backed) issue list
+ * and re-render if anything actually moved. Cheap: `/statuses` reads state.json
+ * and the job table, never `gh`.
+ */
+async function patchStatuses(repo, body) {
+  const cached = readIssueCache(repo.name);
+  if (!cached) return;
+  const numbers = cached.payload.issues.map((i) => i.number);
+  if (!numbers.length) return;
+  let data;
+  try {
+    data = await fetch(`/api/repos/${enc(repo.name)}/statuses?n=${numbers.join(',')}`)
+      .then((x) => x.json());
+  } catch { return; }
+  if (!data || data.error || !data.statuses) return;
+  if (!body.isConnected) return;
+
+  const merged = {
+    ...cached.payload,
+    issues: cached.payload.issues.map((i) =>
+      (data.statuses[i.number] ? { ...i, status: data.statuses[i.number] } : i)),
+    activeWorkIssues: data.activeWorkIssues || [],
+  };
+  const same =
+    JSON.stringify(merged.issues.map((i) => i.status)) ===
+      JSON.stringify(cached.payload.issues.map((i) => i.status)) &&
+    (merged.activeWorkIssues[0] ?? null) ===
+      ((cached.payload.activeWorkIssues || [])[0] ?? null);
+  if (same) return; // nothing moved — leave the DOM (and any live SSE panel) alone
+
+  // A re-render tears down the DOM, so never do it under a log panel a live
+  // SSE stream is writing into. Leave the cache stale too: it is the only
+  // record that this change still needs applying, so the next pass (the 60s
+  // sweep, or the next visit) retries instead of silently swallowing it.
+  if (body.querySelector('.worklog.show, .prlog.show, .mergelog.show')) return;
+
+  // Same localAt — only the live half was re-read, the GitHub half has not got
+  // any younger, and renewing the TTL here would keep the issue list from ever
+  // refreshing for someone who visits often enough.
+  writeIssueCache(repo.name, merged, cached.localAt);
+  renderIssueList(repo, body, merged, cached.localAt);
 }
 
 /**
@@ -1777,7 +1828,10 @@ setInterval(() => {
     if (!m.body.isConnected || !m.body.closest('.repo.open')) continue;
     if (m.repoCtx && m.repoCtx.activeWorkIssue != null) continue;
     const cached = readIssueCache(name);
-    if (cached && Date.now() - cached.localAt < L1_TTL_MS) continue;
+    // Still fresh: no need to re-read GitHub, but a job may well have started
+    // from another machine since the last paint — that half is always worth
+    // re-checking, and costs no `gh` call (issue #52).
+    if (cached && Date.now() - cached.localAt < L1_TTL_MS) { patchStatuses(m.repo, m.body); continue; }
     fetchIssues(m.repo, m.body, { silent: true });
   }
 }, 60000);

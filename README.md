@@ -155,8 +155,16 @@ GraphQL node limit at 100 PRs.) The commit query is decorative: if it fails, the
 rows simply render without their branch/commit annotations.
 
 - **Expanding a repo** renders from L1 immediately — if that copy is under 15
-  minutes old, **no request leaves the browser at all**. A reload of a page with
-  an already-expanded repo therefore issues zero issue requests.
+  minutes old, **no GitHub read happens at any tier**. A reload of a page with an
+  already-expanded repo therefore issues zero `gh` calls.
+- **L1 only caches the GitHub half.** The action statuses that ride along in the
+  same payload (`work`/`deploy`/`merge`, plus `activeWorkIssues`) are live
+  server state, and a job started from another machine is invisible to a cached
+  render. So every cache-backed render is immediately followed by a
+  `/api/repos/:name/statuses` call, which reads `state.json` and the job table
+  and never touches `gh`; the list is repainted only if something actually
+  moved. The 60-second sweep does the same for repos still inside the TTL, so a
+  page left open notices a remote job within a minute.
 - **Past the TTL**, the browser silently asks the server and updates the list in
   place. That request usually costs nothing beyond L2; only if the server's own
   copy has aged out does it reach for `gh`.
@@ -438,6 +446,7 @@ behaviour:
 | GET  | `/api/settings/self` | The cloud-copilot repo serving this app: `{ repo, branch, defaultBranch, dirty, busy }`, or `{ repo: null }`. |
 | POST | `/api/settings/self/restart-main` | **Restart main** — stash if dirty, check out the default branch, `pull --ff-only`, then restart detached. Takes the repo working-tree lock; `409` when it's held. |
 | GET  | `/api/repos/:name/issues[?refresh=1]` | List open issues merged with local status; includes `activeWorkIssues` (repo lock) and cache telemetry (`serverAt`, `ttlMs`, `nextSyncAt`) for the freshness pill. Served from the L2 cache (15 min TTL, persisted to `data/gh-cache.json`); `?refresh=1` forces a live `gh` read and rewrites it. Also auto-discovers and persists PRs referencing these issues (one whole-repo `gh pr list`, same cache). |
+| GET  | `/api/repos/:name/statuses?n=1,2,3` | Just the live half of the list above: `{ statuses, activeWorkIssues }` for the given issue numbers. Reads `state.json` + the in-memory job table only — never `gh`, never the L2 cache — so the client can call it on every cache-backed render and once a minute thereafter. |
 | GET  | `/api/repos/:name/issues/:n/record` | Full stored record (work + per-PR deploy/merge, transcripts, `live` flags). |
 | GET  | `/api/repos/:name/issues/:n/prs` | Force-refresh the PR list for one issue from GitHub — always live, bypasses the whole-repo PR cache. |
 | POST | `/api/repos/:name/issues/:n/work` | **Create PR** — SSE stream. Body: `{ "mode": "allow-all" }`. |

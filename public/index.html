@@ -235,9 +235,9 @@
       padding: 9px 13px; box-shadow: 0 6px 20px #0004;
     }
     .depth-drawer {
-      position: fixed; top: 0; right: 0; height: 100%; width: min(280px, 86vw); z-index: 41;
+      position: fixed; top: 0; right: 0; height: 100%; width: min(280px, 86vw); z-index: 70;
       background: Canvas; color: CanvasText; border-left: 1px solid #8884; box-shadow: -8px 0 30px #0006;
-      padding: 18px 16px; transform: translateX(100%); transition: transform .2s ease; overflow-y: auto;
+      transform: translateX(100%); transition: transform .2s ease;
     }
     .depth-drawer.show { transform: translateX(0); }
     .depth-drawer h3 { margin: 0 0 4px; font-size: 1rem; }
@@ -251,9 +251,31 @@
     .depth-option .lbl { font-weight: 600; font-size: .88rem; }
     .depth-option .desc { color: #888; font-size: .76rem; margin-top: 2px; }
     .depth-scrim {
-      position: fixed; inset: 0; z-index: 40; background: #0004; display: none;
+      position: fixed; inset: 0; z-index: 69; background: #0004; display: none;
     }
     .depth-scrim.show { display: block; }
+
+    /* Shared drawer chrome (⏩ Depth + 🔔 Alerts). Both drawers sit above the
+       floating .navbar (z-index 60) so the nav pill can never paint over their
+       headers, and they respect the iOS status-bar / home-indicator insets. */
+    .settings-drawer, .depth-drawer { display: flex; flex-direction: column; overflow: hidden; }
+    .drawer-head {
+      position: sticky; top: 0; flex: none; z-index: 1;
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      padding: calc(14px + env(safe-area-inset-top, 0px)) 16px 10px;
+      background: Canvas; border-bottom: 1px solid #8883;
+    }
+    .drawer-head h3 { margin: 0; font-size: 1rem; }
+    .drawer-close {
+      flex: none; background: transparent; color: inherit; border: none; cursor: pointer;
+      font: inherit; font-size: 1rem; line-height: 1; opacity: .6;
+      padding: 8px 10px; border-radius: 10px; touch-action: manipulation;
+    }
+    .drawer-close:hover { opacity: 1; background: #8881; }
+    .drawer-body {
+      flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch;
+      padding: 14px 16px calc(18px + env(safe-area-inset-bottom, 0px));
+    }
 
     .panel {
       margin-top: 8px; border: 1px solid #8883; border-radius: 10px; padding: 10px;
@@ -701,9 +723,9 @@
       padding: 9px 13px; box-shadow: 0 6px 20px #0004;
     }
     .settings-drawer {
-      position: fixed; top: 0; left: 0; height: 100%; width: min(320px, 90vw); z-index: 41;
+      position: fixed; top: 0; left: 0; height: 100%; width: min(320px, 90vw); z-index: 70;
       background: Canvas; color: CanvasText; border-right: 1px solid #8884; box-shadow: 8px 0 30px #0006;
-      padding: 18px 16px; transform: translateX(-100%); transition: transform .2s ease; overflow-y: auto;
+      transform: translateX(-100%); transition: transform .2s ease;
     }
     .settings-drawer.show { transform: translateX(0); }
     .settings-drawer h3 { margin: 0 0 4px; font-size: 1rem; }
@@ -963,8 +985,12 @@
   <button id="notifyFab" class="ghost notify-fab" title="Notification settings" aria-label="Notification settings">🔔 Alerts</button>
   <div id="depthScrim" class="depth-scrim"></div>
   <div id="notifyScrim" class="depth-scrim"></div>
-  <div id="notifyDrawer" class="settings-drawer">
-    <h3>🔔 Task alerts</h3>
+  <div id="notifyDrawer" class="settings-drawer" role="dialog" aria-modal="true" aria-label="Task alerts" aria-hidden="true">
+    <div class="drawer-head">
+      <h3>🔔 Task alerts</h3>
+      <button type="button" class="drawer-close" id="notifyClose" title="Close" aria-label="Close notification settings">✕</button>
+    </div>
+    <div class="drawer-body">
     <p class="hint">Get told the moment a Create PR / Deploy / Merge / chat turn finishes — even if you switched apps or locked the phone.</p>
     <label class="toggle-row">
       <input type="checkbox" id="notifySound">
@@ -990,9 +1016,14 @@
     <div class="actions">
       <button id="ntfyTest" class="ghost sm">▶ Test phone push</button>
     </div>
+    </div>
   </div>
-  <div id="depthDrawer" class="depth-drawer">
-    <h3>Auto-run depth</h3>
+  <div id="depthDrawer" class="depth-drawer" role="dialog" aria-modal="true" aria-label="Auto-run depth" aria-hidden="true">
+    <div class="drawer-head">
+      <h3>Auto-run depth</h3>
+      <button type="button" class="drawer-close" id="depthClose" title="Close" aria-label="Close auto-run depth settings">✕</button>
+    </div>
+    <div class="drawer-body">
     <p class="hint">Clicking Create PR runs one stage after another, automatically, until it reaches the depth you pick here. A stage only advances on success.</p>
     <label class="depth-option">
       <input type="radio" name="depth" value="pr">
@@ -1006,6 +1037,7 @@
       <input type="radio" name="depth" value="merge">
       <span><span class="lbl">…through Merge</span><div class="desc">Keep going through Deploy, then Merge, with no more clicks.</div></span>
     </label>
+    </div>
   </div>
 
 <script src="/notify.js"></script>
@@ -1059,10 +1091,20 @@ const depthScrim = document.getElementById('depthScrim');
 function syncDepthRadios() {
   document.querySelectorAll('input[name="depth"]').forEach((r) => { r.checked = r.value === pipelineDepth(); });
 }
-function openDepthDrawer() { syncDepthRadios(); depthDrawer.classList.add('show'); depthScrim.classList.add('show'); }
-function closeDepthDrawer() { depthDrawer.classList.remove('show'); depthScrim.classList.remove('show'); }
+function openDepthDrawer() {
+  syncDepthRadios();
+  depthDrawer.classList.add('show');
+  depthDrawer.setAttribute('aria-hidden', 'false');
+  depthScrim.classList.add('show');
+}
+function closeDepthDrawer() {
+  depthDrawer.classList.remove('show');
+  depthDrawer.setAttribute('aria-hidden', 'true');
+  depthScrim.classList.remove('show');
+}
 depthFab.addEventListener('click', openDepthDrawer);
 depthScrim.addEventListener('click', closeDepthDrawer);
+document.getElementById('depthClose').addEventListener('click', closeDepthDrawer);
 document.querySelectorAll('input[name="depth"]').forEach((r) => {
   r.addEventListener('change', () => { if (r.checked) setPipelineDepth(r.value); });
 });
@@ -1112,14 +1154,24 @@ function openNotifyDrawer() {
   syncNotifyUi();
   syncNtfyUi();
   notifyDrawer.classList.add('show');
+  notifyDrawer.setAttribute('aria-hidden', 'false');
   notifyScrim.classList.add('show');
 }
 function closeNotifyDrawer() {
   notifyDrawer.classList.remove('show');
+  notifyDrawer.setAttribute('aria-hidden', 'true');
   notifyScrim.classList.remove('show');
 }
 notifyFab.addEventListener('click', openNotifyDrawer);
 notifyScrim.addEventListener('click', closeNotifyDrawer);
+document.getElementById('notifyClose').addEventListener('click', closeNotifyDrawer);
+
+// Esc closes whichever drawer is open (both are dismissible the same way).
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (notifyDrawer.classList.contains('show')) closeNotifyDrawer();
+  if (depthDrawer.classList.contains('show')) closeDepthDrawer();
+});
 
 notifySoundCb.addEventListener('change', () => {
   CCNotify.setSoundEnabled(notifySoundCb.checked);

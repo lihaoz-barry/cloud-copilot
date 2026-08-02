@@ -820,6 +820,10 @@
       display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 10px;
       padding: 8px 10px; border: 1px solid #8883; border-radius: 10px; background: #ffffff05;
     }
+    /* `display: flex` above outranks the UA's `[hidden] { display: none }`, so
+       every `tfFilters.hidden = true` would otherwise be a no-op and the empty
+       filter bar would sit on top of the "No builds yet" / error placeholders. */
+    .tf-filters[hidden] { display: none; }
     .tf-filters label { font-size: .72rem; color: #9aa0aa; display: flex; align-items: center; gap: 5px; }
     .tf-filters select {
       font: inherit; font-size: .78rem; padding: 3px 6px; border-radius: 7px;
@@ -4755,12 +4759,20 @@ function renderTfCard(b) {
       const btn = document.createElement('button');
       btn.className = 'tf-mergebtn';
       btn.textContent = ms === 'failed' || ms === 'aborted' ? 'Retry merge' : 'Merge';
-      // The repo isn't checked out on this machine any more: the build stays in
-      // history, but every action route keyed on it would 404. Say so instead
-      // of handing over a button that can only fail.
+      // The repo isn't checked out on this machine any more, or the PR is no
+      // longer mergeable on GitHub: the build stays in history, but the merge
+      // route would refuse it (a CLOSED PR's branch is gone; a MERGED one is
+      // already in). Say so instead of handing over a button that can only fail.
+      const prGone = b.prState === 'CLOSED' || b.prState === 'MERGED';
       if (b.repoKnown === false) {
         btn.disabled = true;
         btn.title = `"${b.repo}" is not one of this machine's configured repos, so it can't be merged from here.`;
+      } else if (prGone) {
+        btn.disabled = true;
+        btn.title =
+          b.prState === 'MERGED'
+            ? `PR #${b.prNumber} is already merged.`
+            : `PR #${b.prNumber} is closed without having been merged, so its branch no longer exists.`;
       } else {
         btn.addEventListener('click', () => onTfMerge(b, btn));
       }

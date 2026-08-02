@@ -128,6 +128,66 @@ test('resetForNewCommits keeps the previous build in history', () => {
   assert.strictEqual(builds[0].current, false);
 });
 
+test('resetForNewCommits leaves a still-running deploy alone', () => {
+  // Chat/review/update turns run in their own worktree and are allowed to
+  // finish WHILE a deploy is in flight, and their onDone calls this. Archiving
+  // the live attempt would invent an "aborted" build that never ended and drop
+  // the branch/commit this deploy pinned when it started.
+  writeState({});
+  store.startNewDeploy('app', 60, 61);
+  store.updateDeploy('app', 60, 61, (d) => {
+    d.branch = 'feat-live';
+    d.commit = { sha: 'aaaa1111', abbrev: 'aaaa111' };
+  });
+
+  store.resetForNewCommits('app', 60, 61);
+
+  const record = store.getRecord('app', 60);
+  assert.deepStrictEqual(record.prs[61].deployHistory, [], 'no phantom aborted build');
+  assert.strictEqual(record.prs[61].deploy.status, 'deploying', 'the live attempt still owns the record');
+  assert.strictEqual(record.prs[61].deploy.branch, 'feat-live', 'the pinned branch survives');
+  assert.strictEqual(record.prs[61].merge.status, 'idle', 'merge is still re-locked');
+
+  // The deploy then reports its own result, which becomes the build.
+  store.updateDeploy('app', 60, 61, (d) => {
+    d.status = 'success';
+    d.buildNumber = 71;
+    d.finishedAt = '2025-01-01T00:00:00.000Z';
+  });
+  const { builds } = store.listAllBuilds();
+  assert.strictEqual(builds.length, 1);
+  assert.strictEqual(builds[0].buildNumber, 71);
+  assert.strictEqual(builds[0].commit.abbrev, 'aaaa111');
+});
+
+test('a finished build with no timestamps is still archived, not dropped', () => {
+  // Old records can carry a terminal deploy with neither startedAt nor
+  // finishedAt. It ran, so it is a build: dropping it rewrites history.
+  writeState({});
+  store.updateDeploy('app', 62, 63, (d) => {
+    d.status = 'success';
+    d.buildNumber = 80;
+    d.version = '9.0';
+  });
+  store.startNewDeploy('app', 62, 63);
+  store.updateDeploy('app', 62, 63, (d) => {
+    d.status = 'success';
+    d.buildNumber = 81;
+    d.finishedAt = '2025-02-01T00:00:00.000Z';
+  });
+
+  const { builds } = store.listAllBuilds();
+  assert.deepStrictEqual(
+    builds.map((b) => b.buildNumber).sort((a, b) => a - b),
+    [80, 81],
+  );
+  // It keeps its null timestamps rather than being stamped with today's date,
+  // so it sorts last instead of masquerading as the newest build.
+  const old = builds.find((b) => b.buildNumber === 80);
+  assert.strictEqual(old.finishedAt, null);
+  assert.strictEqual(builds[0].buildNumber, 81, 'the dated build is still newest-first');
+});
+
 test('a null issue record is skipped instead of blowing up the whole history', () => {
   writeState({
     'app#10': null,

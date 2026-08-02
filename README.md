@@ -787,8 +787,11 @@ just the latest one per PR. Each deploy attempt is archived into the store
 (`deployHistory`) before the next one starts, so re-deploying a PR — or pushing
 new commits to it — never overwrites the earlier build's record, even when both
 attempts report the same version string. An attempt that never reported a result
-(the server restarted mid-deploy) is archived as `aborted` with a note rather
-than dropped, so nothing that ran is missing from the list. A PR record that
+(the server restarted mid-deploy) is archived as `aborted` with a note when the
+next attempt starts, rather than dropped, so nothing that ran is missing from the
+list — while a deploy that is still running is left alone, because chat/review/
+update turns finish in their own worktrees and must not archive a build that has
+not ended. A PR record that
 carries builds is also never deleted by the housekeeping sweeps: `gh pr list` is
 capped at 100 PRs, so on a busy repo an older PR eventually stops being reported
 (and a closed PR is hidden rather than forgotten) — either way its record, and
@@ -797,10 +800,16 @@ therefore its build history, is kept.
 Each row shows: app, version + build number, deploy status, start/finish time and
 duration, the branch and the exact commit that was shipped, the PR and issue, the
 "What to Test" note, and — for failed/aborted attempts — the exit code and a
-one-line reason extracted from the deploy transcript. Superseded attempts are
-badged `attempt n/m · superseded`; only the current attempt keeps its Merge button.
+one-line reason extracted from the deploy transcript. The version, build number
+and "What to Test" note are pinned onto the record when the deploy starts, so a
+failed attempt still shows what it was trying to ship (a successful one is then
+corrected to the numbers Apple actually assigned). Superseded attempts are
+badged `attempt n/m · superseded`; only the current attempt keeps its Merge
+button, and that button is disabled with an explanation when it could only fail —
+the PR is already merged, or closed without being merged, or its repo is no
+longer configured on this machine.
 A build whose repo is no longer configured on this machine stays in the list —
-it is marked `repo not configured here` and its Merge button is disabled, since
+it is marked `repo not configured here`, since
 every action route keyed on that repo would 404. Only repos whose deploy type is
 readable *and* isn't `ios-testflight` are filtered off the page: an app with a
 broken `.cloud-copilot.json` keeps its history and gets a line in the warning

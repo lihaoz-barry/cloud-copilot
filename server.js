@@ -1573,13 +1573,18 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
         execFileSync('git', ['rev-list', '--count', 'HEAD'], { cwd: workCwd, encoding: 'utf8', timeout: 15000 }).trim(),
       );
       version = repoConfig.readMarketingVersion(workCwd); // null if not found — fastlane then uses its own default
-      // Pin the exact code this attempt ships onto the deploy record, so the
-      // TestFlight history keeps showing the right branch/commit for this
-      // build even after the PR gets new commits (or is merged and deleted).
+      // Pin what this attempt ships onto the deploy record right away, so the
+      // TestFlight history keeps showing the right branch/commit for this build
+      // even after the PR gets new commits (or is merged and deleted) — and so
+      // an attempt that FAILS still reports the version/build number it tried,
+      // instead of rendering as a nameless "(no build number)" row. `onDone`
+      // overwrites the two with Apple's own numbers once the upload succeeds.
       const shipped = readShippedCommit(workCwd, repo.ownerRepo);
       store.updateDeploy(repo.name, n, prNumber, (d) => {
         d.branch = pr.headRefName;
         d.commit = shipped;
+        d.buildNumber = Number.isFinite(buildNumber) ? buildNumber : null;
+        d.version = version;
       });
     } catch (err) {
       const message = `Failed to check out branch "${pr.headRefName}" / compute build number: ${err.message}`;
@@ -1603,6 +1608,11 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
       version,
       buildNumber,
       copilotBin: COPILOT_BIN,
+    });
+    // Pin the "What to Test" note too: it is what this attempt actually sends
+    // to fastlane, so a failed build should still show what it was shipping.
+    store.updateDeploy(repo.name, n, prNumber, (d) => {
+      d.changelog = changelog;
     });
     const prompt =
       `The branch for PR #${prNumber} is already checked out. Deploy the current ` +

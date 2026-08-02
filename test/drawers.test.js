@@ -93,6 +93,22 @@ test('both drawers are dialogs with a visible close button', () => {
   }
 });
 
+test('the ✕ is a thumb-sized tap target with a visible focus ring', () => {
+  // The whole point of the ✕ (issue #21) is that on a phone the scrim is a
+  // thin strip and hard to hit — so the replacement must not be fiddly itself.
+  // 44×44 is the iOS HIG / WCAG 2.5.5 minimum; padding alone left it at 32×32.
+  const body = ruleBody('.drawer-close');
+  const min = (prop) => {
+    const m = new RegExp(`${prop}:\\s*(\\d+)px`).exec(body);
+    assert.ok(m, `.drawer-close has no ${prop}`);
+    return Number(m[1]);
+  };
+  assert.ok(min('min-width') >= 44, `.drawer-close min-width is ${min('min-width')}px, want >= 44`);
+  assert.ok(min('min-height') >= 44, `.drawer-close min-height is ${min('min-height')}px, want >= 44`);
+  // Opening a drawer moves focus to this button, so the ring must be visible.
+  assert.match(ruleBody('.drawer-close:focus-visible'), /outline:/);
+});
+
 test('scrim tap and Esc still dismiss the drawers', () => {
   assert.match(html, /depthScrim\.addEventListener\('click', closeDepthDrawer\)/);
   assert.match(html, /notifyScrim\.addEventListener\('click', closeNotifyDrawer\)/);

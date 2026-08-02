@@ -317,12 +317,21 @@
     /* Sub-headings inside the scrolling body (e.g. "📲 Phone push") keep the
        compact sizing the drawers used before the head/body split. */
     .drawer-body h3 { margin: 0 0 4px; font-size: 1rem; }
+    /* This ✕ is the fix for "the only way to close it on a phone is the thin
+       scrim strip", so it has to be comfortably tappable: 44×44 is the iOS HIG
+       / WCAG 2.5.5 minimum, and padding alone only got it to 32×32. The glyph
+       is centred instead of grown, so it looks the same. */
     .drawer-close {
       flex: none; background: transparent; color: inherit; border: none; cursor: pointer;
       font: inherit; font-size: 1rem; line-height: 1; opacity: .6;
-      padding: 8px 10px; border-radius: 10px; touch-action: manipulation;
+      display: flex; align-items: center; justify-content: center;
+      min-width: 44px; min-height: 44px; margin: -6px -10px -6px 0;
+      padding: 0; border-radius: 10px; touch-action: manipulation;
     }
     .drawer-close:hover { opacity: 1; background: #8881; }
+    /* Opening a drawer moves focus here, so the ring must be visible — the
+       default UA outline is easy to lose against the drawer background. */
+    .drawer-close:focus-visible { opacity: 1; outline: 2px solid currentColor; outline-offset: -2px; }
     .drawer-body {
       flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch;
       /* Without this, flicking past the end of the drawer keeps scrolling the

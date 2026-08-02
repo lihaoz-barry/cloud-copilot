@@ -386,6 +386,7 @@
     .q-item.linked:hover, .notif-item.linked:hover { border-color: #2563eb99; background: #2563eb14; }
     .jump { opacity: .5; font-size: .72rem; margin-left: 5px; }
     .q-item.linked:hover .jump, .notif-item.linked:hover .jump { opacity: 1; color: #2563eb; }
+    .q-item.linked:focus-visible, .notif-item.linked:focus-visible { outline: 2px solid #2563eb; outline-offset: 1px; }
 
     /* Ring the card a task link just scrolled to, so it's obvious which one
        out of a long list was meant. */
@@ -895,24 +896,27 @@ function renderRepo(repo) {
     <div class="repo-body"><div class="muted" style="padding:8px 4px">Click to load issues…</div></div>`;
   const head = el.querySelector('.repo-head');
   const body = el.querySelector('.repo-body');
-  let loaded = false;
+  // One shared in-flight promise rather than a `loaded` boolean: a deep link
+  // and a click on the header can both ask for the issues at the same time,
+  // and a bare flag would let the second caller resolve immediately while the
+  // list is still empty — so the link would find no card to scroll to.
+  let loading = null;
+  const ensureIssues = () => {
+    if (!repo.github) return Promise.resolve();
+    if (!loading) loading = loadIssues(repo, body).catch(() => {});
+    return loading;
+  };
   // Expand + lazily load this repo's issues, resolving only once they are in
   // the DOM. Exposed on the element so a deep link (#/issue/<repo>/<n>) can
   // open the right repo and then scroll to the issue that just finished
   // loading, instead of racing an empty card.
   el.__ensureOpen = async () => {
     el.classList.add('open');
-    if (!loaded && repo.github) {
-      loaded = true;
-      await loadIssues(repo, body);
-    }
+    await ensureIssues();
   };
-  head.addEventListener('click', async () => {
+  head.addEventListener('click', () => {
     el.classList.toggle('open');
-    if (el.classList.contains('open') && !loaded && repo.github) {
-      loaded = true;
-      await loadIssues(repo, body);
-    }
+    if (el.classList.contains('open')) ensureIssues();
   });
   if (!repo.github) {
     body.innerHTML = '<div class="muted" style="padding:8px 4px">No github.com remote — issues unavailable.</div>';
@@ -992,7 +996,6 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   // than an id because the same issue can be on screen twice (pinned section
   // + repo list) and duplicate ids would make the anchor ambiguous.
   el.dataset.issueAnchor = issueAnchor(repo.name, issue.number);
-  if (opts.pinned) el.dataset.pinnedCopy = '1';
   const labels = (issue.labels || [])
     .map((l) => `<span class="label">${escape(l)}</span>`)
     .join('');
@@ -1988,8 +1991,27 @@ function setTab(tab) {
   if (tab === 'testflight') loadTestflightBuilds();
 }
 document.querySelectorAll('.nav-tab').forEach((b) => {
-  b.addEventListener('click', () => setTab(b.dataset.tab));
+  b.addEventListener('click', () => selectTab(b.dataset.tab));
 });
+
+// Explicitly clicking a tab must beat a leftover route hash. Without this,
+// following an Admin task link parks `#/admin` in the URL and every later
+// click on Home is immediately bounced back to Admin by route(), leaving the
+// Home tab unusable until the hash changes some other way.
+function selectTab(tab) {
+  const owner = tabForHash();
+  if (owner && owner !== tab) {
+    history.replaceState(null, '', location.pathname + location.search);
+  }
+  setTab(tab);
+}
+
+// Which tab a route hash belongs to, or null when the hash isn't a route.
+function tabForHash() {
+  if (hashPath() === '#/admin') return 'admin';
+  if (parseHash() || parsePreIssuesHash() || parsePreIssueDetailHash() || parseIssueHash()) return 'home';
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // Task deep links — jump from a queue entry / notification to the thing it is
@@ -2020,8 +2042,10 @@ function taskHref(t) {
     case 'admin':
       return '#/admin';
     case 'preissue-chat':
-      return repo && (t.preIssueId || t.id)
-        ? `#/preissue/${enc(repo)}/${enc(t.preIssueId || t.id)}`
+      // Only `preIssueId` — a notification record's `id` is the notification's
+      // own uuid, which would build a link to a PreIssue that doesn't exist.
+      return repo && t.preIssueId
+        ? `#/preissue/${enc(repo)}/${enc(t.preIssueId)}`
         : repo ? `#/preissues/${enc(repo)}` : null;
     case 'chat':
       // The PR chat lives on the PR detail page, which is already a route.
@@ -2042,10 +2066,13 @@ function taskHref(t) {
 // out of a long list the link meant.
 function flashTarget(el) {
   if (!el) return;
+  // Two links flashed in quick succession must not have the first one's timer
+  // strip the class off the second target mid-animation.
+  clearTimeout(el.__flashTimer);
   el.classList.remove('flash-target');
   void el.offsetWidth; // restart the animation if the same target is re-picked
   el.classList.add('flash-target');
-  setTimeout(() => el.classList.remove('flash-target'), 2600);
+  el.__flashTimer = setTimeout(() => el.classList.remove('flash-target'), 2600);
 }
 
 function scrollToEl(el) {
@@ -2077,11 +2104,17 @@ async function focusIssue(repoName, issueNumber, prNumber) {
   if (repoEl.__ensureOpen) await repoEl.__ensureOpen();
 
   // Prefer the copy in the repo list over the pinned duplicate: it's the one
-  // that owns the PR rows and the full pipeline.
-  const anchor = issueAnchor(repoName, issueNumber);
-  const matches = [...document.querySelectorAll(`.issue[data-issue-anchor="${cssEscape(anchor)}"]`)];
-  const issueEl = matches.find((e) => !e.dataset.pinnedCopy) || matches[0];
-  if (!issueEl) return;
+  // that owns the PR rows and the full pipeline. Scoping the lookup also keeps
+  // us off the third copy rendered inside the (now hidden) PR detail view,
+  // which can't be scrolled to.
+  const sel = `.issue[data-issue-anchor="${cssEscape(issueAnchor(repoName, issueNumber))}"]`;
+  const issueEl =
+    reposEl.querySelector(sel) ||
+    [...mainView.querySelectorAll(sel)].find((e) => e.offsetParent !== null);
+  // The issue may simply not be on the page any more (closed, or dropped by
+  // the per-issue hide list) — land on its repo rather than doing nothing at
+  // all, so the click still visibly goes somewhere.
+  if (!issueEl) return scrollToEl(repoEl);
 
   const prEl = prNumber ? issueEl.querySelector(`.pritem[data-pr="${cssEscape(String(prNumber))}"]`) : null;
   scrollToEl(prEl || issueEl);
@@ -2109,12 +2142,17 @@ function navigateToTask(href) {
 function focusAdminTurn() {
   const logEl = document.getElementById('termLog');
   if (!logEl) return;
-  // Let the tab become visible before measuring scroll height.
-  requestAnimationFrame(() => {
+  // setTab('admin') kicks off initAdminTerminal(), which fetches the stored
+  // turns — so the log is usually still empty on this tick. Poll a few frames
+  // for content instead of flashing nothing.
+  let tries = 0;
+  const tick = () => {
     logEl.scrollTop = logEl.scrollHeight;
     const last = logEl.lastElementChild;
-    if (last) flashTarget(last);
-  });
+    if (last) return flashTarget(last);
+    if (++tries < 20) setTimeout(tick, 100);
+  };
+  requestAnimationFrame(tick);
 }
 
 // ---------------------------------------------------------------------------
@@ -2164,7 +2202,7 @@ async function refreshNotifications() {
     .map((n) => {
       const href = taskHref(n);
       return `
-      <div class="notif-item ${n.read ? '' : 'unread'} ${href ? 'linked' : ''}" data-id="${escape(n.id)}" ${href ? `data-href="${escapeAttr(href)}"` : ''}>
+      <div class="notif-item ${n.read ? '' : 'unread'} ${href ? 'linked' : ''}" data-id="${escape(n.id)}" ${href ? `data-href="${escapeAttr(href)}" role="link" tabindex="0"` : ''}>
         <span class="notif-kind">${NOTIF_ICON[n.kind] || NOTIF_ICON.info}</span>
         <div class="grow">
           <div class="nt">${escape(n.title)}${href ? '<span class="jump">↗</span>' : ''}</div>
@@ -2194,7 +2232,7 @@ async function refreshQueue() {
   const row = (e, isRunning) => {
     const href = taskHref(e);
     return `
-    <div class="q-item ${isRunning ? 'running' : ''} ${href ? 'linked' : ''}" ${href ? `data-href="${escapeAttr(href)}"` : ''}>
+    <div class="q-item ${isRunning ? 'running' : ''} ${href ? 'linked' : ''}" ${href ? `data-href="${escapeAttr(href)}" role="link" tabindex="0"` : ''}>
       <span class="qs">${isRunning ? 'running' : `#${e.position}`}</span>
       <span class="grow">${escape(e.label)}${href ? '<span class="jump">↗</span>' : ''}${e.reason ? `<div class="nm">${escape(e.reason)}</div>` : ''}</span>
     </div>`;
@@ -2257,6 +2295,19 @@ queueList.addEventListener('click', (e) => {
   if (!linked) return;
   notifPanel.classList.remove('show');
   navigateToTask(linked.dataset.href);
+});
+
+// Linked rows are `role="link" tabindex="0"` divs, so they need the keyboard
+// activation a real anchor would give for free.
+[notifList, queueList].forEach((list) => {
+  list.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const linked = e.target.closest('[data-href]');
+    if (!linked) return;
+    e.preventDefault();
+    notifPanel.classList.remove('show');
+    navigateToTask(linked.dataset.href);
+  });
 });
 
 notifClear.addEventListener('click', async () => {
@@ -2419,26 +2470,38 @@ async function onTfMerge(b, btn) {
   }
 }
 
+// location.hash is user-editable, and decodeURIComponent() throws on a
+// malformed escape (e.g. "#%zz"). route() runs on every hashchange and tab
+// switch, so an uncaught URIError there would wedge the whole UI — fall back
+// to the raw hash instead.
+function hashPath() {
+  try {
+    return decodeURIComponent(location.hash);
+  } catch {
+    return location.hash;
+  }
+}
+
 function parseHash() {
-  const m = decodeURIComponent(location.hash).match(/^#\/pr\/([^/]+)\/(\d+)\/(\d+)$/);
+  const m = hashPath().match(/^#\/pr\/([^/]+)\/(\d+)\/(\d+)$/);
   if (!m) return null;
   return { repo: m[1], issueNumber: Number(m[2]), prNumber: Number(m[3]) };
 }
 
 function parsePreIssuesHash() {
-  const m = decodeURIComponent(location.hash).match(/^#\/preissues\/([^/]+)$/);
+  const m = hashPath().match(/^#\/preissues\/([^/]+)$/);
   return m ? { repo: m[1] } : null;
 }
 
 function parsePreIssueDetailHash() {
-  const m = decodeURIComponent(location.hash).match(/^#\/preissue\/([^/]+)\/([^/]+)$/);
+  const m = hashPath().match(/^#\/preissue\/([^/]+)\/([^/]+)$/);
   return m ? { repo: m[1], id: m[2] } : null;
 }
 
 // Deep link straight at an issue card on Home — optionally at one PR row
 // inside it (`#/issue/<repo>/<n>/<pr>`), which is where Deploy/Merge stream.
 function parseIssueHash() {
-  const m = decodeURIComponent(location.hash).match(/^#\/issue\/([^/]+)\/(\d+)(?:\/(\d+))?$/);
+  const m = hashPath().match(/^#\/issue\/([^/]+)\/(\d+)(?:\/(\d+))?$/);
   if (!m) return null;
   return { repo: m[1], issueNumber: Number(m[2]), prNumber: m[3] ? Number(m[3]) : null };
 }
@@ -2453,7 +2516,7 @@ function hideAllHomeViews() {
 function route() {
   // `#/admin` is a tab, not a Home sub-view — handle it before the Home guard
   // so a task link can switch tabs on its own.
-  if (decodeURIComponent(location.hash) === '#/admin') {
+  if (hashPath() === '#/admin') {
     if (currentTab !== 'admin') setTab('admin');
     focusAdminTurn();
     return;
@@ -2462,9 +2525,7 @@ function route() {
     // A task link points at a Home route while another tab is showing (e.g.
     // the user opened the panel from Admin) — switch tabs, which re-enters
     // route() with currentTab === 'home' and renders it properly.
-    const isHomeRoute =
-      parseHash() || parsePreIssuesHash() || parsePreIssueDetailHash() || parseIssueHash();
-    if (isHomeRoute) setTab('home');
+    if (tabForHash() === 'home') setTab('home');
     return;
   }
   const parsed = parseHash();

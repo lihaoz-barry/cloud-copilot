@@ -507,7 +507,9 @@ app.post('/api/repos/:name/preissues/:id/chat', async (req, res) => {
     repo: repo.name,
     exclusive: false,
     label: `PreIssue chat (${repo.name})`,
-    meta: { action: 'preissue-chat', id, preIssueId: id },
+    // `preIssueId`, not `id`: queue.describe() spreads meta over the entry, so
+    // a bare `id` would overwrite the queue entry's own id in /api/queue.
+    meta: { action: 'preissue-chat', preIssueId: id },
     onCancelled: (reason) =>
       store.appendPreIssueChatMessage(repo.name, id, { role: 'assistant', text: `[${reason}]` }),
     run: () =>

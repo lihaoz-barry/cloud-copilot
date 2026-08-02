@@ -606,6 +606,31 @@ app.get('/api/repos/:name/issues', async (req, res) => {
   }
 });
 
+// Just the live half of the issues list: per-issue action statuses plus which
+// issue holds the working-tree lock. Deliberately does NOT touch `gh` or the
+// L2 cache — it only reads state.json and the in-memory job table, so the
+// client can call it as often as it likes.
+//
+// Exists because the browser's L1 cache stores the whole /issues payload for
+// 15 minutes, which is right for GitHub metadata and wrong for this: a job
+// started from another machine (or another tab) is invisible to a cached
+// render, so the card stays "idle" and never reconnects (issue #52). The
+// client renders from L1 for speed, then patches the result with this.
+app.get('/api/repos/:name/statuses', (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found under REPOS_ROOT' });
+  const numbers = String(req.query.n || '')
+    .split(',')
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isInteger(n) && n > 0);
+  const busyIssue = repoBusyIssueNumber(repo.name);
+  res.json({
+    repo: repo.name,
+    statuses: numbers.length ? store.getStatuses(repo.name, numbers) : {},
+    activeWorkIssues: busyIssue != null ? [busyIssue] : [],
+  });
+});
+
 // Full stored record for one issue (conversation, PR link, etc.).
 app.get('/api/repos/:name/issues/:n/record', (req, res) => {
   const repo = resolveRepo(req.params.name);

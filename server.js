@@ -712,6 +712,39 @@ app.post('/api/repos/:name/issues/:n/hide', (req, res) => {
   res.json({ ok: true, cancelledJobs });
 });
 
+// PERMANENTLY delete an issue on GitHub. Unlike /hide above, this really does
+// destroy the issue upstream (`gh issue delete --yes`) and cannot be undone.
+// Order matters: cancel in-flight jobs first, then delete on GitHub, and only
+// clear local state once GitHub confirmed the deletion — if `gh` fails (most
+// commonly: no admin permission) the issue stays fully intact locally.
+app.delete('/api/repos/:name/issues/:n', async (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  if (!repo.github) return res.status(400).json({ error: 'repo has no github.com remote' });
+  const n = Number(req.params.n);
+  if (!Number.isInteger(n) || n <= 0) return res.status(400).json({ error: 'invalid issue number' });
+
+  const record = store.getRecord(repo.name, n);
+  const cancelledJobs = [];
+  if (jobs.cancelJob(`${repo.name}#${n}:work`)) cancelledJobs.push('work');
+  for (const pr of Object.values(record.prs || {})) {
+    if (jobs.cancelJob(`${repo.name}#${n}:deploy:${pr.prNumber}`)) cancelledJobs.push(`deploy:${pr.prNumber}`);
+  }
+
+  try {
+    await gh.deleteIssue(repo.ownerRepo, n);
+  } catch (err) {
+    const detail = String(err.stderr || err.message || '').trim();
+    return res.status(502).json({
+      error: `gh issue delete failed: ${detail || 'unknown error'}`,
+      cancelledJobs,
+    });
+  }
+
+  store.dismissIssue(repo.name, n);
+  res.json({ ok: true, deleted: true, cancelledJobs });
+});
+
 // ---------------------------------------------------------------------------
 // PreIssues — lightweight "idea sticky notes" that iterate (via a Copilot CLI
 // chat) into a full issue draft, then get created as a real GitHub issue.

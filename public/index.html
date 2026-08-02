@@ -3311,6 +3311,10 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   async function afterAbort(resp, what, reconcile, log) {
     let d = {};
     try { d = await resp.json(); } catch { /* older server: assume it killed something */ }
+    if (!resp.ok) {
+      log(`\n[abort failed: HTTP ${resp.status}${d && d.error ? ` — ${d.error}` : ''}]\n`, 'err');
+      return;
+    }
     if (d.reconciled) {
       log(`\n[${what} was no longer running — the stuck row has been cleared]\n`, 'stderr');
       reconcile();
@@ -3523,7 +3527,8 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     if (!window.confirm(`Abort the branch update for PR #${prNumber}?`)) return;
     appendUpdate(prNumber, `\n[abort requested…]\n`, 'stderr');
     try {
-      await fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/prs/${prNumber}/update/cancel`, { method: 'POST' });
+      const r = await fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/prs/${prNumber}/update/cancel`, { method: 'POST' });
+      await afterAbort(r, `the branch update for PR #${prNumber}`, () => reconcileUpdate(prNumber), (t, k) => appendUpdate(prNumber, t, k));
     } catch (e) {
       appendUpdate(prNumber, `\n[abort failed: ${e.message}]\n`, 'err');
     }
@@ -3584,7 +3589,8 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     }
   }
 
-  async function reconcileUpdate(prNumber) {
+  function reconcileUpdate(prNumber) { return withReconcileGuard(`update:${prNumber}`, () => reconcileUpdateOnce(prNumber)); }
+  async function reconcileUpdateOnce(prNumber) {
     for (let i = 0; i < 200; i++) {
       let rec;
       try { rec = await fetchRecord(); } catch { await sleep(3000); continue; }

@@ -318,9 +318,19 @@ function abortAction(repoName, issueNumber, action, prNumber = null) {
     : `${repoName}#${issueNumber}:${action}:${prNumber}`;
   const cancelled = jobs.cancelJob(key);
   // A live job writes its own terminal state from the `close` handler, so only
-  // touch the record when there was nothing left to kill.
+  // touch the record when there was nothing left to kill. `cancelJob` also
+  // asks the supervisor to stop anything running under this key that this
+  // process never adopted; that answers false, and settling the record is
+  // exactly right — no local job means no `close` handler to write it.
   const reconciled = cancelled ? false : store.forceAbort(repoName, issueNumber, action, prNumber);
   return { cancelled, reconciled, aborted: cancelled || reconciled };
+}
+
+/** Shared guard for the cancel routes: `<n>` reaches the store now. */
+function badIssueNumber(res, n) {
+  if (Number.isInteger(n) && n > 0) return false;
+  res.status(400).json({ error: 'invalid issue number' });
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1483,6 +1493,7 @@ app.post('/api/repos/:name/issues/:n/work/cancel', (req, res) => {
   const repo = resolveRepo(req.params.name);
   if (!repo) return res.status(404).json({ error: 'repo not found' });
   const n = Number(req.params.n);
+  if (badIssueNumber(res, n)) return;
   res.json(abortAction(repo.name, n, 'work'));
 });
 
@@ -1762,11 +1773,13 @@ app.post('/api/repos/:name/issues/:n/deploy/:pr/cancel', (req, res) => {
   if (!repo) return res.status(404).json({ error: 'repo not found' });
   const n = Number(req.params.n);
   const prNumber = Number(req.params.pr);
+  if (badIssueNumber(res, n)) return;
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
     return res.status(400).json({ error: 'invalid PR number' });
   }
   res.json(abortAction(repo.name, n, 'deploy', prNumber));
 });
+
 // ---------------------------------------------------------------------------
 // Action: Merge a specific PR. A failed gh merge automatically starts Copilot
 // to investigate, resolve branch conflicts, push, and retry the merge.
@@ -1973,6 +1986,7 @@ app.post('/api/repos/:name/issues/:n/merge/:pr/cancel', (req, res) => {
   if (!repo) return res.status(404).json({ error: 'repo not found' });
   const n = Number(req.params.n);
   const prNumber = Number(req.params.pr);
+  if (badIssueNumber(res, n)) return;
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
     return res.status(400).json({ error: 'invalid PR number' });
   }
@@ -2228,11 +2242,11 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/update/cancel', (req, res) => {
   if (!repo) return res.status(404).json({ error: 'repo not found' });
   const n = Number(req.params.n);
   const prNumber = Number(req.params.pr);
+  if (badIssueNumber(res, n)) return;
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
     return res.status(400).json({ error: 'invalid PR number' });
   }
-  const cancelled = jobs.cancelJob(`${repo.name}#${n}:update:${prNumber}`);
-  res.json({ cancelled });
+  res.json(abortAction(repo.name, n, 'update', prNumber));
 });
 
 // ---------------------------------------------------------------------------
@@ -2449,11 +2463,11 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/review/cancel', (req, res) => {
   if (!repo) return res.status(404).json({ error: 'repo not found' });
   const n = Number(req.params.n);
   const prNumber = Number(req.params.pr);
+  if (badIssueNumber(res, n)) return;
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
     return res.status(400).json({ error: 'invalid PR number' });
   }
-  const cancelled = jobs.cancelJob(`${repo.name}#${n}:review:${prNumber}`);
-  res.json({ cancelled });
+  res.json(abortAction(repo.name, n, 'review', prNumber));
 });
 
 // ---------------------------------------------------------------------------
@@ -3263,7 +3277,10 @@ function reconcileOrphanedRecords(repos, liveKeys) {
         const key = prNumber ? `${repo.name}#${n}:${action}:${prNumber}` : `${repo.name}#${n}:${action}`;
         if (liveKeys.has(key)) return;
         slot.update({ repo: repo.name, issueNumber: n, prNumber }, (s) => {
-          s.status = 'failed';
+          // `aborted`, not `failed`: the run never reached a verdict, it was
+          // cut short. The UI renders the two the same way, but "failed" reads
+          // as "Copilot tried and could not do it", which is a lie here.
+          s.status = 'aborted';
           s.finishedAt = new Date().toISOString();
           if (!s.conversation || !s.conversation.includes('[interrupted]')) {
             s.conversation = (s.conversation || '') + note;
@@ -3359,19 +3376,15 @@ app.listen(PORT, HOST, () => {
   // which must not delete a checkout an adopted session is still using.
   rejoinSupervisedWork().catch((err) => console.warn(`[supervisor] rejoin failed: ${err.message}`));
 
+  // Create PR / Deploy / Merge / Update / Review are settled inside
+  // `rejoinSupervisedWork`, deliberately not here: "no job in memory" only
+  // means "orphan" once adoption has re-attached the sessions still running.
+
   // Recover any admin turn that was still in-flight when the previous
   // process died (e.g. a chat turn triggered its own restart mid-reply) so
   // it shows up as an "interrupted" turn instead of silently vanishing.
   const recovered = store.reconcileInterruptedAdminTurns();
   if (recovered.length) {
     console.log(`Recovered ${recovered.length} interrupted admin turn(s): ${recovered.map((r) => r.turnId).join(', ')}`);
-  }
-  // Same treatment for Create PR / Deploy / Merge: a restart kills every child,
-  // so anything still stored as running is an orphan whose terminal state will
-  // never be written. Left alone it keeps its row spinning forever and its
-  // Abort button powerless, so settle it as aborted right here.
-  const orphans = store.reconcileOrphanedJobs((k) => jobs.getJob(k)?.status === 'running');
-  if (orphans.length) {
-    console.log(`Marked ${orphans.length} interrupted job(s) as aborted: ${orphans.join(', ')}`);
   }
 });

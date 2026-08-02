@@ -8,6 +8,9 @@ data/gh-cache.json
 server.js.bak
 server.log
 
+# per-run isolated checkouts created by lib/worktreePool.js
+.worktrees/
+
 # secrets / local deploy config — never commit
 *.p8
 setup/deploy.env

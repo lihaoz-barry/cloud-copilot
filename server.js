@@ -32,6 +32,9 @@ const notifier = require('./lib/notifier');
 const { UPLOADS_DIR, saveUploadedImages, cleanupOldUploads } = require('./lib/attachments');
 const { cleanupAfterMerge } = require('./lib/mergeCleanup');
 const worktrees = require('./lib/worktrees');
+const worktreePool = require('./lib/worktreePool');
+const portPool = require('./lib/portPool');
+const scheduler = require('./lib/scheduler');
 
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 8787);
@@ -126,12 +129,16 @@ function resolveRepo(name) {
   return repos.find((r) => r.name === name) || null;
 }
 
-// Actions that check out a branch on a repo's single shared working tree —
-// Create PR, Deploy, Chat (even "plan" mode checks out the PR's branch), and
-// Merge (when its automatic Copilot recovery is needed) —
-// must be mutually exclusive per repo, or concurrent runs collide on the same
-// checkout.
-const WORKING_TREE_ACTION_RE = /^(\d+):(work|deploy|chat|merge|update|restart)(?::(\d+))?$/;
+// Actions that run in the repo's ONE shared working tree, and must therefore
+// stay mutually exclusive per repo.
+//
+// Since issue #64 that is only Deploy, Merge and Restart main: Deploy drives
+// fastlane / Xcode / the login keychain, none of which are safe to run twice at
+// once; Merge's recovery agent checks out the PR branch in the main tree; and
+// Restart main relaunches this very process. Everything else (Create PR,
+// Update, Review, Chat) now runs in its own worktree from lib/worktreePool and
+// is free to run concurrently.
+const WORKING_TREE_ACTION_RE = /^(\d+):(deploy|merge|restart)(?::(\d+))?$/;
 
 // Working-tree locks held by actions that are NOT backed by a `jobs` child
 // process — currently just "Restart main", which runs a few short git commands
@@ -172,8 +179,50 @@ const BUSY_ACTION_LABEL = {
   chat: 'a chat turn',
   merge: 'a Merge',
   update: 'a branch update from the base branch',
+  review: 'a review-and-improve run',
   restart: 'a Restart main',
 };
+
+// ---------------------------------------------------------------------------
+// Worktree leases (issue #64)
+//
+// Every action that writes files now runs in its own `git worktree` with its
+// own test port, so several of them can run on one repo at the same time. The
+// two helpers below are the whole contract:
+//
+//   leaseWorktree()  acquire a checkout + port, or explain why not
+//   releaseLease()   give both back, turning the outcome into transcript lines
+//
+// `releaseLease` never throws: cleanup must not be able to change a job's
+// result. It returns the same rows lib/worktrees.js produces, so the existing
+// `worktrees.formatCleanup` renders them unchanged.
+// ---------------------------------------------------------------------------
+
+async function leaseWorktree(repo, opts) {
+  return worktreePool.acquire(repo, opts);
+}
+
+function releaseLease(lease, { fallbackRef = null } = {}) {
+  if (!lease) return [];
+  try {
+    return lease.release({ fallbackRef });
+  } catch {
+    return [];
+  }
+}
+
+// One sentence appended to every prompt that runs inside a lease, so the agent
+// knows which port it may bind. Without this each concurrent run would reach
+// for the project's default port and the second one would fail to boot.
+function portNote(lease) {
+  if (!lease || !lease.port) return '';
+  return (
+    ` You are running in an isolated git worktree; several agents work on this ` +
+    `repository at the same time. If you need to start the app or a test server, ` +
+    `use port ${lease.port} (also available as $PORT and $CC_TEST_PORT) and never ` +
+    `the project's default port, which is already in use.`
+  );
+}
 
 // Human-readable description of what's holding a repo's working-tree lock,
 // for the "blocked" message shown when a second action tries to start.
@@ -448,7 +497,7 @@ app.post('/api/settings/self/restart-main', (req, res) => {
   const busyKey = findOtherRepoBusyKey(repo.name, key);
   if (busyKey) {
     return res.status(409).json({
-      error: `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`,
+      error: `Blocked: ${describeBusyKey(repo.name, busyKey)}. Deploy, Merge and Restart main share this repo's working tree and cannot overlap.`,
     });
   }
 
@@ -787,6 +836,9 @@ app.post('/api/repos/:name/issues/:n/hide', (req, res) => {
   for (const pr of Object.values(record.prs || {})) {
     if (jobs.cancelJob(`${repo.name}#${n}:deploy:${pr.prNumber}`)) cancelledJobs.push(`deploy:${pr.prNumber}`);
     if (jobs.cancelJob(`${repo.name}#${n}:merge:${pr.prNumber}`)) cancelledJobs.push(`merge:${pr.prNumber}`);
+    if (jobs.cancelJob(`${repo.name}#${n}:update:${pr.prNumber}`)) cancelledJobs.push(`update:${pr.prNumber}`);
+    if (jobs.cancelJob(`${repo.name}#${n}:review:${pr.prNumber}`)) cancelledJobs.push(`review:${pr.prNumber}`);
+    if (jobs.cancelJob(`${repo.name}#${n}:chat:${pr.prNumber}`)) cancelledJobs.push(`chat:${pr.prNumber}`);
   }
 
   store.dismissIssue(repo.name, n);
@@ -810,6 +862,9 @@ app.delete('/api/repos/:name/issues/:n', async (req, res) => {
   if (jobs.cancelJob(`${repo.name}#${n}:work`)) cancelledJobs.push('work');
   for (const pr of Object.values(record.prs || {})) {
     if (jobs.cancelJob(`${repo.name}#${n}:deploy:${pr.prNumber}`)) cancelledJobs.push(`deploy:${pr.prNumber}`);
+    if (jobs.cancelJob(`${repo.name}#${n}:update:${pr.prNumber}`)) cancelledJobs.push(`update:${pr.prNumber}`);
+    if (jobs.cancelJob(`${repo.name}#${n}:review:${pr.prNumber}`)) cancelledJobs.push(`review:${pr.prNumber}`);
+    if (jobs.cancelJob(`${repo.name}#${n}:chat:${pr.prNumber}`)) cancelledJobs.push(`chat:${pr.prNumber}`);
   }
 
   try {
@@ -1014,24 +1069,35 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
     return;
   }
 
-  // Repo-level lock: only one working-tree action (Create PR, Deploy, Chat)
-  // may run per repo at a time, otherwise concurrent runs collide on the same
-  // checkout.
-  const busyKey = findOtherRepoBusyKey(repo.name, key);
-  if (busyKey) {
-    const msg = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`;
-    return sendSseBlocked(res, { action: 'work', status: 'blocked', message: msg });
-  }
-
+  // Create PR no longer takes a repo-wide lock: it gets its own worktree and
+  // its own test port, so several issues can be implemented at once.
   const mode = ['default', 'granular', 'allow-all'].includes(req.body?.mode)
     ? req.body.mode
     : 'allow-all'; // implementing an issue needs to edit files, run git & gh
+
+  const baseRef = defaultBranchOf(repo.path);
+  let lease;
+  try {
+    lease = await leaseWorktree(repo, {
+      key,
+      action: 'work',
+      issueNumber: n,
+      baseRef,
+    });
+  } catch (err) {
+    return sendSseBlocked(res, {
+      action: 'work',
+      status: 'failed',
+      message: `Could not start: ${err.message}`,
+    });
+  }
 
   const prompt =
     `Work on GitHub issue #${n} in this repository (${repo.ownerRepo}). ` +
     `Create a new branch, implement the change end-to-end until it is complete, ` +
     `commit, push, and open a pull request that closes #${n}. ` +
-    `When finished, print the pull request URL on its own line.`;
+    `When finished, print the pull request URL on its own line.` +
+    portNote(lease);
   const args = ['-p', prompt, ...approvalFlags(mode), ...modelFlags()];
 
   store.updateRecord(repo.name, n, (r) => {
@@ -1045,13 +1111,17 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
   const job = jobs.startJob(key, {
     bin: COPILOT_BIN,
     args,
-    cwd: repo.path,
+    cwd: lease.path,
+    env: lease.env,
     meta: {
       action: 'work',
       repo: repo.name,
       issueNumber: n,
       subject: cachedIssueTitle(repo, n) || `issue #${n}`,
       sequence: nextCreatePrSequence(repo.name),
+      auto: Boolean(req.body?.auto),
+      worktree: lease.path,
+      port: lease.port,
     },
     onSession: (id) =>
       store.updateRecord(repo.name, n, (r) => {
@@ -1088,12 +1158,10 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
       const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
 
       // Housekeeping BEFORE the record is written, so the cleanup notes end up
-      // in the stored transcript too. The agent may have implemented the issue
-      // inside a linked worktree it created (and even left locked); once the
-      // branch is pushed that directory only stands between Deploy and its
-      // branch. Removing it here — while this job still holds the repo lock —
-      // means Deploy never has to fight for the checkout. Anything holding
-      // uncommitted or unpushed work is left alone.
+      // in the stored transcript too. The run owns a private worktree; once its
+      // branch is pushed that directory is pure leftover, and releasing it here
+      // also frees the run's test port for the next job. Anything holding
+      // uncommitted or unpushed work is kept and says why.
       let headBranch = null;
       let baseBranch = null;
       if (prNumber) {
@@ -1102,10 +1170,10 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
           headBranch = (prInfo && prInfo.headRefName) || null;
           baseBranch = (prInfo && prInfo.baseRefName) || null;
         } catch {
-          /* branch stays null — the sweep below still covers it */
+          /* branch stays null — the release below still covers it */
         }
       }
-      const cleanup = worktrees.cleanupAfterRun(repo.path, headBranch, { skipPaths: [j.cwd] });
+      const cleanup = releaseLease(lease, { fallbackRef: `origin/${baseBranch || baseRef}` });
       const cleanupText = worktrees.formatCleanup(cleanup);
       const conversation = cleanupText ? `${j.conversation}\n${cleanupText}\n` : j.conversation;
 
@@ -1418,7 +1486,7 @@ app.post('/api/repos/:name/issues/:n/deploy/:pr', async (req, res) => {
   // tree as Create PR/Chat, so it must be mutually exclusive with them too.
   const busyKey = findOtherRepoBusyKey(repo.name, key);
   if (busyKey) {
-    const msg = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`;
+    const msg = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Deploy, Merge and Restart main share this repo's working tree and cannot overlap.`;
     return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'blocked', message: msg });
   }
 
@@ -1484,7 +1552,7 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
 
   const busyKey = findOtherRepoBusyKey(repo.name, key);
   if (busyKey) {
-    const message = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`;
+    const message = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Deploy, Merge and Restart main share this repo's working tree and cannot overlap.`;
     return sendSseBlocked(res, { action: 'merge', prNumber, status: 'blocked', message });
   }
 
@@ -1732,7 +1800,7 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/update', async (req, res) => {
 
   const busyKey = findOtherRepoBusyKey(repo.name, key);
   if (busyKey) {
-    const message = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`;
+    const message = `Blocked: ${describeBusyKey(repo.name, busyKey)}.`;
     return sendSseBlocked(res, { action: 'update', prNumber, status: 'blocked', message });
   }
 
@@ -1752,16 +1820,23 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/update', async (req, res) => {
   const baseRefName = prInfo.baseRefName || defaultBranchOf(repo.path);
   const headRefName = prInfo.headRefName;
 
-  // The PR's branch, in its own isolated working tree when one already holds
-  // it — same rule Deploy and Chat follow, so this can never fight them for a
-  // checkout (they are mutually excluded by the repo lock above anyway).
-  let workCwd;
+  // The PR's branch in a worktree of its own, so this can run while other
+  // issues are being implemented in parallel.
+  let lease;
   try {
-    workCwd = checkoutBranchCwd(repo.path, headRefName);
+    lease = await leaseWorktree(repo, {
+      key,
+      action: 'update',
+      issueNumber: n,
+      prNumber,
+      branch: headRefName,
+      baseRef: baseRefName,
+    });
   } catch (err) {
     const message = `Failed to check out branch "${headRefName}": ${err.message}`;
     return sendSseBlocked(res, { action: 'update', prNumber, status: 'failed', message });
   }
+  const workCwd = lease.path;
 
   const storedSync = (store.getRecord(repo.name, n).prs[prNumber] || {}).sync || null;
   const conflicting =
@@ -1783,17 +1858,22 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/update', async (req, res) => {
     bin: COPILOT_BIN,
     args: [
       '-p',
-      updatePrompt({ ownerRepo: repo.ownerRepo, prNumber, baseRefName, headRefName, conflicting }),
+      updatePrompt({ ownerRepo: repo.ownerRepo, prNumber, baseRefName, headRefName, conflicting }) +
+        portNote(lease),
       '--allow-all',
       ...modelFlags(),
     ],
     cwd: workCwd,
+    env: lease.env,
     meta: {
       action: 'update',
       prNumber,
       repo: repo.name,
       issueNumber: n,
       subject: cachedPrTitle(repo, prNumber) || `PR #${prNumber}`,
+      auto: Boolean(req.body?.auto),
+      worktree: lease.path,
+      port: lease.port,
     },
     onSession: (id) =>
       store.updateBranchUpdate(repo.name, n, prNumber, (u) => {
@@ -1853,10 +1933,7 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/update', async (req, res) => {
       if (success && behind === 0) store.resetForNewCommits(repo.name, n, prNumber);
 
       // Leave no half-open worktree behind, whatever happened.
-      const cleanup = worktrees.cleanupAfterRun(repo.path, headRefName, {
-        skipPaths: [j.cwd],
-        fallbackRef: `origin/${baseRefName}`,
-      });
+      const cleanup = releaseLease(lease, { fallbackRef: `origin/${baseRefName}` });
       const cleanupText = worktrees.formatCleanup(cleanup);
       if (cleanupText) {
         store.updateBranchUpdate(repo.name, n, prNumber, (u) => {
@@ -1894,6 +1971,204 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/update/cancel', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Action: Review a PR and improve it in the same run (issue #64)
+//
+// The last stage the scheduler drives for a committed issue. Once a PR exists
+// and is in sync with its base, there is nothing left to react to — the only
+// way it keeps getting better is a deliberate critique of the diff followed by
+// acting on it. Both halves happen in one Copilot session on purpose: a review
+// that only leaves comments needs a human to come back, which is exactly the
+// loop this feature exists to remove.
+//
+// Eligibility is per head commit: `review.lastReviewedSha` records the commit a
+// completed review ran against, so the same code is never reviewed twice, and
+// any new commit makes the PR eligible again.
+// ---------------------------------------------------------------------------
+
+function reviewPrompt({ ownerRepo, prNumber, baseRefName, headRefName }) {
+  return [
+    `Review pull request #${prNumber} in ${ownerRepo} thoroughly, then improve it — in this single run.`,
+    `Its branch \`${headRefName}\` is already checked out here; its base is \`${baseRefName}\`.`,
+    `Start by reading the full diff: \`git fetch origin\` then \`git diff origin/${baseRefName}...HEAD\`, plus \`gh pr view ${prNumber} --repo ${ownerRepo}\` for the issue it closes and any existing review comments.`,
+    'Judge it as a demanding reviewer would: correctness bugs, unhandled failure modes, race conditions, security problems, missing or wrong tests, dead or duplicated code, and whether it actually satisfies the issue it claims to close.',
+    'Then FIX what you found. Apply the improvements yourself — do not merely list them.',
+    'Ignore pure style/formatting preferences and do not restructure code that is already correct; the goal is a better PR, not a different one.',
+    'Run whatever build/lint/test commands already exist for the changed files and make sure they pass.',
+    `Commit your improvements and push them to \`${headRefName}\`. Never force-push, never open a new pull request, and never merge anything.`,
+    `Finally, post one PR comment with \`gh pr comment ${prNumber} --repo ${ownerRepo} --body ...\` summarising what you reviewed, what you changed, and anything you deliberately left alone.`,
+    'If the review finds nothing worth changing, say so explicitly and post that as the comment instead of inventing work.',
+    'Work autonomously — do not ask for confirmation.',
+  ].join(' ');
+}
+
+app.post('/api/repos/:name/issues/:n/prs/:pr/review', async (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const n = Number(req.params.n);
+  const prNumber = Number(req.params.pr);
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    return res.status(400).json({ error: 'invalid PR number' });
+  }
+  const key = `${repo.name}#${n}:review:${prNumber}`;
+
+  writeSseHead(res);
+
+  const existing = jobs.getJob(key);
+  if (existing && existing.status === 'running') {
+    jobs.subscribe(existing, res);
+    return;
+  }
+
+  const busyKey = findOtherRepoBusyKey(repo.name, key);
+  if (busyKey) {
+    const message = `Blocked: ${describeBusyKey(repo.name, busyKey)}.`;
+    return sendSseBlocked(res, { action: 'review', prNumber, status: 'blocked', message });
+  }
+
+  const prInfo = await gh.getPr(repo.ownerRepo, prNumber);
+  if (!prInfo || !prInfo.headRefName) {
+    const message = `Could not resolve the branch for PR #${prNumber} via gh.`;
+    return sendSseBlocked(res, { action: 'review', prNumber, status: 'failed', message });
+  }
+  const closed = refuseIfPrClosed(repo, n, prNumber, prInfo);
+  if (closed) {
+    return sendSseBlocked(res, { action: 'review', prNumber, status: 'blocked', message: closed });
+  }
+  if (prInfo.state === 'MERGED') {
+    const message = `Blocked: PR #${prNumber} is already merged — there is nothing left to review.`;
+    return sendSseBlocked(res, { action: 'review', prNumber, status: 'blocked', message });
+  }
+
+  const baseRefName = prInfo.baseRefName || defaultBranchOf(repo.path);
+  const headRefName = prInfo.headRefName;
+  const headSha = prInfo.headRefOid || null;
+
+  let lease;
+  try {
+    lease = await leaseWorktree(repo, {
+      key,
+      action: 'review',
+      issueNumber: n,
+      prNumber,
+      branch: headRefName,
+      baseRef: baseRefName,
+    });
+  } catch (err) {
+    const message = `Failed to check out branch "${headRefName}": ${err.message}`;
+    return sendSseBlocked(res, { action: 'review', prNumber, status: 'failed', message });
+  }
+
+  store.updateReview(repo.name, n, prNumber, (rv) => {
+    rv.status = 'reviewing';
+    rv.startedAt = new Date().toISOString();
+    rv.finishedAt = null;
+    rv.conversation = '';
+    rv.sessionId = null;
+    rv.exitCode = null;
+    rv.reviewedSha = headSha;
+    rv.message = null;
+  });
+
+  const job = jobs.startJob(key, {
+    bin: COPILOT_BIN,
+    args: [
+      '-p',
+      reviewPrompt({ ownerRepo: repo.ownerRepo, prNumber, baseRefName, headRefName }) + portNote(lease),
+      '--allow-all',
+      ...modelFlags(),
+    ],
+    cwd: lease.path,
+    env: lease.env,
+    meta: {
+      action: 'review',
+      prNumber,
+      repo: repo.name,
+      issueNumber: n,
+      subject: cachedPrTitle(repo, prNumber) || `PR #${prNumber}`,
+      auto: Boolean(req.body?.auto),
+      worktree: lease.path,
+      port: lease.port,
+    },
+    onSession: (id) =>
+      store.updateReview(repo.name, n, prNumber, (rv) => {
+        rv.sessionId = id;
+      }),
+    onProgress: (j) =>
+      store.updateReview(repo.name, n, prNumber, (rv) => {
+        rv.conversation = j.conversation;
+        if (j.sessionId) rv.sessionId = j.sessionId;
+      }),
+    onDone: async (j) => {
+      const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
+      // Whether the review changed anything is decided by git, not by the
+      // transcript: a review that pushed commits moved the head SHA.
+      let newHeadSha = headSha;
+      try {
+        const after = await gh.getPr(repo.ownerRepo, prNumber);
+        if (after && after.headRefOid) newHeadSha = after.headRefOid;
+      } catch {
+        /* keep the pre-run SHA */
+      }
+      const improved = Boolean(headSha && newHeadSha && newHeadSha !== headSha);
+      const message =
+        status === 'success'
+          ? improved
+            ? 'Reviewed and pushed improvements.'
+            : 'Reviewed — nothing worth changing.'
+          : status === 'aborted'
+            ? 'Review aborted.'
+            : 'Review did not finish cleanly.';
+
+      const cleanup = releaseLease(lease, { fallbackRef: `origin/${baseRefName}` });
+      const cleanupText = worktrees.formatCleanup(cleanup);
+
+      store.updateReview(repo.name, n, prNumber, (rv) => {
+        rv.status = status;
+        rv.exitCode = j.exitCode;
+        rv.conversation = cleanupText ? `${j.conversation}\n${cleanupText}\n` : j.conversation;
+        rv.sessionId = j.sessionId || rv.sessionId;
+        rv.finishedAt = new Date().toISOString();
+        rv.message = message;
+        // Only a COMPLETED review marks a commit as reviewed. Recording the
+        // post-run head means improvements the review itself pushed are not
+        // immediately treated as "new, unreviewed work" — otherwise every
+        // review would schedule another one, forever.
+        if (status === 'success') rv.lastReviewedSha = newHeadSha;
+      });
+
+      if (improved) {
+        store.resetForNewCommits(repo.name, n, prNumber);
+        sweepRepoSyncSoon(repo);
+      }
+
+      return {
+        action: 'review',
+        prNumber,
+        status,
+        message,
+        improved,
+        headSha: newHeadSha,
+        worktreeCleanup: cleanup,
+      };
+    },
+  });
+
+  jobs.subscribe(job, res);
+});
+
+app.post('/api/repos/:name/issues/:n/prs/:pr/review/cancel', (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  const n = Number(req.params.n);
+  const prNumber = Number(req.params.pr);
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    return res.status(400).json({ error: 'invalid PR number' });
+  }
+  const cancelled = jobs.cancelJob(`${repo.name}#${n}:review:${prNumber}`);
+  res.json({ cancelled });
+});
+
+// ---------------------------------------------------------------------------
 // Action: Chat with a PR — plan → apply iteration on its existing branch
 // ---------------------------------------------------------------------------
 
@@ -1926,12 +2201,12 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
 
   writeSseHead(res);
 
-  // Repo-level lock: even a "plan" turn checks out the PR's branch on the
-  // same shared working tree as Create PR/Deploy, so it must be mutually
-  // exclusive with them too.
+  // Chat used to take the repo-wide lock because even a "plan" turn checked out
+  // the PR's branch in the shared working tree. It now gets its own worktree,
+  // so it only has to stay clear of the actions that still use the main tree.
   const busyKey = findOtherRepoBusyKey(repo.name, key);
   if (busyKey) {
-    const msg = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`;
+    const msg = `Blocked: ${describeBusyKey(repo.name, busyKey)}.`;
     return sendSseBlocked(res, { action: 'chat', prNumber, mode, status: 'blocked', message: msg });
   }
 
@@ -1951,13 +2226,21 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
   if (closed) {
     return sendSseBlocked(res, { action: 'chat', prNumber, mode, status: 'blocked', message: closed });
   }
-  let workCwd;
+  let lease;
   try {
-    workCwd = checkoutBranchCwd(repo.path, prInfo.headRefName);
+    lease = await leaseWorktree(repo, {
+      key,
+      action: 'chat',
+      issueNumber: n,
+      prNumber,
+      branch: prInfo.headRefName,
+      baseRef: prInfo.baseRefName || defaultBranchOf(repo.path),
+    });
   } catch (err) {
     const message2 = `Failed to check out branch "${prInfo.headRefName}": ${err.message}`;
     return sendSseBlocked(res, { action: 'chat', prNumber, mode, status: 'failed', message: message2 });
   }
+  const workCwd = lease.path;
 
   // Attached screenshots/mockups (if any) — saved to disk so they can be
   // passed to the CLI via --attachment and redisplayed from history later.
@@ -1982,7 +2265,8 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
     const prompt =
       `Implement the plan from our conversation for this request: ${message}\n\n` +
       `Commit and push the changes to the EXISTING branch for PR #${prNumber} ` +
-      `(do not open a new PR, do not force-push). Confirm what you committed and pushed.`;
+      `(do not open a new PR, do not force-push). Confirm what you committed and pushed.` +
+      portNote(lease);
     args.push('-p', prompt, '--allow-all', ...modelFlags(model));
   }
 
@@ -1990,6 +2274,7 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
     bin: COPILOT_BIN,
     args,
     cwd: workCwd,
+    env: lease.env,
     meta: {
       action: 'chat',
       prNumber,
@@ -1998,6 +2283,9 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
       repo: repo.name,
       issueNumber: n,
       chatTitle: store.titleFromMessage(message),
+      subject: cachedPrTitle(repo, prNumber) || `PR #${prNumber}`,
+      worktree: lease.path,
+      port: lease.port,
     },
     onSession: (id) =>
       store.updateRecord(repo.name, n, (r) => {
@@ -2009,7 +2297,16 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
       }),
     onDone: async (j) => {
       const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
-      store.appendChatMessage(repo.name, n, prNumber, { role: 'assistant', text: j.conversation, mode, model });
+      const cleanup = releaseLease(lease, {
+        fallbackRef: `origin/${prInfo.baseRefName || defaultBranchOf(repo.path)}`,
+      });
+      const cleanupText = worktrees.formatCleanup(cleanup);
+      store.appendChatMessage(repo.name, n, prNumber, {
+        role: 'assistant',
+        text: cleanupText ? `${j.conversation}\n${cleanupText}\n` : j.conversation,
+        mode,
+        model,
+      });
       // New commits landed — the old Deploy/Merge no longer reflect this code.
       if (mode === 'apply' && status === 'success') {
         store.resetForNewCommits(repo.name, n, prNumber);
@@ -2032,6 +2329,79 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat/cancel', (req, res) => {
   }
   const cancelled = jobs.cancelJob(`${repo.name}#${n}:chat:${prNumber}`);
   res.json({ cancelled });
+});
+
+// ---------------------------------------------------------------------------
+// Running tasks (issue #64)
+//
+// With several agents running at once, "what is this machine doing right now?"
+// stops being obvious from the issue list alone. This is the panel's whole data
+// source: one cheap in-memory read, no `gh` and no git, so the client can poll
+// it every few seconds.
+// ---------------------------------------------------------------------------
+
+app.get('/api/jobs', (req, res) => {
+  res.json({
+    at: Date.now(),
+    jobs: jobs.listRunning(),
+    worktrees: worktreePool.list(),
+    limits: { perRepo: worktreePool.MAX_PER_REPO, global: worktreePool.MAX_GLOBAL },
+    scheduler: scheduler.status(),
+  });
+});
+
+// Stop one running task by its job key. The panel needs this because a task can
+// be started from another device (or by the scheduler) and therefore has no
+// action-specific cancel button on screen here.
+app.post('/api/jobs/cancel', (req, res) => {
+  const key = typeof req.body?.key === 'string' ? req.body.key : '';
+  if (!key) return res.status(400).json({ error: 'key is required' });
+  const job = jobs.getJob(key);
+  if (!job || job.status !== 'running') return res.status(404).json({ error: 'no such running job' });
+  res.json({ cancelled: jobs.cancelJob(key) });
+});
+
+// ---------------------------------------------------------------------------
+// Committed issues + the automatic scheduler (issue #64)
+// ---------------------------------------------------------------------------
+
+app.post('/api/repos/:name/issues/:n/committed', async (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  if (!repo.ownerRepo) return res.status(400).json({ error: 'repo has no github.com remote' });
+  const n = Number(req.params.n);
+  if (!Number.isInteger(n) || n <= 0) return res.status(400).json({ error: 'invalid issue number' });
+  const committed = Boolean(req.body?.committed);
+  try {
+    await gh.setIssueLabel(repo.ownerRepo, n, gh.COMMITTED_LABEL, committed);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  // Un-committing clears the retry budget, so re-committing later starts from a
+  // clean slate instead of resuming a backoff the user cannot see.
+  if (!committed) {
+    store.updateAuto(repo.name, n, (a) => {
+      a.attempts = 0;
+      a.lastError = null;
+      a.nextAttemptAt = null;
+      a.needsAttention = false;
+    });
+  }
+  res.json({ committed, label: gh.COMMITTED_LABEL });
+});
+
+app.get('/api/settings/scheduler', (req, res) => {
+  res.json({ ...store.getSchedulerSettings(), ...scheduler.status() });
+});
+
+app.post('/api/settings/scheduler', (req, res) => {
+  const body = req.body || {};
+  if (typeof body.enabled === 'boolean') store.setSchedulerEnabled(body.enabled);
+  if (typeof body.repo === 'string' && body.repo) {
+    store.setRepoSchedulerEnabled(body.repo, body.repoEnabled === null ? null : Boolean(body.repoEnabled));
+  }
+  if (body.runNow) scheduler.runSoon();
+  res.json({ ...store.getSchedulerSettings(), ...scheduler.status() });
 });
 
 // ---------------------------------------------------------------------------
@@ -2385,6 +2755,37 @@ app.listen(PORT, HOST, () => {
   );
   scheduleBackgroundSync(BG_SYNC_FIRST_DELAY_MS);
   schedulePrSyncSweep(PR_SYNC_FIRST_DELAY_MS);
+
+  // Worktrees this pool created but no longer owns are leftovers from a crash
+  // or a restart. Removing them at startup keeps `.worktrees/` from growing
+  // without bound; anything holding unpushed work is deliberately kept.
+  try {
+    const orphans = worktreePool.sweepOrphans(gh.listRepos(REPOS_ROOT));
+    if (orphans.length) {
+      console.log(`[worktrees] removed ${orphans.length} orphaned worktree(s) from a previous run`);
+    }
+  } catch (err) {
+    console.warn(`[worktrees] startup sweep failed: ${err.message}`);
+  }
+
+  // The automatic scheduler drives `committed` issues on its own. It triggers
+  // the very same HTTP endpoints the browser does, so it needs this server's
+  // port — and it must never fight a person for a repo, hence `isRepoBusy`.
+  scheduler.init({
+    port: PORT,
+    gh,
+    store,
+    listRepos: () => gh.listRepos(REPOS_ROOT),
+    isRepoBusy: (repoName) =>
+      jobs.listRunning().some((j) => j.repo === repoName && !j.auto),
+  });
+  scheduler.start();
+  const schedulerSettings = store.getSchedulerSettings();
+  console.log(
+    schedulerSettings.enabled
+      ? `Scheduler: ON (every ${Math.round(scheduler.INTERVAL_MS / 60000)} min)`
+      : 'Scheduler: off',
+  );
   // Recover any admin turn that was still in-flight when the previous
   // process died (e.g. a chat turn triggered its own restart mid-reply) so
   // it shows up as an "interrupted" turn instead of silently vanishing.

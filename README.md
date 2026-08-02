@@ -542,6 +542,70 @@ behaviour:
 
 ---
 
+## Running many PRs at once (worktree + port pool)
+
+Create PR, Update, Review and Chat no longer take over the repo's checkout, so
+**several of them run at the same time — even on the same repo**.
+
+- **One throwaway worktree per run.** `lib/worktreePool.js` leases
+  `<repo>/.worktrees/<action>-<issue>-<hex>` (excluded via `.git/info/exclude`, so
+  nothing lands in your diff). Create PR gets a detached checkout of
+  `origin/<base>`; branch actions check out the PR branch, or reuse an existing
+  linked worktree that already holds it.
+- **One port per worktree.** `lib/portPool.js` hands out a free port from
+  **8000–8888**, probing it with a real bind before leasing, and exports it into
+  the run as `PORT` and `CC_TEST_PORT`. Two runs can therefore boot dev servers
+  side by side without a fight. The server's own port is never leased.
+- **Isolated state.** Each lease also sets `CC_DATA_DIR=<worktree>/.cc-data`, so a
+  nested tool run inside a worktree can never scribble on the real
+  `data/state.json`.
+- **Limits.** 3 concurrent leases per repo, 6 in total (`CC_MAX_WORKTREES*`).
+  Beyond that a run waits in a FIFO queue instead of failing.
+- **Never lose work.** Release reuses the existing disposability check: a worktree
+  is only removed when it is clean and provably has no unpushed commits.
+  Anything else is left on disk for you. Crash leftovers are swept at startup.
+- **Deploy, Merge and Restart main still share the repo's real working tree** and
+  remain mutually exclusive — those genuinely need the checkout.
+
+### ⚡ Running tasks panel
+
+The **⚡ button in the top-left** opens a live list of everything the server is
+running: repo + issue, what it is doing, how long it has been going, which
+worktree and port it holds, whether it was started by you or automatically, a
+link to the issue, and a **Stop** button per row. The button carries a badge with
+the number of running jobs and polls every 3 seconds while open. The scheduler's
+switch and a **Run a sweep now** button live at the bottom of the same panel.
+
+## Committed issues and the scheduler
+
+Tick the **committed** checkbox on an issue and cloud-copilot takes ownership of
+it. The checkbox writes the **`committed` GitHub label** — the label *is* the
+state, so it is visible and editable from GitHub itself and survives any local
+reset.
+
+Every 10 minutes (`SCHEDULER_INTERVAL_MS`) the scheduler sweeps every enabled
+repo and, for each committed issue, does the highest-priority thing that is due:
+
+1. **Create PR** if the issue has no open PR (re-checked live against GitHub
+   first, so a PR opened by hand is adopted instead of duplicated).
+2. **Update from base** if the PR is behind its base branch — this is what keeps
+   every committed PR continuously rebased on the newest `main`.
+3. **Review & improve** once per head commit, when nothing else is pending. A new
+   push makes the PR eligible again; the reviewed SHA is read from git, not from
+   the hourly PR cache, so a review can never loop on its own push.
+
+Repos run in parallel, tasks within a repo run one at a time, and **you always
+win**: a repo with any manually started job is skipped for that sweep. Failures
+back off exponentially and, after 3 attempts, the record is flagged
+`needsAttention` and left alone. Every automatic run is a normal job — it shows
+up in the ⚡ panel, streams into the same log, and sends the same ntfy push
+(prefixed `自动 ·`).
+
+The switch is off by default and is **persisted**; on restart the scheduler
+restores it and re-checks GitHub before creating anything, so a server bounce
+never produces a duplicate PR.
+
+
 ## API
 
 | Method | Path | Purpose |
@@ -568,14 +632,21 @@ behaviour:
 | POST | `/api/repos/:name/issues/:n/prs/:pr/update/cancel` | Abort the running branch update for that PR. |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat` | **Chat with a PR** — SSE stream. Body: `{ "message": "...", "mode": "plan"\|"apply", "model": "..." }`. `plan` is read-only (default approval flags); `apply` implements + pushes to the existing branch and resets Deploy/Merge on success. The optional `model` overrides the global setting for that turn only (unknown values fall back to it). |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat/cancel` | Abort the running chat turn for that PR. |
+| POST | `/api/repos/:name/issues/:n/prs/:pr/review` | **Review & improve a PR** — SSE stream. Starts a Copilot session in the PR's own worktree that reviews the diff, applies the fixes it deems worth making, and pushes. Records the reviewed head SHA so the same commit is never reviewed twice. |
+| POST | `/api/repos/:name/issues/:n/prs/:pr/review/cancel` | Abort the running review for that PR. |
+| POST | `/api/repos/:name/issues/:n/committed` | Toggle the **committed** label on the issue. Body: `{ "committed": true }`. Writes the label on GitHub — that label *is* the state. |
+| GET  | `/api/jobs` | Everything currently running: `{ jobs, worktrees, limits, scheduler }`. Backs the ⚡ task panel; polled every 3s while it is open. |
+| POST | `/api/jobs/cancel` | Stop one running job. Body: `{ "key": "<repo>#<n>:<action>" }`. |
+| GET  | `/api/settings/scheduler` | Scheduler state: `{ enabled, repos, running, intervalMs, nextRunAt, lastRunAt, lastSummary }`. |
+| POST | `/api/settings/scheduler` | Turn the scheduler on/off (`{ enabled }`), per repo (`{ repo, enabled }`), or run a sweep now (`{ runNow: true }`). Persisted to `data/state.json` and restored on restart. |
 | POST | `/api/run` | Simple one-shot demo (prompt + optional `sessionId` resume). |
 
 ### SSE events
 
 `meta` (command) → `chunk` (`{stream,text}` streamed output) → `session`
 (`{sessionId}`) → `result` (`{action,status,prUrl?,prNumber?}`, where `status` is
-`success`/`failed`/`aborted`, or `blocked` when the repo lock rejects a second
-Create PR, or Merge is attempted before Deploy has succeeded) → `done` (`{exitCode}`).
+`success`/`failed`/`aborted`, or `blocked` when the working-tree lock rejects
+an overlapping Deploy/Merge/Restart, or Merge is attempted before Deploy has succeeded) → `done` (`{exitCode}`).
 
 ---
 
@@ -754,6 +825,13 @@ Other optional env vars:
 | `PORT`       | `8787`         | Port to listen on                        |
 | `HOST`       | `0.0.0.0`      | Bind address (`127.0.0.1` for local-only)|
 | `MERGE_AUTO_CLEANUP` | `1`    | `0` disables closing the issue + superseded PRs after a merge |
+| `CC_MAX_WORKTREES_PER_REPO` | `3` | Concurrent worktree leases allowed per repo |
+| `CC_MAX_WORKTREES` | `6`     | Concurrent worktree leases allowed across all repos |
+| `CC_PORT_RANGE_START` | `8000` | First port handed to a worktree (`PORT`/`CC_TEST_PORT` inside it) |
+| `CC_PORT_RANGE_END` | `8888`  | Last port of that range |
+| `CC_COMMITTED_LABEL` | `committed` | GitHub label that marks an issue as committed |
+| `SCHEDULER_INTERVAL_MS` | `600000` | Scheduler sweep interval (10 min) |
+| `CC_DATA_DIR` | `./data`      | State/cache/upload directory — set per worktree so parallel runs never share state |
 
 ---
 
@@ -825,6 +903,9 @@ cloud-copilot/
 │   ├── mergeRunner.js  # gh pr merge + Copilot recovery, verifies the PR is MERGED
 │   ├── mergeCleanup.js # after a merge: close the issue + superseded sibling PRs
 │   ├── worktrees.js    # linked-worktree housekeeping: release/sweep without ever losing work
+│   ├── worktreePool.js # leases one throwaway worktree per run (concurrency limits + cleanup)
+│   ├── portPool.js     # leases a free port (8000-8888) to each worktree
+│   ├── scheduler.js    # 10-min sweep that drives committed issues by itself
 │   └── repoConfig.js   # loads a repo's .cloud-copilot.json (or auto-detects iOS)
 ├── public/
 │   ├── index.html      # repos → issues → Create PR / Deploy / Merge pipeline console

@@ -321,6 +321,34 @@
     .topbar h1 { overflow-wrap: anywhere; }
     .topctrls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; flex: none; }
     .filter { position: relative; }
+
+    /* Running-task panel (issue #64): several agents can now work at once, so
+       the top-left icon is the one place that answers "what is this machine
+       doing right now?". The badge counts running jobs and pulses while any
+       are alive, which is deliberately hard to miss. */
+    .tasks { position: relative; flex: none; }
+    .tasks-trigger { position: relative; font-size: 1rem; line-height: 1; padding: 7px 10px; }
+    .tasks-trigger.busy { border-color: #16a34a88; animation: taskspulse 1.6s ease-in-out infinite; }
+    @keyframes taskspulse { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
+    @media (prefers-reduced-motion: reduce) { .tasks-trigger.busy { animation: none; } }
+    .tasks-badge {
+      position: absolute; top: -5px; right: -5px; min-width: 16px; height: 16px;
+      padding: 0 4px; box-sizing: border-box; border-radius: 8px; background: #16a34a;
+      color: #fff; font-size: .65rem; font-weight: 700; line-height: 16px; text-align: center;
+      box-shadow: 0 0 0 2px Canvas;
+    }
+    .tasks-menu { right: auto; left: 0; width: min(360px, calc(100vw - 24px)); }
+    .tasks-list { display: flex; flex-direction: column; gap: 6px; }
+    .tasks-empty { color: #888; font-size: .8rem; padding: 4px 6px; }
+    .task-row {
+      display: flex; align-items: center; gap: 8px; padding: 6px;
+      border: 1px solid #8883; border-radius: 8px;
+    }
+    .task-row .grow { flex: 1; min-width: 0; }
+    .task-what { font-size: .82rem; font-weight: 600; overflow-wrap: anywhere; }
+    .task-meta { font-size: .72rem; color: #888; overflow-wrap: anywhere; }
+    .task-auto { color: #16a34a; font-weight: 700; }
+    .tasks-sched { display: flex; align-items: center; gap: 8px; font-size: .82rem; padding: 0 6px; }
     .settings-trigger { position: relative; white-space: nowrap; }
     /* badge shown when a setting is non-default (e.g. repos are hidden), so
        collapsing the controls doesn't hide active state */
@@ -375,6 +403,18 @@
       color: inherit; opacity: .5; flex: none; touch-action: manipulation;
     }
     .hidebtn:hover { opacity: 1; color: #dc2626; background: #dc262622; }
+
+    /* "committed" toggle (issue #64) — the promise that the scheduler keeps
+       this issue moving on its own. Checked state is deliberately loud: it
+       means an agent may start work here with nobody watching. */
+    .committed {
+      display: inline-flex; align-items: center; gap: 4px; flex: none;
+      font-size: .7rem; opacity: .55; cursor: pointer; user-select: none;
+      padding: 2px 5px; border-radius: 6px; touch-action: manipulation;
+    }
+    .committed:hover { opacity: 1; background: #8881; }
+    .committed input { margin: 0; accent-color: #16a34a; }
+    .committed:has(input:checked) { opacity: 1; color: #16a34a; font-weight: 700; }
 
     /* pin-to-top toggle — sized for tapping, like the other icon buttons */
     .pinbtn {
@@ -894,6 +934,25 @@
 
   <div id="mainView">
     <div class="topbar">
+      <div class="tasks">
+        <button id="tasksBtn" class="ghost sm tasks-trigger" aria-haspopup="true"
+                aria-expanded="false" aria-controls="tasksMenu" title="Running tasks">
+          ⚡<span id="tasksCount" class="tasks-badge" hidden>0</span>
+        </button>
+        <div id="tasksMenu" class="filter-menu tasks-menu" role="dialog" aria-label="Running tasks">
+          <h4>Running tasks</h4>
+          <div id="tasksList" class="tasks-list"><div class="tasks-empty">nothing running</div></div>
+          <h4>Automatic scheduler</h4>
+          <label class="tasks-sched">
+            <input type="checkbox" id="schedEnabled">
+            <span>drive <strong>committed</strong> issues automatically</span>
+          </label>
+          <div class="settings-note" id="schedNote">off</div>
+          <div class="filter-actions">
+            <button id="schedRunNow" class="ghost sm">Run a sweep now</button>
+          </div>
+        </div>
+      </div>
       <div class="grow">
         <h1>☁️ cloud-copilot</h1>
         <p class="sub" id="rootline">loading…</p>
@@ -1401,6 +1460,199 @@ document.addEventListener('keydown', (e) => {
   }
 });
 window.addEventListener('resize', () => { if (settingsOpen()) clampSettingsMenu(); });
+
+// ---------------------------------------------------------------------------
+// Running-task panel (issue #64)
+//
+// Concurrency made the issue list a bad answer to "what is running?": several
+// agents can be working at once, some of them started by the scheduler rather
+// than by anyone at this screen. This panel polls one cheap endpoint that reads
+// only in-memory job state — no `gh`, no git — so a 3s interval costs nothing.
+// ---------------------------------------------------------------------------
+
+const tasksBtn = document.getElementById('tasksBtn');
+const tasksMenu = document.getElementById('tasksMenu');
+const tasksCount = document.getElementById('tasksCount');
+const tasksList = document.getElementById('tasksList');
+const schedEnabled = document.getElementById('schedEnabled');
+const schedNote = document.getElementById('schedNote');
+const schedRunNow = document.getElementById('schedRunNow');
+
+const TASK_LABEL = {
+  work: 'Create PR',
+  update: 'Sync with base',
+  review: 'Review & improve',
+  chat: 'PR chat',
+  deploy: 'Deploy',
+  merge: 'Merge',
+  admin: 'Admin chat',
+  'preissue-chat': 'Issue draft',
+};
+
+function humanDuration(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+function taskWhere(job) {
+  if (job.repo && job.prNumber) return `${job.repo} PR #${job.prNumber}`;
+  if (job.repo && job.issueNumber) return `${job.repo}#${job.issueNumber}`;
+  return job.repo || '—';
+}
+
+function taskHref(job) {
+  if (job.action === 'admin') return job.sessionId ? `#/admin/chat/${enc(job.sessionId)}` : '#/admin';
+  if (job.action === 'preissue-chat' && job.repo && job.id) return `#/preissue/${enc(job.repo)}/${enc(job.id)}`;
+  if (job.repo && job.prNumber && job.issueNumber) return `#/pr/${enc(job.repo)}/${job.issueNumber}/${job.prNumber}`;
+  // A Create PR run has no page of its own yet — its transcript streams into
+  // the issue card on Home, which is already where the user is.
+  return null;
+}
+
+function renderTasks(data) {
+  const list = data.jobs || [];
+  tasksCount.hidden = list.length === 0;
+  tasksCount.textContent = String(list.length);
+  tasksBtn.classList.toggle('busy', list.length > 0);
+  tasksBtn.title = list.length ? `${list.length} task(s) running` : 'Running tasks';
+
+  tasksList.textContent = '';
+  if (!list.length) {
+    const empty = document.createElement('div');
+    empty.className = 'tasks-empty';
+    empty.textContent = 'nothing running';
+    tasksList.append(empty);
+  }
+  for (const job of list) {
+    const row = document.createElement('div');
+    row.className = 'task-row';
+
+    const grow = document.createElement('div');
+    grow.className = 'grow';
+    const what = document.createElement('div');
+    what.className = 'task-what';
+    what.textContent = `${TASK_LABEL[job.action] || job.action} · ${taskWhere(job)}`;
+    if (job.auto) {
+      const tag = document.createElement('span');
+      tag.className = 'task-auto';
+      tag.textContent = ' · auto';
+      what.append(tag);
+    }
+    const meta = document.createElement('div');
+    meta.className = 'task-meta';
+    const bits = [humanDuration(job.elapsedMs)];
+    if (job.port) bits.push(`:${job.port}`);
+    if (job.subject) bits.push(job.subject);
+    meta.textContent = bits.join(' · ');
+    grow.append(what, meta);
+    row.append(grow);
+
+    const href = taskHref(job);
+    if (href) {
+      const view = document.createElement('a');
+      view.className = 'btnlink';
+      view.textContent = 'View';
+      view.href = href;
+      view.addEventListener('click', () => closeTasks());
+      row.append(view);
+    }
+
+    const stop = document.createElement('button');
+    stop.className = 'ghost sm';
+    stop.textContent = 'Stop';
+    stop.title = 'Terminate this task';
+    stop.addEventListener('click', async () => {
+      stop.disabled = true;
+      try {
+        await fetch('/api/jobs/cancel', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ key: job.key }),
+        });
+        await refreshTasks();
+      } catch { /* the next poll will tell the truth */ } finally {
+        stop.disabled = false;
+      }
+    });
+    row.append(stop);
+    tasksList.append(row);
+  }
+
+  const sched = data.scheduler || {};
+  schedEnabled.checked = Boolean(sched.enabled);
+  const every = sched.intervalMs ? `${Math.round(sched.intervalMs / 60000)} min` : '10 min';
+  schedNote.textContent = sched.enabled
+    ? `on · sweeps every ${every}${sched.running ? ' · sweeping now' : ''}`
+    : 'off — committed issues are not driven automatically';
+  // A sweep is a no-op while the scheduler is off, so don't offer the button.
+  schedRunNow.disabled = !sched.enabled || Boolean(sched.running);
+}
+
+async function refreshTasks() {
+  try {
+    const data = await fetch('/api/jobs').then((r) => r.json());
+    renderTasks(data);
+  } catch { /* offline; keep the last render */ }
+}
+
+function tasksOpen() { return tasksMenu.classList.contains('show'); }
+function openTasks() {
+  tasksMenu.classList.add('show');
+  tasksBtn.setAttribute('aria-expanded', 'true');
+  refreshTasks();
+}
+function closeTasks({ focusTrigger = false } = {}) {
+  if (!tasksOpen()) return;
+  tasksMenu.classList.remove('show');
+  tasksBtn.setAttribute('aria-expanded', 'false');
+  if (focusTrigger) tasksBtn.focus();
+}
+tasksBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (tasksOpen()) closeTasks(); else openTasks();
+});
+document.addEventListener('click', (e) => {
+  if (!tasksMenu.contains(e.target) && !tasksBtn.contains(e.target)) closeTasks();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && tasksOpen()) {
+    e.stopPropagation();
+    closeTasks({ focusTrigger: true });
+  }
+});
+schedEnabled.addEventListener('change', async () => {
+  const enabled = schedEnabled.checked;
+  schedEnabled.disabled = true;
+  try {
+    const data = await fetch('/api/settings/scheduler', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    }).then((r) => r.json());
+    renderTasks({ jobs: [], scheduler: data });
+    await refreshTasks();
+  } catch {
+    schedEnabled.checked = !enabled;
+  } finally {
+    schedEnabled.disabled = false;
+  }
+});
+schedRunNow.addEventListener('click', async () => {
+  await fetch('/api/settings/scheduler', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ runNow: true }),
+  }).catch(() => {});
+  refreshTasks();
+});
+// Poll faster while the panel is open; a slow background beat is enough to keep
+// the badge honest when it is closed.
+setInterval(() => refreshTasks(), 3000);
+refreshTasks();
+
 document.getElementById('filterAll').addEventListener('click', () => {
   saveHidden(new Set());
   renderFilterMenu(window.__repos || []);
@@ -1983,6 +2235,17 @@ document.addEventListener('visibilitychange', () => {
 // the same `activeWorkIssues` field the server already returns — so a
 // pinned/detail card correctly starts greyed out if something else in that
 // repo is already busy, instead of the old no-op stub that never blocked.
+/**
+ * Per-repo context that greys out issues while an action holds the repo's ONE
+ * shared working tree.
+ *
+ * Since issue #64 that is only Deploy and Merge: Create PR, Update, Review and
+ * Chat each run in their own worktree and are free to run side by side, so
+ * locking the whole repo for them would now be a lie — it would hide exactly
+ * the concurrency this feature exists to provide.
+ */
+const LOCKING_ACTIONS = new Set(['deploy', 'merge']);
+
 function createRepoCtx(initialBusyIssue) {
   return {
     activeWorkIssue: initialBusyIssue ?? null,
@@ -1992,7 +2255,11 @@ function createRepoCtx(initialBusyIssue) {
         ic.setBlocked(this.activeWorkIssue != null && ic.issueNumber !== this.activeWorkIssue);
       }
     },
-    setActive(n) { this.activeWorkIssue = n; this.update(); },
+    setActive(n, action) {
+      if (!LOCKING_ACTIONS.has(action)) return;
+      this.activeWorkIssue = n;
+      this.update();
+    },
     clearActive(n) { if (this.activeWorkIssue === n) { this.activeWorkIssue = null; this.update(); } },
   };
 }
@@ -2015,7 +2282,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       </span>
     </div>
     <div class="worklog panel"></div>
-    <div class="blocked-note">⏸ Waiting — another PR creation is running in this repo…</div>
+    <div class="blocked-note">⏸ Waiting — a Deploy or Merge is using this repo's working tree…</div>
     <div class="prlist"></div>`;
 
   const icons = el.querySelector('.issue-icons');
@@ -2106,7 +2373,43 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   deleteBtn.setAttribute('aria-label', 'Permanently delete this issue on GitHub');
   deleteBtn.addEventListener('click', onDelete);
 
-  icons.append(refreshPrsBtn, hideBtn, deleteBtn);
+  // "Committed" (issue #64): a promise that cloud-copilot keeps driving this
+  // issue on its own — create the PR, keep it in sync with its base branch,
+  // then review and improve it. Backed by a GitHub label, so the flag is
+  // visible on github.com and survives a reinstall.
+  const committedLabel = document.createElement('label');
+  committedLabel.className = 'committed';
+  committedLabel.title =
+    'Committed: the scheduler keeps this issue moving on its own — opens a PR, ' +
+    'merges the base branch back in when it falls behind, then reviews and improves it.';
+  const committedBox = document.createElement('input');
+  committedBox.type = 'checkbox';
+  committedBox.checked = (issue.labels || []).includes('committed');
+  committedBox.setAttribute('aria-label', `Mark issue #${issue.number} as committed`);
+  committedBox.addEventListener('change', async () => {
+    const want = committedBox.checked;
+    committedBox.disabled = true;
+    try {
+      const r = await fetch(`/api/repos/${enc(repo.name)}/issues/${issue.number}/committed`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ committed: want }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+      // Keep the in-memory issue in step so a re-render doesn't flip it back.
+      const labels = new Set(issue.labels || []);
+      if (want) labels.add('committed'); else labels.delete('committed');
+      issue.labels = [...labels];
+    } catch (err) {
+      committedBox.checked = !want; // GitHub said no — don't pretend otherwise
+      alert(`Could not update the committed label: ${err.message}`);
+    } finally {
+      committedBox.disabled = false;
+    }
+  });
+  committedLabel.append(committedBox, document.createTextNode('committed'));
+
+  icons.append(committedLabel, refreshPrsBtn, hideBtn, deleteBtn);
 
   renderPrs(); // also paints the Create PR segment, which now lives inside it
 
@@ -2749,7 +3052,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       });
       if (!resp.ok || !resp.body) { appendWork(`\n[error] HTTP ${resp.status}\n`, 'err'); return reconcileWork(); }
       await pumpSSE(resp, {
-        onMeta: () => repoCtx.setActive(issue.number),
+        onMeta: () => repoCtx.setActive(issue.number, 'work'),
         onChunk: (t, s) => appendWork(t, s === 'stderr' ? 'stderr' : null),
         onError: (m) => appendWork(`\n[error] ${m}\n`, 'err'),
         onResult: (d) => { finalStatus = d.status; resultData = d; },
@@ -2796,7 +3099,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         if (s === 'success' && rec.work.prNumber && pipelineDepth() !== 'pr') onDeploy(rec.work.prNumber);
         return;
       }
-      if (rec.live && rec.live.work) { repoCtx.setActive(issue.number); return streamWork(true); }
+      if (rec.live && rec.live.work) { repoCtx.setActive(issue.number, 'work'); return streamWork(true); }
       await sleep(3000);
     }
     appendWork(`\n[work] status check timed out — tap Create PR again to re-check.\n`, 'stderr');
@@ -2844,7 +3147,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       if (!resp.ok || !resp.body) { appendDeploy(prNumber, `\n[error] HTTP ${resp.status}\n`, 'err'); return reconcileDeploy(prNumber); }
       await pumpSSE(resp, {
-        onMeta: () => repoCtx.setActive(issue.number),
+        onMeta: () => repoCtx.setActive(issue.number, 'deploy'),
         onChunk: (t, s) => appendDeploy(prNumber, t, s === 'stderr' ? 'stderr' : null),
         onError: (m) => appendDeploy(prNumber, `\n[error] ${m}\n`, 'err'),
         onResult: (d) => { finalStatus = d.status; resultData = d; },
@@ -2890,7 +3193,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         if (s === 'success' && pipelineDepth() === 'merge') onMerge(prNumber);
         return;
       }
-      if (rec.live && rec.live.deploy && rec.live.deploy[prNumber]) { repoCtx.setActive(issue.number); return streamDeploy(prNumber, true); }
+      if (rec.live && rec.live.deploy && rec.live.deploy[prNumber]) { repoCtx.setActive(issue.number, 'deploy'); return streamDeploy(prNumber, true); }
       await sleep(3000);
     }
     appendDeploy(prNumber, `\n[deploy #${prNumber}] status check timed out — tap Deploy again.\n`, 'stderr');
@@ -2959,7 +3262,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       if (!resp.ok || !resp.body) { appendUpdate(prNumber, `\n[error] HTTP ${resp.status}\n`, 'err'); return reconcileUpdate(prNumber); }
       await pumpSSE(resp, {
-        onMeta: () => repoCtx.setActive(issue.number),
+        onMeta: () => repoCtx.setActive(issue.number, 'update'),
         onChunk: (t, s) => appendUpdate(prNumber, t, s === 'stderr' ? 'stderr' : null),
         onError: (m) => appendUpdate(prNumber, `\n[error] ${m}\n`, 'err'),
         onResult: (d) => { finalStatus = d.status; resultData = d; },
@@ -3015,7 +3318,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         return;
       }
       if (rec.live && rec.live.update && rec.live.update[prNumber]) {
-        repoCtx.setActive(issue.number);
+        repoCtx.setActive(issue.number, 'update');
         return streamUpdate(prNumber, true);
       }
       await sleep(3000);
@@ -3084,7 +3387,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       });
       if (!resp.ok || !resp.body) { appendMerge(prNumber, `\n[error] HTTP ${resp.status}\n`, 'err'); return reconcileMerge(prNumber); }
       await pumpSSE(resp, {
-        onMeta: () => repoCtx.setActive(issue.number),
+        onMeta: () => repoCtx.setActive(issue.number, 'merge'),
         onChunk: (t, s) => appendMerge(prNumber, t, s === 'stderr' ? 'stderr' : null),
         onError: (m) => appendMerge(prNumber, `\n[error] ${m}\n`, 'err'),
         onResult: (d) => { finalStatus = d.status; resultData = d; },
@@ -3141,7 +3444,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         return;
       }
       if (rec.live && rec.live.merge && rec.live.merge[prNumber]) {
-        repoCtx.setActive(issue.number);
+        repoCtx.setActive(issue.number, 'merge');
         return streamMerge(prNumber, true);
       }
       await sleep(3000);

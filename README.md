@@ -418,14 +418,18 @@ a two-phase job, streaming into the same deploy log:
    summarize the working-tree changes, open a GitHub issue, cut a branch from the
    latest default branch, carry the changes over (resolving conflicts), commit,
    push, and open a PR that closes the issue. It does **not** merge that PR.
-2. **Deploy** — the tree is re-checked; only if `git status --porcelain` is empty
-   does the PR's branch get checked out and the normal deploy proceed.
+2. **Deploy** — the salvage is verified before anything is checked out: the tree
+   must be clean (`git status --porcelain` empty), `HEAD` must be contained in an
+   `origin/*` ref (so the commit really was pushed, not just made locally), and
+   the pull request must exist on GitHub (the URL printed by the session is looked
+   up, with PRs on the leftover branch as a fallback). Only then does the PR's
+   branch get checked out and the normal deploy proceed.
 
-If the salvage session fails, or the tree is still dirty afterwards, the deploy
-fails **without** checking anything out — local work is never discarded to make a
-deploy go through. Aborting mid-salvage stops there too, and never rolls on into
-the deploy. A clean tree skips phase 1 entirely, so nothing changes for a
-well-behaved repo.
+If the salvage session fails, or the tree is still dirty afterwards, or the work
+never reached GitHub, the deploy fails **without** checking anything out — local
+work is never discarded to make a deploy go through. Aborting mid-salvage stops
+there too, and never rolls on into the deploy. A clean tree skips phase 1
+entirely, so nothing changes for a well-behaved repo.
 
 This is deliberately not an auto-stash: a stash is invisible in the UI and gets
 forgotten. An issue plus a reviewable PR is the durable form of the same rescue.
@@ -687,7 +691,8 @@ the HTTP connection that started them:
   browser sees one continuous log and one final `done`. Used by the
   [deploy preflight](#deploy-preflight-dirty-working-trees) (salvage → deploy). Throwing
   from `nextPhase` surfaces the message on the stream and ends the job; a cancelled job
-  never advances to the next phase.
+  never advances to the next phase — including a cancel that lands while `nextPhase` is
+  still awaiting, when there is no live child to kill. Covered by `test/jobs.test.js`.
 
 ### SSE event types
 

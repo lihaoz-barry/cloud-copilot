@@ -61,6 +61,19 @@ finish, so anything still uncommitted is destroyed.
 13. **Print the issue URL and the PR URL, each on its own line**, as the final
     output — the caller matches those URLs in the transcript to confirm success.
 
+## How the caller verifies you
+
+A clean working tree is *not* enough: the caller also checks that
+
+- `HEAD` is contained in some `origin/*` ref — i.e. the salvaged commit was
+  actually pushed, not just committed locally, and
+- the pull request really exists on GitHub (the URL you printed is looked up;
+  failing that, PRs on the branch you left checked out are).
+
+If either check fails the deploy is aborted and nothing is checked out, so a
+half-finished salvage (commit made, `gh`/push failed) can never bury the work.
+Push and open the PR — do not stop at a local commit.
+
 ## Notes
 - Non-interactive runs need broad permissions; cloud-copilot invokes Copilot with
   `--allow-all` so file edits, `git`, and `gh` run without prompts.

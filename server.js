@@ -364,14 +364,19 @@ function isDirty(repoPath) {
 // on failure. Argument-array form (never a shell string) so branch names, which
 // come from GitHub, are never interpreted by a shell.
 function checkoutBranchCwd(repoPath, branch) {
-  execFileSync('git', ['fetch', 'origin', branch], { cwd: repoPath, stdio: 'ignore', timeout: 30000 });
+  // Via git() (which pipes stdout/stderr) rather than stdio:'ignore': on
+  // failure execFileSync only carries git's real message ("Your local changes
+  // to the following files would be overwritten by checkout: …") on
+  // `err.stderr`, and 'ignore' throws that away, leaving callers with a bare
+  // "Command failed: git checkout <branch>". See checkoutFailureMessage().
+  git(repoPath, ['fetch', 'origin', branch], 30000);
   const released = worktrees.releaseBranchWorktree(repoPath, branch, { fetch: false });
   if (released.status === 'kept') {
     // The worktree carries local work — deploy it where it lives rather than
     // deleting it or failing the job.
     return released.path;
   }
-  execFileSync('git', ['checkout', branch], { cwd: repoPath, stdio: 'ignore', timeout: 15000 });
+  git(repoPath, ['checkout', branch], 15000);
   return repoPath;
 }
 
@@ -1187,10 +1192,59 @@ function salvagePhaseSpec(repo, prNumber) {
   };
 }
 
+// Whether the salvaged commit actually exists on the remote. A clean tree only
+// proves the changes left the working tree — they could be sitting in a local
+// commit that never got pushed (gh/network failure mid-salvage), which the
+// deploy's checkout would then bury on an unreferenced branch. `HEAD` is
+// reachable from some origin/* ref exactly when the work is durable.
+function headIsPushed(repoPath) {
+  try {
+    const remotes = git(repoPath, ['branch', '-r', '--contains', 'HEAD'], 15000);
+    return remotes.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+// The PR the salvage session says it opened: its URL printed in the transcript
+// (step 13 of the skill), ignoring the deploy's own PR. Returns a number or null.
+function salvagePrNumberFromTranscript(conversation, ownerRepo, deployPrNumber) {
+  const escaped = String(ownerRepo).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`github\\.com/${escaped}/pull/(\\d+)`, 'gi');
+  for (const m of String(conversation || '').matchAll(re)) {
+    const num = Number(m[1]);
+    if (num && num !== deployPrNumber) return num;
+  }
+  return null;
+}
+
+// Confirms the salvage really produced a reviewable pull request on GitHub.
+// Trusting the transcript alone is not enough: an agent can print a URL it
+// never created, and `gh` failures leave a clean tree with nothing durable
+// behind. Returns the verified PR, or throws.
+async function verifySalvagePr(repo, job, deployPrNumber) {
+  const claimed = salvagePrNumberFromTranscript(job.conversation, repo.ownerRepo, deployPrNumber);
+  if (claimed) {
+    const pr = await gh.getPr(repo.ownerRepo, claimed);
+    if (pr && pr.number) return pr;
+  }
+  // No URL printed (or it doesn't resolve) — fall back to asking GitHub for a
+  // PR on the branch the salvage session left checked out.
+  const branch = gh.gitBranch(repo.path);
+  const onHead = branch ? await gh.listPrsForHead(repo.ownerRepo, branch) : [];
+  if (onHead.length) return onHead[0];
+  throw new Error(
+    `Salvage preflight finished with a clean tree but no pull request could be verified` +
+      (claimed ? ` (PR #${claimed} was reported but ${repo.ownerRepo} does not have it)` : '') +
+      `. Deploy aborted: the local changes may only exist as a local commit on ` +
+      `"${branch || 'the current branch'}". Check that branch before deploying again.`,
+  );
+}
+
 // Guards the transition from the salvage phase into the deploy phase. Throws
 // (which jobs.js surfaces on the stream and turns into a failed deploy) rather
 // than deploying from a tree whose local work was not safely captured.
-function assertSalvaged(exitCode, repo) {
+async function assertSalvaged(exitCode, repo, job, deployPrNumber) {
   if (exitCode !== 0) {
     throw new Error(
       `Salvage preflight exited ${exitCode} — the local changes were NOT committed. ` +
@@ -1203,6 +1257,15 @@ function assertSalvaged(exitCode, repo) {
         `Deploy aborted rather than checking out over uncommitted work.`,
     );
   }
+  if (!headIsPushed(repo.path)) {
+    throw new Error(
+      `Salvage preflight left commits that exist only locally on ` +
+        `"${gh.gitBranch(repo.path) || 'HEAD'}" — nothing was pushed to origin. ` +
+        `Deploy aborted: checking out another branch now would hide that work.`,
+    );
+  }
+  const pr = await verifySalvagePr(repo, job, deployPrNumber);
+  jobs.note(job, `\n[preflight] local changes salvaged into ${pr.url || `PR #${pr.number}`}\n`);
 }
 
 // Opening lines of a salvaged deploy's log, so the user sees WHY an extra
@@ -1267,8 +1330,13 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
     // git's own stderr on failure.
     const prepareDeployPhase = async () => {
       // Argument-array form — branch names come from GitHub and are never
-      // interpreted by a shell.
-      workCwd = checkoutBranchCwd(repo.path, pr.headRefName);
+      // interpreted by a shell. git's own stderr is preserved on failure; the
+      // rest of this function fails with its own (already specific) message.
+      try {
+        workCwd = checkoutBranchCwd(repo.path, pr.headRefName);
+      } catch (err) {
+        throw new Error(checkoutFailureMessage(pr.headRefName, err));
+      }
       buildNumber = Number(git(workCwd, ['rev-list', '--count', 'HEAD'], 15000));
       version = repoConfig.readMarketingVersion(workCwd); // null if not found — fastlane then uses its own default
 
@@ -1316,7 +1384,7 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
         firstPhase = await prepareDeployPhase();
         reachedDeploy = true;
       } catch (err) {
-        const message = checkoutFailureMessage(pr.headRefName, err);
+        const message = err.message;
         store.updateDeploy(repo.name, n, prNumber, (d) => {
           d.status = 'failed';
           d.finishedAt = new Date().toISOString();
@@ -1338,7 +1406,7 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
       },
       nextPhase: salvage
         ? async (j, code) => {
-            assertSalvaged(code, repo);
+            await assertSalvaged(code, repo, j, prNumber);
             jobs.note(j, `\n[preflight] working tree clean — checking out ${pr.headRefName} and deploying…\n`);
             const spec = await prepareDeployPhase();
             reachedDeploy = true;
@@ -1430,7 +1498,11 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
     // Throws with git's stderr on failure; sets the directory to deploy from.
     let workCwd;
     const checkout = () => {
-      workCwd = checkoutBranchCwd(repo.path, pr.headRefName);
+      try {
+        workCwd = checkoutBranchCwd(repo.path, pr.headRefName);
+      } catch (err) {
+        throw new Error(checkoutFailureMessage(pr.headRefName, err));
+      }
     };
 
     // The deploy command itself is trusted repo-local config (from
@@ -1450,7 +1522,7 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
         firstPhase = deployPhaseSpec();
         reachedDeploy = true;
       } catch (err) {
-        const message = checkoutFailureMessage(pr.headRefName, err);
+        const message = err.message;
         store.updateDeploy(repo.name, n, prNumber, (d) => {
           d.status = 'failed';
           d.finishedAt = new Date().toISOString();
@@ -1472,7 +1544,7 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
       },
       nextPhase: salvage
         ? async (j, code) => {
-            assertSalvaged(code, repo);
+            await assertSalvaged(code, repo, j, prNumber);
             jobs.note(j, `\n[preflight] working tree clean — checking out ${pr.headRefName} and deploying…\n`);
             checkout();
             reachedDeploy = true;

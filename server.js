@@ -37,6 +37,7 @@ const worktrees = require('./lib/worktrees');
 const worktreePool = require('./lib/worktreePool');
 const portPool = require('./lib/portPool');
 const supervisorClient = require('./lib/supervisorClient');
+const selfDeployLib = require('./lib/selfDeploy');
 
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 8787);
@@ -545,6 +546,15 @@ function checkoutBranchCwd(repoPath, branch) {
   }
   execFileSync('git', ['checkout', branch], { cwd: repoPath, stdio: 'ignore', timeout: 15000 });
   return repoPath;
+}
+
+// HEAD of a working tree, or null when it cannot be read.
+function safeGitHead(repoPath) {
+  try {
+    return git(repoPath, ['rev-parse', 'HEAD'], 10000);
+  } catch {
+    return null;
+  }
 }
 
 // origin's default branch (usually `main`), falling back to "main".
@@ -1660,7 +1670,7 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
   });
 }
 
-function runShellDeploy({ res, repo, n, prNumber, key, command }) {
+function runShellDeploy({ res, repo, n, prNumber, key, command, deploy }) {
   gh.getPr(repo.ownerRepo, prNumber).then((pr) => {
     if (!pr || !pr.headRefName) {
       const message = `Could not resolve the branch for PR #${prNumber} via gh.`;
@@ -1676,7 +1686,13 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
     if (closed) return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'blocked', message: closed });
 
     let workCwd;
+    let deployedSha = null;
     try {
+      // What is running *right now*, captured before the checkout swaps the
+      // files — the base of "what does this deploy actually change?".
+      deployedSha = selfDeployLib.isSelfDeploy(repo.path, deploy, __dirname)
+        ? BOOT_CODE.head || safeGitHead(repo.path)
+        : null;
       workCwd = checkoutBranchCwd(repo.path, pr.headRefName);
     } catch (err) {
       const message = `Failed to check out branch "${pr.headRefName}": ${err.message}`;
@@ -1688,14 +1704,49 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
       return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
     }
 
+    // Self-deploy only: this repo is two processes (dashboard :8787 and
+    // cloud-scheduler :8788) and `command` restarts only the first. Decide here
+    // — in the server, from the diff — whether the scheduler has to be replaced
+    // too, and hand that decision to scripts/self-deploy.js as data.
+    const headSha = safeGitHead(workCwd);
+    const diff = selfDeployLib.isSelfDeploy(repo.path, deploy, __dirname)
+      ? selfDeployLib.changedFiles(workCwd, deployedSha, headSha)
+      : { files: [], error: null };
+    const plan = selfDeployLib.planShellDeploy({
+      repoPath: repo.path,
+      appRoot: __dirname,
+      deploy,
+      files: diff.files,
+      diffError: diff.error,
+    });
+
+    const runnerPath = path.join(workCwd, 'scripts', 'self-deploy.js');
+    const twoPhase = plan.selfDeploy && fs.existsSync(runnerPath);
+    const bin = twoPhase ? process.execPath : 'bash';
+    const args = twoPhase ? [runnerPath] : ['-lc', command];
+    const env = twoPhase
+      ? {
+          CC_SELF_DEPLOY_PLAN: JSON.stringify({
+            dashboardCommand: command,
+            schedulerCommand: plan.schedulerCommand,
+            restartScheduler: plan.restartScheduler,
+            matched: plan.matched,
+            decisionLine: plan.decisionLine,
+            base: deployedSha,
+            head: headSha,
+          }),
+        }
+      : undefined;
+
     // The deploy command itself is trusted repo-local config (from
     // `.cloud-copilot.json`, authored by whoever owns the repo under
     // REPOS_ROOT) — not attacker-controlled input, so a shell string is fine
     // here (same trust boundary as REPOS_ROOT itself).
     const job = jobs.startJob(key, {
-      bin: 'bash',
-      args: ['-lc', command],
+      bin,
+      args,
       cwd: workCwd,
+      env,
       meta: {
         action: 'deploy',
         prNumber,
@@ -1761,7 +1812,15 @@ app.post('/api/repos/:name/issues/:n/deploy/:pr', async (req, res) => {
   store.startNewDeploy(repo.name, n, prNumber);
 
   if (deployConfig.type === 'shell') {
-    runShellDeploy({ res, repo, n, prNumber, key, command: deployConfig.command });
+    runShellDeploy({
+      res,
+      repo,
+      n,
+      prNumber,
+      key,
+      command: deployConfig.command,
+      deploy: deployConfig.deploy,
+    });
   } else {
     runIosTestflightDeploy({ res, repo, n, prNumber, key });
   }

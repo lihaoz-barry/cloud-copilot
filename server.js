@@ -24,6 +24,7 @@ const express = require('express');
 
 const store = require('./lib/store');
 const gh = require('./lib/gh');
+const prSync = require('./lib/prSync');
 const repoConfig = require('./lib/repoConfig');
 const { runCopilotSSE, writeSseHead } = require('./lib/runner');
 const jobs = require('./lib/jobs');
@@ -547,6 +548,15 @@ app.get('/api/testflight/builds', (req, res) => {
  * discovered PRs into the store. Shared by the issues endpoint and the hourly
  * background refresher so both keep the store in exactly the same shape.
  */
+// GitHub's `mergeable` is computed lazily, so a PR it hasn't finished thinking
+// about comes back as "unknown". The local three-minute sweep usually knows the
+// real answer already, so an unknown from GitHub is discarded (undefined =
+// "leave the stored value alone") instead of blanking a good badge.
+function usableGhSync(sync) {
+  if (!sync) return undefined;
+  return sync.state === 'unknown' ? undefined : { ...sync, source: 'github' };
+}
+
 async function syncRepoFromGitHub(repo, { force = false } = {}) {
   const { issues, cached, at } = await gh.listIssues(repo.ownerRepo, { force });
   const dismissed = store.getDismissedNumbers(repo.name);
@@ -559,9 +569,11 @@ async function syncRepoFromGitHub(repo, { force = false } = {}) {
   // Best-effort branch + tip-commit annotations; an empty map just means the
   // rows render without them.
   const headCommits = await gh.listPrHeadCommits(repo.ownerRepo, { force });
-  // How far each open PR has drifted from its base branch (issue #58) —
-  // collected for the whole repo in the same pass. A failure here yields an
-  // empty map, which renders as "unknown" and never breaks this endpoint.
+  // How far each open PR has drifted from its base branch (issue #58). The
+  // three-minute local sweep is the primary source; this GitHub read only
+  // covers what git on this disk cannot answer — chiefly PRs from forks. An
+  // UNKNOWN from GitHub is therefore dropped rather than allowed to overwrite
+  // a definite local answer with a "?".
   const syncByPr = await gh.listPrSync(repo.ownerRepo, { force });
   // Whole-repo PR state, so a PR cloud-copilot created itself (which the
   // per-issue body match may not find) still learns it was closed.
@@ -580,10 +592,11 @@ async function syncRepoFromGitHub(repo, { force = false } = {}) {
         source: 'gh',
         state: p.state,
         headRefName: p.headRefName || (head && head.headRefName) || null,
+        baseRefName: p.baseRefName || null,
         headCommit: head
           ? { sha: head.sha, abbrev: head.abbrev, committedDate: head.committedDate, headline: head.headline, url: head.url }
           : undefined,
-        sync: syncByPr[String(p.number)] || undefined,
+        sync: usableGhSync(syncByPr[String(p.number)]),
       });
     }
     // Drop previously auto-discovered PRs that no longer match (e.g. the
@@ -667,6 +680,21 @@ app.get('/api/repos/:name/statuses', (req, res) => {
   });
 });
 
+// Just the base-branch sync badges of one repo (issue #58). The client polls
+// this every three minutes to repaint badges in place — it reads state.json
+// only, so it costs nothing and never talks to GitHub or git itself. `at`
+// tells the client when the sweep that produced this data ran.
+app.get('/api/repos/:name/prsync', (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found under REPOS_ROOT' });
+  res.json({
+    repo: repo.name,
+    sync: store.getRepoSync(repo.name),
+    intervalMs: PR_SYNC_INTERVAL_MS,
+    nextSweepAt: nextPrSyncAt(),
+  });
+});
+
 // Full stored record for one issue (conversation, PR link, etc.).
 app.get('/api/repos/:name/issues/:n/record', (req, res) => {
   const repo = resolveRepo(req.params.name);
@@ -723,10 +751,11 @@ app.get('/api/repos/:name/issues/:n/prs', async (req, res) => {
         source: 'gh',
         state: p.state,
         headRefName: p.headRefName || (head && head.headRefName) || null,
+        baseRefName: p.baseRefName || null,
         headCommit: head
           ? { sha: head.sha, abbrev: head.abbrev, committedDate: head.committedDate, headline: head.headline, url: head.url }
           : undefined,
-        sync: syncByPr[String(p.number)] || undefined,
+        sync: usableGhSync(syncByPr[String(p.number)]),
       });
     }
     // An explicit "check again now" is also the user's manual way to sweep
@@ -1066,10 +1095,12 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
       // means Deploy never has to fight for the checkout. Anything holding
       // uncommitted or unpushed work is left alone.
       let headBranch = null;
+      let baseBranch = null;
       if (prNumber) {
         try {
           const prInfo = await gh.getPr(repo.ownerRepo, prNumber);
           headBranch = (prInfo && prInfo.headRefName) || null;
+          baseBranch = (prInfo && prInfo.baseRefName) || null;
         } catch {
           /* branch stays null — the sweep below still covers it */
         }
@@ -1097,7 +1128,12 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
           source: 'work',
           state: 'OPEN',
           headRefName: headBranch || undefined,
+          baseRefName: baseBranch || undefined,
         });
+        // Compare it against its base right away: waiting for the next
+        // three-minute sweep would leave the brand-new row showing "?" — the
+        // exact moment the badge is least believable.
+        sweepRepoSyncSoon(repo);
       }
 
       return {
@@ -1588,6 +1624,10 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
             m.conversation = `${m.conversation}\n${cleanupText}\n`;
           });
         }
+        // A merge moves the base branch, so every other open PR just fell
+        // behind by at least one commit. Recompare them now instead of letting
+        // the whole board lie for up to three minutes.
+        sweepRepoSyncSoon(repo);
       }
       return {
         action: 'merge',
@@ -1782,30 +1822,19 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/update', async (req, res) => {
             ? `Could not verify ${headRefName} against origin/${baseRefName}.`
             : `${headRefName} is still ${behind} commit(s) behind origin/${baseRefName}.`;
 
-      // Re-collect the repo's sync status so the badge tells the truth again,
-      // whichever way the run went. Best-effort — a failure here leaves the
-      // previous (stale) value rather than a wrong one.
+      // Recompare the branch locally so the badge tells the truth immediately.
+      // git is authoritative here and answers now; GitHub recomputes
+      // `mergeable` asynchronously and would leave the badge stale for
+      // minutes after a run that just fixed everything.
       let sync = null;
       try {
-        const fresh = await gh.listPrSync(repo.ownerRepo, { force: true });
-        sync = fresh[String(prNumber)] || null;
+        sync = await prSync.computePrSync(repo.path, {
+          prNumber,
+          baseRefName,
+          headRefName,
+          crossRepository: false,
+        });
         if (sync) store.setPrSync(repo.name, n, prNumber, sync);
-        else if (behind != null) {
-          // The PR left the OPEN set (merged/closed while we ran) — fall back
-          // to what git just proved rather than keeping a stale badge.
-          sync = {
-            state: behind > 0 ? 'behind' : 'unknown',
-            behindBy: behind,
-            aheadBy: null,
-            mergeable: 'UNKNOWN',
-            mergeStateStatus: null,
-            baseRefName,
-            headRefName,
-            crossRepository: false,
-            at: Date.now(),
-          };
-          store.setPrSync(repo.name, n, prNumber, sync);
-        }
       } catch {
         /* keep the previous value */
       }
@@ -2266,6 +2295,84 @@ function scheduleBackgroundSync(delayMs) {
   }, delayMs).unref();
 }
 
+// ---------------------------------------------------------------------------
+// Three-minute base-branch sync sweep (issue #58)
+//
+// Deliberately separate from the hourly GitHub sync above. Asking GitHub every
+// three minutes would burn the API budget, and its `mergeable` field is
+// computed lazily — it answers UNKNOWN precisely when a PR is new. The clone is
+// already on disk, so each sweep is one `git fetch` per repo plus two read-only
+// plumbing calls per PR (see lib/prSync.js), which never touch the working
+// tree and are therefore safe to run while a Copilot job holds it.
+// ---------------------------------------------------------------------------
+
+const PR_SYNC_INTERVAL_MS = Number(process.env.PR_SYNC_INTERVAL_MS || 3 * 60 * 1000);
+const PR_SYNC_FIRST_DELAY_MS = Number(process.env.PR_SYNC_FIRST_DELAY_MS || 10 * 1000);
+
+let nextPrSyncSweep = Date.now() + PR_SYNC_FIRST_DELAY_MS;
+// Single-flight: a slow fetch must never let two sweeps of the same repo
+// overlap, and an on-demand sweep must not race the scheduled one.
+const prSyncInFlight = new Set();
+
+function nextPrSyncAt() {
+  return nextPrSyncSweep;
+}
+
+/**
+ * Recompare every open PR of one repo against its base branch and persist the
+ * result. Best-effort throughout: a PR git cannot answer for keeps its previous
+ * value rather than being downgraded to "unknown".
+ */
+async function sweepRepoSync(repo) {
+  if (!repo || !repo.path || prSyncInFlight.has(repo.name)) return 0;
+  prSyncInFlight.add(repo.name);
+  try {
+    const prs = store.listPrsForSync(repo.name);
+    if (!prs.length) return 0;
+    // PRs tracked before the base branch was recorded target the repo's
+    // default branch — the alternative is leaving them at "?" forever.
+    let fallbackBase = null;
+    const resolved = prs.map((pr) => {
+      if (pr.baseRefName) return pr;
+      if (fallbackBase === null) fallbackBase = defaultBranchOf(repo.path) || '';
+      return fallbackBase ? { ...pr, baseRefName: fallbackBase } : pr;
+    });
+    const { synced } = await prSync.computeRepoSync(repo.path, resolved);
+    if (!Object.keys(synced).length) return 0;
+    return store.setRepoSync(repo.name, synced);
+  } catch (err) {
+    console.warn(`[pr-sync] ${repo.name}: ${err.message}`);
+    return 0;
+  } finally {
+    prSyncInFlight.delete(repo.name);
+  }
+}
+
+/** Fire-and-forget sweep, for callers that just changed a branch. */
+function sweepRepoSyncSoon(repo) {
+  sweepRepoSync(repo).catch(() => {});
+}
+
+async function runPrSyncSweep() {
+  let repos;
+  try {
+    repos = gh.listRepos(REPOS_ROOT).filter((r) => r.github);
+  } catch {
+    return;
+  }
+  let changed = 0;
+  for (const repo of repos) changed += await sweepRepoSync(repo);
+  if (changed) console.log(`[pr-sync] ${changed} PR(s) changed sync state`);
+}
+
+function schedulePrSyncSweep(delayMs) {
+  nextPrSyncSweep = Date.now() + delayMs;
+  setTimeout(async () => {
+    await runPrSyncSweep();
+    schedulePrSyncSweep(PR_SYNC_INTERVAL_MS);
+  }, delayMs).unref();
+}
+
 app.listen(PORT, HOST, () => {
   console.log(`cloud-copilot running at http://${HOST}:${PORT}`);
   console.log(`Authorized repos root: ${REPOS_ROOT}`);
@@ -2277,6 +2384,7 @@ app.listen(PORT, HOST, () => {
       : 'GitHub cache: starting cold',
   );
   scheduleBackgroundSync(BG_SYNC_FIRST_DELAY_MS);
+  schedulePrSyncSweep(PR_SYNC_FIRST_DELAY_MS);
   // Recover any admin turn that was still in-flight when the previous
   // process died (e.g. a chat turn triggered its own restart mid-reply) so
   // it shows up as an "interrupted" turn instead of silently vanishing.

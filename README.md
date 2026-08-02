@@ -73,7 +73,7 @@ status:
 | Create PR  | `Create PR` 🔵    | `Creating PR…` 🟡  | issue turns 🟢  | `PR failed` 🔴 / `PR aborted`    |
 | Deploy     | `Deploy` 🔵       | `Deploying…` 🟡    | `Deployed` 🟢   | `Deploy failed` 🔴 / `Aborted`   |
 | Merge      | `🔒 Merge` 🔵 (dim until Deploy succeeds) | `Merging…` 🟡 | `Merged` 🟢 | `Merge failed` 🔴 / `Aborted` |
-| Update from base | `⇣N` / `⚠` / `✓` / `?` badge | `⟳` 🔵 | badge returns to `✓` | badge stays `⇣N`/`⚠`, log kept |
+| Update from base | `⇣N` / `⚠` / `✓` / `○` badge | `⟳` 🔵 | badge returns to `✓` | badge stays `⇣N`/`⚠`, log kept |
 
 Each PR renders as **one workflow line** across all three stages — a **Create PR |
 Deploy | Merge** pipeline, matching the state machine above: blue = planned,
@@ -227,6 +227,10 @@ The freshness pill next to the issue count shows both halves and a countdown:
 Green inside the TTL, amber under an hour, grey beyond that; hovering gives
 absolute timestamps. Tune with `GH_CACHE_TTL_MS`, `GH_SYNC_INTERVAL_MS`, and
 `GH_SYNC_FIRST_DELAY_MS`.
+
+The per-PR base-branch comparison is deliberately *not* part of this: it runs
+on its own 3-minute rhythm against local git and never touches the GitHub API
+(see [Base-branch sync badge](#base-branch-sync-badge--update-a-pr-with-copilot)).
 
 ### Auto-run depth
 
@@ -409,28 +413,50 @@ Deploy is dispatched per-repo. Drop a `.cloud-copilot.json` at a repo's root:
 
 ### Base-branch sync badge (⇣N / ⚠) — update a PR with Copilot
 
-Every open PR's workflow line starts with a small badge, left of the PR number,
-saying how that branch relates to its base branch (usually `main`):
+Every open PR's workflow line starts with a small round badge, left of the PR
+number, saying how that branch relates to its base branch (usually `main`) —
+in the same visual family as the pipeline chevrons:
 
 | Badge | Meaning |
 | ----- | ------- |
-| `⇣N`  | The branch is **N commits behind** its base. |
-| `⚠`   | GitHub reports `mergeable: CONFLICTING` — merging would conflict. |
-| `✓`   | In sync: mergeable, 0 behind. Deliberately low-key. |
-| `?`   | GitHub hasn't reported yet (still computing, or a fork PR whose head this repo can't compare). Never rendered as clean. |
-| `⟳`   | An update session is running right now. |
+| `✓` green | In sync: 0 behind, merges cleanly. |
+| `⇣` amber, with the count on the ring | The branch is **N commits behind** its base. |
+| `⚠` red | Merging the base in would **conflict** (the behind count still rides on the ring). |
+| `○` grey | Not compared yet — a fork PR whose head this clone doesn't have, or a repo the sweep hasn't reached. Never rendered as clean. |
+| `⟳` blue | An update session is running right now. |
+| `!` red | The last update run failed or was aborted; click to see the log or retry. |
 
-Hovering the badge shows base → head, ahead/behind, the raw `mergeable` value
-and when the data was collected.
+Hovering shows base → head, exact ahead/behind, how long ago the comparison
+ran and whether it came from git or GitHub. The same legend lives in
+**⚙ Settings → Sync badge**.
 
-The status is collected **per repo, never per PR**: two `gh api graphql` calls
-(open-PR metadata, then one aliased `ref(...).compare(...)` field per PR) that
-ride along with the same L2 cache as issues and PRs, are refreshed by `?refresh=1`
-and by the hourly background sync, and are persisted into each PR's `sync` field
-in `data/state.json`. If the collection fails, the affected PRs fall back to `?`
-— the issue list itself never fails and no PR row disappears.
+#### How the comparison is made
 
-**Clicking `⇣N` or `⚠` starts a Copilot session that updates the PR**, in the
+Every **3 minutes** the server recompares every tracked open PR of every repo,
+using the clone already on disk — not the GitHub API:
+
+```
+git fetch --no-tags --prune origin          # once per repo per sweep
+git rev-list --left-right --count origin/<base>...origin/<head>   # behind / ahead
+git merge-tree --write-tree origin/<base> origin/<head>           # would it conflict?
+```
+
+Both plumbing commands are read-only with respect to the working tree and the
+index (`merge-tree` writes only loose objects), so a sweep is safe while a
+Copilot job holds the checkout. The interval is `PR_SYNC_INTERVAL_MS`
+(default 180000). Results are written to each PR's `sync` field in
+`data/state.json`; the browser polls `GET /api/repos/:name/prsync` on the same
+3-minute rhythm and repaints the badges **in place**, so a running log panel is
+never torn down. A sweep also runs immediately after a PR is created and after
+a merge (which moves the base branch and puts every other PR behind).
+
+Asking GitHub instead was rejected on purpose: `mergeable` is computed lazily,
+so it answers `UNKNOWN` exactly when a PR is new — the moment the badge matters
+most. GitHub's answer is still collected on the hourly sync, but only for what
+git here cannot see (fork PRs), and an `UNKNOWN` from GitHub is discarded rather
+than allowed to blank out a definite local result.
+
+**Clicking the badge starts a Copilot session that updates the PR**, in the
 direction `base → PR head` only:
 
 - It runs in the PR branch's own working tree (an existing linked worktree is
@@ -442,7 +468,8 @@ direction `base → PR head` only:
 - Success is decided by git, not by the transcript: the pushed head must
   contain the pushed base (`0` commits behind). Otherwise the run is `failed`,
   the log stays available behind `⋯ → ▤`, and the badge keeps telling the truth.
-- Afterwards the sync status is re-collected and the badge updates itself. A
+- Afterwards the branch is recompared locally (git answers now; GitHub would
+  take minutes to recompute `mergeable`) and the badge updates itself. A
   successful update archives the PR's previous Deploy and re-locks Merge (the
   old build no longer reflects the branch), exactly like an applied chat turn.
 - Progress, abort (`⨯`) and the full log live on the row's `⋯` tools line, and
@@ -536,7 +563,8 @@ behaviour:
 | POST | `/api/repos/:name/issues/:n/deploy/:pr/cancel` | Abort the running deploy for that PR. |
 | POST | `/api/repos/:name/issues/:n/merge/:pr` | **Merge a specific PR** — SSE stream. Body: `{ "force": false }`. Blocked unless Deploy succeeded, unless `force: true`. A failed `gh pr merge` automatically starts Copilot to investigate, resolve conflicts, retry, and verify the merge. On success the issue and the issue's other open PRs are closed automatically (`MERGE_AUTO_CLEANUP=0` disables it). |
 | POST | `/api/repos/:name/issues/:n/merge/:pr/cancel` | Abort the running merge for that PR. |
-| POST | `/api/repos/:name/issues/:n/prs/:pr/update` | **Update a PR from its base branch** — SSE stream. Starts a Copilot session in the PR's working tree that merges `base` → PR head, resolves any conflicts, and pushes. Never merges the PR into the base. Takes the repo working-tree lock; success is verified with `git rev-list --count origin/<head>..origin/<base>` (must be 0), then the sync status is re-collected and returned as `sync`. |
+| GET | `/api/repos/:name/prsync` | Base-branch sync state of every tracked PR of a repo (`{ [prNumber]: sync }`), plus the sweep interval and the next sweep time. Reads `data/state.json` only — the badge poller's endpoint. |
+| POST | `/api/repos/:name/issues/:n/prs/:pr/update` | **Update a PR from its base branch** — SSE stream. Starts a Copilot session in the PR's working tree that merges `base` → PR head, resolves any conflicts, and pushes. Never merges the PR into the base. Takes the repo working-tree lock; success is verified with `git rev-list --count origin/<head>..origin/<base>` (must be 0), then the branch is recompared with local git and returned as `sync`. |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/update/cancel` | Abort the running branch update for that PR. |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat` | **Chat with a PR** — SSE stream. Body: `{ "message": "...", "mode": "plan"\|"apply", "model": "..." }`. `plan` is read-only (default approval flags); `apply` implements + pushes to the existing branch and resets Deploy/Merge on success. The optional `model` overrides the global setting for that turn only (unknown values fall back to it). |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat/cancel` | Abort the running chat turn for that PR. |

@@ -132,25 +132,45 @@
     a.wfnum { font-weight: 700; color: inherit; }
     a.wfnum:hover { text-decoration: underline; }
     .wfnum.empty { opacity: .4; }
-    /* Base-branch sync badge (issue #58), pinned at the very left of the lead:
-       ⇣N = behind by N commits, ⚠ = GitHub says the merge would conflict,
-       a faint ✓ = in sync, ? = GitHub hasn't told us (never faked as clean).
-       Fixed width so the chevron bar still starts at the same x on every row. */
+    /* Base-branch sync indicator (issue #58), pinned at the very left of the
+       lead: a circular status dot in the same visual family as the pipeline
+       chevrons. ✓ = in sync, ⇣N = behind by N commits, ⚠ = would conflict,
+       ○ = not compared yet (never faked as clean), ⟳ = a Copilot update is
+       running. Fixed width so the chevron bar starts at the same x on every
+       row, badge or no badge. */
     .wfsync {
-      flex: none; width: 26px; min-height: 22px; padding: 1px 2px; border-radius: 7px;
+      flex: none; width: 26px; height: 26px; padding: 0; border-radius: 50%;
       display: inline-flex; align-items: center; justify-content: center;
-      font-size: .68rem; font-weight: 700; font-variant-numeric: tabular-nums;
-      border: 1px solid transparent; background: transparent; color: inherit;
+      position: relative;
+      font-size: .78rem; font-weight: 700; font-variant-numeric: tabular-nums;
+      border: 1.5px solid #d0d0d0; background: transparent; color: #999;
       font-family: inherit; line-height: 1; touch-action: manipulation;
+      transition: filter .12s ease, box-shadow .12s ease;
     }
     button.wfsync { cursor: pointer; }
-    button.wfsync:hover { filter: brightness(1.08); }
-    .wfsync-clean { color: #16a34a; opacity: .45; }
-    .wfsync-unknown { color: #888; opacity: .55; }
-    .wfsync-behind { background: #eab30833; border-color: #eab30855; color: #a16207; }
-    .wfsync-conflict { background: #dc262622; border-color: #dc262655; color: #b91c1c; }
-    .wfsync-updating { background: #2563eb22; border-color: #2563eb55; color: #1d4ed8; animation: pulse 1s infinite; }
-    .wfsync-failed { background: #dc262622; border-color: #dc262655; color: #b91c1c; }
+    button.wfsync:hover { filter: brightness(1.06); box-shadow: 0 0 0 3px #8884; }
+    button.wfsync:disabled { cursor: default; }
+    /* Behind-by-N: the count rides on the ring as a superscript so the glyph
+       inside stays legible at 26px even at N = 3 digits. */
+    .wfsync[data-behind]::after {
+      content: attr(data-behind);
+      position: absolute; top: -4px; right: -6px;
+      min-width: 13px; padding: 0 3px; border-radius: 7px;
+      font-size: .58rem; line-height: 13px; font-weight: 700;
+      background: #eab308; color: #3b2f00; border: 1px solid #fff8;
+    }
+    /* Legend in the Settings drawer reuses the badge classes verbatim, so it
+       can never drift from what the rows actually render. */
+    .synclegend { display: flex; flex-direction: column; gap: 6px; }
+    .synclegend > span { display: flex; align-items: center; gap: 8px; }
+    .synclegend .wfsync { position: relative; }
+    .synclegend em { opacity: .8; line-height: 1.4; }
+    .wfsync-clean { color: #16a34a; border-color: #16a34a99; background: #16a34a14; }
+    .wfsync-unknown { color: #9aa0a6; border-color: #9aa0a666; background: transparent; }
+    .wfsync-behind { color: #a16207; border-color: #eab308; background: #eab30822; }
+    .wfsync-conflict { color: #dc2626; border-color: #dc2626; background: #dc262622; }
+    .wfsync-updating { color: #2563eb; border-color: #2563eb; background: #2563eb1f; animation: pulse 1s infinite; }
+    .wfsync-failed { color: #dc2626; border-color: #dc2626; background: #dc262622; }
     /* Its log/abort controls sit at the left end of the tools line, under the
        badge itself — `flex: none` so the three stage columns keep their widths. */
     .chevtool-update { flex: none; gap: 4px; margin-right: 6px; }
@@ -901,6 +921,15 @@
               </div>
               <div id="restartNote" class="settings-note" hidden></div>
             </div>
+            <h4>Sync badge</h4>
+            <div class="settings-note synclegend">
+              <span><span class="wfsync wfsync-clean">✓</span> in sync with base</span>
+              <span><span class="wfsync wfsync-behind" data-behind="3">⇣</span> behind by N commits</span>
+              <span><span class="wfsync wfsync-conflict">⚠</span> would conflict</span>
+              <span><span class="wfsync wfsync-unknown">○</span> not compared yet</span>
+              <span><span class="wfsync wfsync-updating">⟳</span> Copilot is updating it</span>
+              <em>Compared against the base branch with local git every 3 minutes. Clicking a badge starts a Copilot session that merges the base branch <strong>into</strong> the PR &mdash; it never merges the PR.</em>
+            </div>
             <h4>Show repositories</h4>
             <div id="filterList"></div>
             <div class="filter-actions">
@@ -1076,8 +1105,8 @@ function syncBadgeView(sync, update) {
   const us = (update && update.status) || 'idle';
   if (us === 'updating') {
     return {
-      text: '⟳', cls: 'wfsync-updating', clickable: true,
-      title: 'Copilot is merging the base branch into this PR — click to show the log',
+      text: '\u27f3', cls: 'wfsync-updating', clickable: true, behind: null,
+      title: 'Copilot is merging the base branch into this PR \u2014 click to show the log',
     };
   }
   const s = (sync && sync.state) || 'unknown';
@@ -1085,35 +1114,45 @@ function syncBadgeView(sync, update) {
   const ahead = sync && typeof sync.aheadBy === 'number' ? sync.aheadBy : null;
   const base = (sync && sync.baseRefName) || 'base';
   const head = (sync && sync.headRefName) || 'this branch';
+  // Where the answer came from matters: git compared the real commits on this
+  // disk, GitHub only reported what it had already computed.
+  const via = sync && sync.source === 'github' ? 'via GitHub' : sync ? 'via git' : null;
+  // fmtAgo takes an elapsed duration, not a timestamp.
+  const ago = sync && sync.at ? fmtAgo(Date.now() - sync.at) : null;
   const lines = [
-    `${base} → ${head}`,
+    `${base} \u2192 ${head}`,
     behind != null ? `${behind} behind` + (ahead != null ? `, ${ahead} ahead` : '') : 'ahead/behind unknown',
-    `mergeable: ${(sync && sync.mergeable) || 'UNKNOWN'}`,
-    sync && sync.at ? `checked ${new Date(sync.at).toLocaleString()}` : 'never checked',
+    ago
+      ? `compared ${ago === 'just now' ? 'just now' : `${ago} ago`}${via ? ` \u00b7 ${via}` : ''}`
+      : 'not compared yet \u2014 the next sweep runs within 3 minutes',
   ];
   if (us === 'failed' || us === 'aborted') lines.push(`last update ${us}${update.message ? `: ${update.message}` : ''}`);
   const failedRun = us === 'failed' || us === 'aborted';
   if (s === 'conflict') {
     return {
-      text: '⚠', cls: 'wfsync-conflict', clickable: true,
-      title: `Conflicts with ${base} — click to let Copilot resolve them on this branch\n${lines.join('\n')}`,
+      text: '\u26a0', cls: 'wfsync-conflict', clickable: true, behind: behind || null,
+      title: `Conflicts with ${base} \u2014 click to let Copilot merge ${base} in and resolve them on this branch\n${lines.join('\n')}`,
     };
   }
   if (s === 'behind') {
     return {
-      text: `⇣${behind}`, cls: 'wfsync-behind', clickable: true,
-      title: `${behind} commit(s) behind ${base} — click to merge ${base} into this branch\n${lines.join('\n')}`,
+      text: '\u21e3', cls: 'wfsync-behind', clickable: true, behind,
+      title: `${behind} commit(s) behind ${base} \u2014 click to merge ${base} into this branch\n${lines.join('\n')}`,
     };
   }
   if (s === 'clean') {
     return {
-      text: failedRun ? '!' : '✓', cls: failedRun ? 'wfsync-failed' : 'wfsync-clean', clickable: failedRun,
+      text: failedRun ? '!' : '\u2713',
+      cls: failedRun ? 'wfsync-failed' : 'wfsync-clean',
+      clickable: failedRun, behind: null,
       title: `In sync with ${base}\n${lines.join('\n')}`,
     };
   }
   return {
-    text: '?', cls: failedRun ? 'wfsync-failed' : 'wfsync-unknown', clickable: true,
-    title: `Sync status unknown — GitHub hasn't reported it yet. Click to merge ${base} into this branch anyway.\n${lines.join('\n')}`,
+    text: failedRun ? '!' : '\u25cb',
+    cls: failedRun ? 'wfsync-failed' : 'wfsync-unknown',
+    clickable: true, behind: null,
+    title: `Not compared yet \u2014 click to merge ${base} into this branch anyway.\n${lines.join('\n')}`,
   };
 }
 
@@ -1908,6 +1947,35 @@ setInterval(() => {
   }
 }, 60000);
 
+// ---- base-branch sync badges (issue #58) ----------------------------------
+// The server recompares every open PR against its base branch every three
+// minutes using local git. This poller only READS that result and repaints the
+// badges in place — no re-render, so it is safe while a log panel is streaming,
+// and it costs one state.json read on the server (never `gh`, never git).
+const PR_SYNC_POLL_MS = 3 * 60 * 1000;
+
+async function pollSyncBadges() {
+  if (document.hidden) return;
+  for (const [name, m] of mountedRepos) {
+    if (!m.body.isConnected || !m.body.closest('.repo.open')) continue;
+    let data;
+    try {
+      data = await fetch(`/api/repos/${enc(name)}/prsync`).then((x) => x.json());
+    } catch { continue; }
+    if (!data || data.error || !data.sync || !m.body.isConnected) continue;
+    m.body.querySelectorAll('.issue').forEach((el) => {
+      if (typeof el.applySyncMap === 'function') el.applySyncMap(data.sync);
+    });
+  }
+}
+
+setInterval(pollSyncBadges, PR_SYNC_POLL_MS);
+// A tab that was hidden for an hour is showing hour-old badges the moment it
+// comes back, so catch up immediately instead of waiting out the interval.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) pollSyncBadges();
+});
+
 // Shared per-repo lock context: only one working-tree action (Create PR,
 // Deploy, or Chat) may be active per repo at a time; every other issue/PR in
 // that repo gets greyed out (`setBlocked`) while one is running. Used by the
@@ -2539,6 +2607,7 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
       el.textContent = '✓';
       el.title = '';
       el.disabled = true;
+      el.removeAttribute('data-behind');
       el.style.visibility = 'hidden';
       return;
     }
@@ -2548,6 +2617,10 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
     el.textContent = view.text;
     el.title = view.title;
     el.disabled = !view.clickable;
+    // The commit count rides on the ring as a superscript (CSS ::after), so a
+    // three-digit drift can't squeeze the glyph out of a 26px circle.
+    if (view.behind) el.dataset.behind = view.behind > 99 ? '99+' : String(view.behind);
+    else el.removeAttribute('data-behind');
   }
 
   function paintUpdate(prNumber) {
@@ -3217,6 +3290,26 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   }
 
   function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+  // Hook the three-minute sync poller calls to refresh the badges of this
+  // issue's rows WITHOUT re-rendering anything: a re-render would tear down a
+  // log panel a live SSE stream is writing into, which is exactly why
+  // patchStatuses gives up whenever one is open. Writing back into `st.prs`
+  // keeps the click handlers and the next real render in agreement.
+  el.applySyncMap = (syncByPr) => {
+    let touched = false;
+    for (const pr of st.prs) {
+      const next = syncByPr[String(pr.prNumber)];
+      if (!next) continue;
+      const prev = pr.sync;
+      if (prev && prev.at === next.at && prev.state === next.state) continue;
+      pr.sync = next;
+      paintSyncBadge(syncBadgeEl(pr.prNumber), pr);
+      touched = true;
+    }
+    return touched;
+  };
+
   return el;
 }
 

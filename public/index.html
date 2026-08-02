@@ -2827,7 +2827,6 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   // titles of neighbouring rows stay on the same x.
   function paintSpark(node, view) {
     if (!node) return;
-    node.textContent = CCSpark.ICON;
     if (!view) {
       node.hidden = true;
       node.removeAttribute('title');
@@ -3279,8 +3278,10 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         // it keeps the previous value rather than blanking the badge.
         sync: p.sync || (ex && ex.sync) || null,
         // Same rule for the completed-review marker behind the ✨ badge: a
-        // refresh that didn't carry it must not blank a badge we already earned.
-        review: p.review || (ex && ex.review) || null,
+        // refresh that didn't carry it must not blank a badge we already
+        // earned. Narrowed to the marker itself — /prs answers with the raw
+        // record, whose `review` also drags the whole review transcript along.
+        review: p.review ? { lastReviewedSha: p.review.lastReviewedSha || null } : (ex && ex.review) || null,
         deploy: ex ? ex.deploy : (p.deploy || { status: 'idle' }),
         merge: ex ? ex.merge : (p.merge || { status: 'idle' }),
         update: (ex && ex.update) || p.update || { status: 'idle' },
@@ -3815,6 +3816,11 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
         prNumber: p.prNumber, prUrl: p.prUrl, title: p.title, createdAt: p.createdAt,
         state: p.state || null,
         sync: p.sync || null,
+        // Only the completed-review marker, exactly as /statuses ships it: the
+        // raw record's `review` also carries the whole transcript, and without
+        // this field a Create PR run finishing would blank an already-earned
+        // ✨ on this issue's other (merged) PR rows.
+        review: { lastReviewedSha: (p.review && p.review.lastReviewedSha) || null },
         deploy: { ...p.deploy }, merge: { ...p.merge }, update: { ...(p.update || { status: 'idle' }) },
       }));
     st.prs = arr;

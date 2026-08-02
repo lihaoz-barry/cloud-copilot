@@ -132,3 +132,19 @@ test('getStatuses reports a never-reviewed PR as review.lastReviewedSha = null',
   const pr = store.getStatuses(REPO, [8])[8].prs.find((p) => p.prNumber === 56);
   assert.deepStrictEqual(pr.review, { lastReviewedSha: null });
 });
+
+// The status sweep runs for every visible issue on every poll, so the review
+// sub-object must stay exactly one field wide: spreading the whole record here
+// would ship each PR's full review transcript to the browser on a timer.
+test('getStatuses ships only the review marker, never the review transcript', () => {
+  store.upsertPr(REPO, 9, { prNumber: 57, prUrl: 'https://example.test/pr/57' });
+  store.updateReview(REPO, 9, 57, (rv) => {
+    rv.status = 'success';
+    rv.lastReviewedSha = 'cafebabe1234';
+    rv.conversation = 'a very long review transcript';
+    rv.sessionId = 'sess-1';
+  });
+
+  const pr = store.getStatuses(REPO, [9])[9].prs.find((p) => p.prNumber === 57);
+  assert.deepStrictEqual(pr.review, { lastReviewedSha: 'cafebabe1234' });
+});

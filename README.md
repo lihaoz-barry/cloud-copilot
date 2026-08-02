@@ -5,19 +5,31 @@ your LAN/VPN. From your phone you can:
 
 - browse the git repos under an **authorized root** (`REPOS_ROOT`), with a
   per-device **repo filter** (checkbox show/hide, persisted in `localStorage`)
-- expand a repo to see its **GitHub issues** (fetched via `gh`, cached, refreshable);
-  every expand also **auto-discovers PRs** referencing those issues (one `gh pr
-  list` call, matched in-process) so the pipeline is populated without a manual
-  step — a per-issue **↻ PRs** button remains for an explicit, always-live re-check
-- run every PR through a **3-stage pipeline — Create PR → Deploy → Merge** — shown
-  as one row per PR with a colored pill per stage (blue = planned, yellow =
-  running, green = done, red = failed), each with its own collapsible log
+- expand a repo to see its **GitHub issues**, served through a **three-tier cache**
+  (browser → server → `gh`) so an expand is instant and a page reload costs zero
+  requests — see [Caching](#caching-browser--server--gh) below; every expand also
+  **auto-discovers PRs** referencing those issues (one `gh pr list` call, matched
+  in-process) so the pipeline is populated without a manual step — a per-issue
+  **↻** button remains for an explicit, always-live re-check
+- a **flat two-line layout**: one line per issue (number, title, and the pin /
+  GitHub / refresh / delete cluster), then **one workflow line per PR** —
+  `#43 [ PR created ▸ Deploy ▸ Merge ]`. The first workflow line always has an
+  empty PR number and starts a *new* PR, since one issue can have several
+- each stage is a colored segment (blue = planned, yellow = running, green =
+  done, red = failed); a **⋯** toggle reveals that line's logs, abort and timing,
+  and opens itself automatically while a stage runs
+- **repo open/closed state is remembered per device**, so a reload lands on the
+  same view instead of collapsing everything
 - **Deploy is per-repo configurable**: iOS repos ship to TestFlight via the
   `testflight-deploy` skill; other repos (cloud-copilot itself included) just run
   a shell command you define (e.g. restart the local service) — see
   [`.cloud-copilot.json`](#per-repo-deploy-config-cloud-copilotjson) below
 - **Merge** (`gh pr merge --merge --delete-branch`) unlocks once Deploy succeeds;
-  you can still force it early behind a confirm if you're confident
+  you can still force it early behind a confirm if you're confident. If the
+  command fails, cloud-copilot automatically starts a repo-scoped Copilot session
+  to investigate, resolve branch conflicts, push, retry, and verify the merge.
+  Once the merge lands, cloud-copilot **closes the issue and every other still-open
+  PR for that issue** (with a "superseded by #N" comment + branch deletion)
 - **click a PR** to open its own **detail page** (`#/pr/<repo>/<issue>/<pr>`,
   bookmarkable/shareable) — same pipeline, plus a **Deploy History** list (every
   build number/version/status the PR has ever shipped, not just the latest) and
@@ -60,22 +72,94 @@ one **work** (Create PR) record plus a map of **PRs**, and every PR carries its 
 | Deploy     | `Deploy` 🔵       | `Deploying…` 🟡    | `Deployed` 🟢   | `Deploy failed` 🔴 / `Aborted`   |
 | Merge      | `🔒 Merge` 🔵 (dim until Deploy succeeds) | `Merging…` 🟡 | `Merged` 🟢 | `Merge failed` 🔴 / `Aborted` |
 
-Each PR renders as one row across all three stages — a **Create PR | Deploy |
-Merge** pipeline, matching the state machine above: blue = planned, yellow =
-running, green = done, red = failed.
+Each PR renders as **one workflow line** across all three stages — a **Create PR |
+Deploy | Merge** pipeline, matching the state machine above: blue = planned,
+yellow = running, green = done, red = failed. The PR number sits at the head of
+the line:
+
+```
+#42  Deploy dies on a dirty working tree: salvage local changes…   📌 ↗ ↻ 🗑
+#43↗ [  PR created   ▸     Deploy     ▸  🔒 Merge     ]                 ⋯
+     ⎇ claude/app-bug-fixes  62cf6ca  50m  Deploy: salvage a dirty…
+```
+
+The PR number and its `↗` GitHub link are packed together on the **left**, so
+every workflow bar starts at the same x whichever icons a line has.
+
+- **An issue with no PRs** leads with a `—` line whose first segment is the live
+  **Create PR** button.
+- **Once a PR exists that line disappears**, saving a row per issue. To open a
+  *second* PR, click the green **PR created** segment on any existing line — it
+  asks to confirm before starting a new Copilot run.
+- The `—` line **comes back** while a Create PR run is working, failed, or
+  aborted, so progress and failures stay visible and their log stays reachable.
 
 - **Success shows on the issue**, not the button: on a created PR the issue gets a
-  green border + green `#number`, and the **Create PR** button stays "Create PR".
-- **Per-action logs** are hidden by default. A small `▤` toggle by **Create PR**
-  reveals the creation log; each PR row has `▤` toggles for its Deploy and Merge logs.
+  green border + green `#number`, and the Create PR segment resets to "Create PR".
+- **An issue has one Create PR record but can have many PRs**, most of them
+  discovered on GitHub rather than created here. Only the PR that run actually
+  produced (`work.prNumber`) shows its duration and log — otherwise an unrelated
+  run gets attributed to a PR that predates it.
+- **Per-line logs are hidden behind `⋯`**, along with that line's abort button and
+  run timing. The toggle only appears when there is something to show, and opens
+  itself while a stage is running so Abort is always one tap away.
+- **Each PR line carries its branch and tip commit** — `⎇ branch`, the short SHA,
+  how long ago it landed, and the commit subject — so you can tell at a glance
+  what code a given Deploy actually shipped. The SHA links straight to that
+  commit on GitHub. (On phones the branch is dropped in favour of the commit
+  subject, which says more in less space.)
+- **The repo header does the same for the local checkout**, plus the issue that
+  branch belongs to: `feat-x · #45 主页扁平化… · d9132eb 2m …`. The issue is
+  resolved client-side by matching the branch against each PR's `headRefName`,
+  so it costs no extra API call. An **unpushed** commit has no page on GitHub —
+  linking to it would just 404 — so it renders as a plain chip with an
+  `unpushed` badge instead of a dead link.
 - **Abort**: while running, Create PR / Deploy / Merge each show a red `⨯` button.
   Confirming signals the whole process group (copilot + fastlane/xcodebuild/gh), so
   subprocesses die too; the run ends in an `aborted` state you can re-run.
 - **Re-deploy**: clicking Deploy on a finished/failed/aborted PR asks to confirm
   before starting a new run.
+- **Worktrees are cleaned up after every run, not fought over at Deploy time** —
+  an agent session often implements an issue inside a `git worktree` it creates
+  itself (e.g. under `.claude/worktrees/`) and leaves behind, sometimes locked,
+  still holding the PR's branch. Git then refuses to check that branch out
+  anywhere else (`already used by worktree`), which is exactly what Deploy needs
+  to do. So **Create PR** and a successful **Merge** now sweep those directories
+  as soon as they finish — while they still hold the repo lock — and Deploy/PR
+  chat keep the same release step as a fallback. The rule is always "never delete
+  work": a worktree is unlocked, removed and pruned only when it is clean **and**
+  every commit it holds already exists on `origin/<branch>` (after a merge,
+  `origin/<base>` counts too, since GitHub usually deleted the branch). Anything
+  with uncommitted changes, unpushed commits, a detached HEAD, or no remote to
+  compare against is left untouched — and if Deploy still finds its branch held
+  by such a worktree, it runs inside that directory instead of failing. What was
+  removed or kept, and why, is appended to the run's transcript as
+  `[worktree] released … / kept … — reason`.
+- **Closed PRs drop out of the local pipeline** — a PR closed *without* being
+  merged has no branch left on GitHub, so Deploy/Merge/chat on it could only ever
+  die on `git fetch` with an opaque `Command failed`. Each sync records every
+  tracked PR's GitHub state (including ones cloud-copilot created itself, which
+  the per-issue body match may not return), and `CLOSED` rows stop being listed —
+  `↻ PRs` is the manual sweep. **`MERGED` is never hidden**: that is the
+  pipeline's successful end state. A closed PR that was never deployed, merged or
+  chatted is forgotten entirely; one that *does* carry local history keeps its
+  record (just hidden) so the builds overview never loses past attempts. If you
+  click Deploy on a PR that closed since the page loaded, you get a plain-language
+  `Blocked: PR #N is closed…` instead of a checkout failure.
 - **Merge is gated on Deploy succeeding** — the Merge cell stays a dimmed, locked
   `🔒 Merge` until then. You can still click it early; it asks you to confirm a
   **force-merge** that skips the gate.
+- **Failed merges recover automatically** — Copilot investigates the original
+  failure, resolves and pushes conflicts against the PR's actual base branch,
+  retries the merge, and verifies GitHub reports `MERGED`. The Merge cell says
+  `Merged · conflict resolved` when that recovery resolved a reported conflict.
+- **A successful merge cleans up after itself** — GitHub only auto-closes an issue
+  when the PR body has `Closes #N` *and* targets the default branch, and it never
+  touches sibling PRs. So after the PR reaches `MERGED`, cloud-copilot closes the
+  issue (comment: `Closed by #N (merged via cloud-copilot).`) and closes every other
+  still-open PR of that issue with `Superseded by #N…` + `--delete-branch`. Already
+  merged/closed PRs are skipped, the whole step is best-effort (it can never fail an
+  already successful merge), and `MERGE_AUTO_CLEANUP=0` turns it off.
 - Success/failure is decided by the CLI/command **exit code** plus detection: a PR
   URL in the transcript (fallback: `gh pr list` referencing the issue) for Create
   PR; a fastlane/TestFlight success marker for an `ios-testflight` Deploy (plain
@@ -88,6 +172,58 @@ running, green = done, red = failed.
   `fastlane beta build:<n> version:<v>` — so what cloud-copilot records and
   displays is guaranteed to match what was actually built, not inferred
   after the fact from the agent's free-form report.
+
+### Caching (browser → server → `gh`)
+
+Issue and PR data is read through three tiers, so the dashboard is instant and
+`gh` is called as rarely as possible:
+
+| Tier | Where | TTL | Cost | Survives |
+|---|---|---|---|---|
+| **L1** | browser `localStorage` | 15 min | 0 ms | page reloads |
+| **L2** | `data/gh-cache.json` + memory | 15 min | ~5 ms | server restarts |
+| **L3** | the `gh` CLI (real GitHub) | — | ~800 ms+ | — |
+
+Three things fill L2 per repo: `gh issue list`, `gh pr list`, and one GraphQL
+query for each PR's tip commit. (`gh pr list --json commits` can't be used for
+that last one — it returns every commit of every PR and blows past GitHub's
+GraphQL node limit at 100 PRs.) The commit query is decorative: if it fails, the
+rows simply render without their branch/commit annotations.
+
+- **Expanding a repo** renders from L1 immediately — if that copy is under 15
+  minutes old, **no GitHub read happens at any tier**. A reload of a page with an
+  already-expanded repo therefore issues zero `gh` calls.
+- **L1 only caches the GitHub half.** The action statuses that ride along in the
+  same payload (`work`/`deploy`/`merge`, plus `activeWorkIssues`) are live
+  server state, and a job started from another machine is invisible to a cached
+  render. So every cache-backed render is immediately followed by a
+  `/api/repos/:name/statuses` call, which reads `state.json` and the job table
+  and never touches `gh`; the list is repainted only if something actually
+  moved. The 60-second sweep does the same for repos still inside the TTL, so a
+  page left open notices a remote job within a minute.
+- **Past the TTL**, the browser silently asks the server and updates the list in
+  place. That request usually costs nothing beyond L2; only if the server's own
+  copy has aged out does it reach for `gh`.
+- **The server refreshes every repo hourly** in the background (`force`, so it
+  really does hit GitHub), which bounds staleness even if nobody opens the page.
+  A repo with a job running is skipped and picked up on the next pass.
+- **`↻ Refresh` punches through all three tiers**: a live `gh` read that rewrites
+  the server's cache *and* this browser's copy.
+- The background top-up is **skipped while anything in that repo is running**,
+  since re-rendering the list would tear down the DOM a live log is streaming into.
+
+The freshness pill next to the issue count shows both halves and a countdown:
+
+```
+9 open   ☁ 3m · 💾 just now · ↻ 12m
+         │      │              └ next automatic sync
+         │      └ when this browser last copied it
+         └ when the server last read GitHub
+```
+
+Green inside the TTL, amber under an hour, grey beyond that; hovering gives
+absolute timestamps. Tune with `GH_CACHE_TTL_MS`, `GH_SYNC_INTERVAL_MS`, and
+`GH_SYNC_FIRST_DELAY_MS`.
 
 ### Auto-run depth
 
@@ -153,6 +289,60 @@ button), never on page load.
 **Not covered (follow-up):** Web Push (VAPID) so alerts arrive with the app
 fully closed. Phase 1 fires notifications from the page itself, which covers the
 "app backgrounded / screen briefly locked" case, not "app killed".
+
+### Phone pushes (ntfy) — one message per task
+
+The alerts above need a page that is (or recently was) open. To reach a phone
+with the app fully closed, the **server** publishes one [ntfy](https://ntfy.sh)
+message per job the moment it reaches a terminal state (`lib/notifier.js`,
+called from `lib/jobs.js`).
+
+Each push names the task, not just the session:
+
+```
+✅ Create PR · cloud-copilot#27          ❌ Deploy · ios-diet-expert PR #112 失败
+   Task-aware ntfy notifications            fastlane: build failed
+   本 repo 第 2 个 Create PR                 exit code 1
+   https://github.com/…/pull/48
+```
+
+- **Title** = action · repo#issue / repo PR #n, plus the conversation title for
+  chat turns (`💬 Admin chat · 「刷新页面后聊天新开了一个 tab」`) and a status
+  suffix for anything that didn't succeed.
+- **Body** = what the task was about (issue/PR title, or the chat title) + a
+  one-line gist of the agent's final answer + the key result (PR link, TestFlight
+  build number, or the first line of the error).
+- **Tags** render as the leading emoji: ✅ success, ❌ failure, ⚠️ aborted;
+  failures are also sent with a higher ntfy priority.
+- **Tapping** opens the matching place in the app — the PR page, the pre-issue
+  chat, or `#/admin/chat/<id>` for an admin conversation (needs `APP_BASE_URL`).
+
+Configuration is machine-local and never committed — copy
+[`setup/notify.env.example`](setup/notify.env.example) to
+`~/.config/cloud-copilot/notify.env`:
+
+```bash
+NTFY_TOPIC=some-long-unguessable-topic   # your topic IS the credential
+NTFY_SERVER=https://ntfy.sh              # or your self-hosted instance
+APP_BASE_URL=http://192.168.1.20:8787    # how your phone reaches this app
+```
+
+Every key can also be given as an environment variable (which wins), the file is
+re-read when it changes (no restart), and **with no topic set nothing is pushed
+and nothing errors**. A push has a 10s timeout, is de-duplicated per job key for
+60s, and can never fail a job — errors are logged and dropped. The 🔔 Alerts
+drawer shows the current status and has a **Test phone push** button
+(`GET/POST /api/settings/ntfy[/test]`).
+
+Jobs are spawned with `CLOUD_COPILOT_JOB=1`, which the Copilot CLI `sessionEnd`
+hook (`~/Repos/hooks/copilot-notify.sh`) checks before sending its own generic
+`[repo] session complete` message — so cloud-copilot's runs notify exactly once,
+with the specific message, and other Copilot CLI sessions still get the generic
+one:
+
+```bash
+[[ -n "$CLOUD_COPILOT_JOB" ]] && exit 0
+```
 
 ### Settings panel (⚙, top-right of Home)
 
@@ -313,16 +503,19 @@ behaviour:
 | GET  | `/api/repos` | List git repos under `REPOS_ROOT` (with remotes). |
 | GET  | `/api/health` | Liveness probe: `{ ok, pid, startedAt }`. Polled by the client while the server restarts itself. |
 | GET  | `/api/settings/model` | Current model + the selectable list. `POST` the same path to change it. |
+| GET  | `/api/settings/ntfy` | Phone-push status: `{ enabled, server, topic (masked), appBaseUrl, configFile }`. |
+| POST | `/api/settings/ntfy/test` | Send a test push to the configured ntfy topic. `400` when unconfigured, `502` when ntfy rejects it. |
 | GET  | `/api/settings/self` | The cloud-copilot repo serving this app: `{ repo, branch, defaultBranch, dirty, busy }`, or `{ repo: null }`. |
 | POST | `/api/settings/self/restart-main` | **Restart main** — stash if dirty, check out the default branch, `pull --ff-only`, then restart detached. Takes the repo working-tree lock; `409` when it's held. |
-| GET  | `/api/repos/:name/issues[?refresh=1]` | List open issues (cached 5 min) merged with local status; includes `activeWorkIssues` (repo lock). Also auto-discovers and persists PRs referencing these issues (one whole-repo `gh pr list`, cached 5 min, `?refresh=1` bypasses it too). |
+| GET  | `/api/repos/:name/issues[?refresh=1]` | List open issues merged with local status; includes `activeWorkIssues` (repo lock) and cache telemetry (`serverAt`, `ttlMs`, `nextSyncAt`) for the freshness pill. Served from the L2 cache (15 min TTL, persisted to `data/gh-cache.json`); `?refresh=1` forces a live `gh` read and rewrites it. Also auto-discovers and persists PRs referencing these issues (one whole-repo `gh pr list`, same cache). |
+| GET  | `/api/repos/:name/statuses?n=1,2,3` | Just the live half of the list above: `{ statuses, activeWorkIssues }` for the given issue numbers. Reads `state.json` + the in-memory job table only — never `gh`, never the L2 cache — so the client can call it on every cache-backed render and once a minute thereafter. |
 | GET  | `/api/repos/:name/issues/:n/record` | Full stored record (work + per-PR deploy/merge, transcripts, `live` flags). |
 | GET  | `/api/repos/:name/issues/:n/prs` | Force-refresh the PR list for one issue from GitHub — always live, bypasses the whole-repo PR cache. |
 | POST | `/api/repos/:name/issues/:n/work` | **Create PR** — SSE stream. Body: `{ "mode": "allow-all" }`. |
 | POST | `/api/repos/:name/issues/:n/work/cancel` | Abort the running PR creation. |
 | POST | `/api/repos/:name/issues/:n/deploy/:pr` | **Deploy a specific PR** — SSE stream. Dispatched per the repo's `.cloud-copilot.json`. |
 | POST | `/api/repos/:name/issues/:n/deploy/:pr/cancel` | Abort the running deploy for that PR. |
-| POST | `/api/repos/:name/issues/:n/merge/:pr` | **Merge a specific PR** — SSE stream. Body: `{ "force": false }`. Blocked unless Deploy succeeded, unless `force: true`. |
+| POST | `/api/repos/:name/issues/:n/merge/:pr` | **Merge a specific PR** — SSE stream. Body: `{ "force": false }`. Blocked unless Deploy succeeded, unless `force: true`. A failed `gh pr merge` automatically starts Copilot to investigate, resolve conflicts, retry, and verify the merge. On success the issue and the issue's other open PRs are closed automatically (`MERGE_AUTO_CLEANUP=0` disables it). |
 | POST | `/api/repos/:name/issues/:n/merge/:pr/cancel` | Abort the running merge for that PR. |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat` | **Chat with a PR** — SSE stream. Body: `{ "message": "...", "mode": "plan"\|"apply", "model": "..." }`. `plan` is read-only (default approval flags); `apply` implements + pushes to the existing branch and resets Deploy/Merge on success. The optional `model` overrides the global setting for that turn only (unknown values fall back to it). |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat/cancel` | Abort the running chat turn for that PR. |
@@ -346,6 +539,38 @@ The **Deploy** button runs `copilot -p` with a prompt that invokes your personal
 encodes the correct signing team, bundle id, and App Store Connect API key for
 `ios-diet-expert`. (The generic `ios-deploy` skill is intentionally **not** used —
 `testflight-deploy` supersedes it.)
+
+### "What to Test" — one short Chinese line per build
+
+The note TestFlight testers read is pinned by the server, not left to the agent.
+[`lib/changelog.js`](lib/changelog.js) turns the PR title into it in two steps:
+
+1. **Deterministic cleanup** (always): drop characters that would break out of the
+   single-quoted `changelog:'…'` argument, strip issue references
+   (`(closes #79)`, `fixes #7`, a bare trailing `#7`) and commit-type prefixes
+   (`feat:`, `fix(ui)!:`), keep only the Chinese half of a bilingual
+   `中文 / English` title, and truncate to 40 characters.
+2. **Translation** (only when the cleaned title still isn't Chinese): one headless
+   `copilot -p` call that returns a single `WHAT_TO_TEST:` line. Best-effort — a
+   missing binary, a timeout, or a reply with no Chinese in it falls back to the
+   step-1 text, so this can never block or fail a deploy.
+
+A build with no usable title gets `v1.4 构建 63（暂无变更说明）`.
+
+| Env var | Default | Effect |
+| ------- | ------- | ------ |
+| `CHANGELOG_MODEL` | `claude-haiku-4.5` | Model for the translation hop — small and fast, since it runs inline before the deploy starts (~10s) |
+| `CHANGELOG_TIMEOUT_MS` | `60000` | Give up on the translation and use the cleaned title |
+
+Examples:
+
+| PR title | What to Test |
+| -------- | ------------ |
+| `feat: Add household size, default goal, and servings preferences to Settings (closes #39)` | 新增家庭人数和默认目标设置 |
+| `ci: wire Xcode Cloud build to CI/CD` | Xcode Cloud 构建现已接入 CI/CD 流程 |
+| `将 Cook Now 改造为可复用的做饭任务流程 / Cook Now as a reusable cooking task flow (closes #79)` | 将 Cook Now 改造为可复用的做饭任务流程 |
+
+Run `npm test` to exercise the deterministic half (`test/changelog.test.js`).
 
 ---
 
@@ -408,6 +633,32 @@ committed. Fill `deploy.env`, then re-run the script to install the key.
   the `copilot` binary and **captures the `--resume=<id>` session id** from stderr so the
   client can continue the same conversation.
 - **Transport**: SSE — simple, one-directional (server → browser), perfect for streaming.
+
+### Streaming markdown (`public/chat-render.js`)
+
+Every surface that streams Copilot output — the PR chat panel, the pre-issue chat panel,
+the Admin Terminal and the pipeline log panels — goes through one renderer, `CCChat`:
+
+- **Markdown while it streams, not after.** Chunks accumulate into a buffer that is
+  re-parsed on a ~60ms cadence; only the markdown *blocks* whose source text actually
+  changed are rebuilt, so a 5k-token answer costs one small parse per frame instead of one
+  DOM text node (and one forced reflow) per SSE chunk. An unterminated ``` fence is closed
+  before parsing so code reads as code from its first line.
+- **Sanitized, always.** Model output is untrusted: everything passes through DOMPurify —
+  no scripts, inline styles, event handlers, frames or `javascript:` URLs survive. Links
+  are forced to `target="_blank" rel="noopener noreferrer nofollow"`; GFM task-list
+  checkboxes are the one `<input>` allowed through, stripped down to an inert checkbox.
+- **Syntax highlighting + copy buttons** on every code fence, a copy button on every
+  assistant message, and dumps longer than 40 lines folded behind a "Show all N lines".
+- **Sticky-bottom autoscroll.** The view only pins to the bottom while you are already
+  within 40px of it; scroll up during a live turn and it stays put, with a
+  "↓ Jump to latest" pill to come back.
+- Pipeline logs stay verbatim (they're raw interleaved stdout/stderr, not markdown) but
+  share the sticky scrolling and node coalescing.
+
+The libraries behind it (marked, DOMPurify, highlight.js) are **vendored** into
+`public/vendor/` — see the README there. The app is used over LAN and must work with no
+internet, so nothing is loaded from a CDN.
 
 ### Durable jobs (survives phone disconnects)
 
@@ -496,6 +747,7 @@ Other optional env vars:
 | `GH_BIN`     | `gh`           | Path/name of the GitHub CLI              |
 | `PORT`       | `8787`         | Port to listen on                        |
 | `HOST`       | `0.0.0.0`      | Bind address (`127.0.0.1` for local-only)|
+| `MERGE_AUTO_CLEANUP` | `1`    | `0` disables closing the issue + superseded PRs after a merge |
 
 ---
 
@@ -558,20 +810,34 @@ cloud-copilot/
 ├── .cloud-copilot.json # this repo's own deploy config (shell -> cc:restart)
 ├── server.js           # Express app: repos/issues/work/deploy/merge routes + state machine
 ├── lib/
+│   ├── changelog.js    # PR title -> short Chinese TestFlight "What to Test" note
 │   ├── gh.js           # enumerate repos, list issues/PRs/single-PR via `gh` (cached)
+│   ├── ghCache.js      # L2 cache for gh results, persisted to data/gh-cache.json
 │   ├── store.js        # per-issue status persisted to data/state.json
 │   ├── jobs.js         # durable job manager: child outlives the browser connection
+│   ├── notifier.js     # task-aware ntfy pushes when a job reaches a terminal state
 │   ├── runner.js       # spawn copilot, stream SSE, capture transcript + session id
+│   ├── mergeRunner.js  # gh pr merge + Copilot recovery, verifies the PR is MERGED
+│   ├── mergeCleanup.js # after a merge: close the issue + superseded sibling PRs
+│   ├── worktrees.js    # linked-worktree housekeeping: release/sweep without ever losing work
 │   └── repoConfig.js   # loads a repo's .cloud-copilot.json (or auto-detects iOS)
 ├── public/
 │   ├── index.html      # repos → issues → Create PR / Deploy / Merge pipeline console
+│   ├── chat-render.js  # CCChat: streamed markdown renderer shared by every chat surface
+│   ├── vendor/         # marked + DOMPurify + highlight.js, committed (never a CDN)
 │   ├── notify.js       # CCNotify: completion chime + system notification + toast
 │   ├── sw.js           # service worker (required for notifications on iOS)
 │   ├── manifest.webmanifest  # PWA manifest — makes "Add to Home Screen" a real app
 │   ├── icons/          # PWA / apple-touch icons (generated)
 │   └── sounds/         # success + failure chimes (generated)
+├── setup/
+│   ├── setup.sh              # onboard a fresh Mac (CLI, gh, skills, .p8, fastlane)
+│   ├── deploy.env.example    # -> ~/.config/cloud-copilot/deploy.env
+│   └── notify.env.example    # -> ~/.config/cloud-copilot/notify.env (ntfy pushes)
 ├── scripts/
 │   └── gen-assets.js   # regenerates public/icons + public/sounds (no deps)
+├── test/
+│   └── changelog.test.js  # `npm test` — What to Test note building (node --test)
 ├── data/               # state.json (gitignored)
 ├── .gitignore
 └── README.md

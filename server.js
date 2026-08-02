@@ -27,7 +27,11 @@ const gh = require('./lib/gh');
 const repoConfig = require('./lib/repoConfig');
 const { runCopilotSSE, writeSseHead } = require('./lib/runner');
 const jobs = require('./lib/jobs');
+const notifier = require('./lib/notifier');
+const changelogLib = require('./lib/changelog');
 const { UPLOADS_DIR, saveUploadedImages, cleanupOldUploads } = require('./lib/attachments');
+const { cleanupAfterMerge } = require('./lib/mergeCleanup');
+const worktrees = require('./lib/worktrees');
 
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 8787);
@@ -123,11 +127,11 @@ function resolveRepo(name) {
 }
 
 // Actions that check out a branch on a repo's single shared working tree —
-// Create PR, Deploy, and Chat (even "plan" mode checks out the PR's branch) —
+// Create PR, Deploy, Chat (even "plan" mode checks out the PR's branch), and
+// Merge (when its automatic Copilot recovery is needed) —
 // must be mutually exclusive per repo, or concurrent runs collide on the same
-// checkout. Merge is excluded: it only calls `gh pr merge` via the API, no
-// local checkout involved.
-const WORKING_TREE_ACTION_RE = /^(\d+):(work|deploy|chat|restart)(?::(\d+))?$/;
+// checkout.
+const WORKING_TREE_ACTION_RE = /^(\d+):(work|deploy|chat|merge|restart)(?::(\d+))?$/;
 
 // Working-tree locks held by actions that are NOT backed by a `jobs` child
 // process — currently just "Restart main", which runs a few short git commands
@@ -166,6 +170,7 @@ const BUSY_ACTION_LABEL = {
   work: 'a Create PR run',
   deploy: 'a Deploy',
   chat: 'a chat turn',
+  merge: 'a Merge',
   restart: 'a Restart main',
 };
 
@@ -180,6 +185,37 @@ function describeBusyKey(repoName, busyKey) {
   if (action === 'restart') return `${label} is already running in ${repoName}`;
   const prSuffix = prNum ? ` (PR #${prNum})` : '';
   return `${label}${prSuffix} is already running for issue #${issueNum} in ${repoName}`;
+}
+
+// ---------------------------------------------------------------------------
+// Context for task-aware push notifications (issue #27). A push has to say
+// *which* task of *which* repo finished, so every job's `meta` carries the
+// repo/issue/PR identity plus a human subject line. These lookups are all
+// cache-only (no `gh` calls) — a missing title just means a shorter push.
+// ---------------------------------------------------------------------------
+
+function cachedGhTitle(ownerRepo, kind, number) {
+  try {
+    const entry = gh.cache.get(ownerRepo, kind);
+    const hit = entry && entry.data.find((x) => x.number === number);
+    return (hit && hit.title) || null;
+  } catch {
+    return null;
+  }
+}
+
+const cachedIssueTitle = (repo, n) => (repo.ownerRepo ? cachedGhTitle(repo.ownerRepo, 'issues', n) : null);
+const cachedPrTitle = (repo, prNumber) =>
+  repo.ownerRepo ? cachedGhTitle(repo.ownerRepo, 'prs', prNumber) : null;
+
+// How many Create PR runs this repo has started since the server came up —
+// lets a push say "本 repo 第 2 个 Create PR" when several are queued up on the
+// same repo, which is otherwise the hardest case to tell apart on a phone.
+const createPrRuns = new Map();
+function nextCreatePrSequence(repoName) {
+  const n = (createPrRuns.get(repoName) || 0) + 1;
+  createPrRuns.set(repoName, n);
+  return n;
 }
 
 // Map a UI mode to copilot approval flags.
@@ -220,6 +256,9 @@ app.get('/api/repos', (req, res) => {
   const repos = gh.listRepos(REPOS_ROOT).map((r) => ({
     name: r.name,
     branch: r.branch,
+    // Tip commit of the local checkout, so the repo header can say which code
+    // this machine would actually deploy right now.
+    headCommit: r.headCommit,
     ownerRepo: r.ownerRepo,
     github: r.github,
   }));
@@ -242,6 +281,26 @@ app.post('/api/settings/model', (req, res) => {
     return res.status(400).json({ error: `unknown model "${model}"` });
   }
   res.json({ model: store.setModel(model) });
+});
+
+// ---------------------------------------------------------------------------
+// Phone pushes (ntfy) — status + a "send a test push" button, so the machine's
+// notify.env can be verified from the settings panel without waiting for a real
+// job to finish. The topic is never returned in full (it IS the credential).
+// ---------------------------------------------------------------------------
+app.get('/api/settings/ntfy', (req, res) => {
+  res.json(notifier.status());
+});
+
+app.post('/api/settings/ntfy/test', async (req, res) => {
+  const result = await notifier.sendTest();
+  if (result.skipped) {
+    return res.status(400).json({
+      error: `No ntfy topic configured. Create ${notifier.status().configFile} (see setup/notify.env.example).`,
+    });
+  }
+  if (!result.ok) return res.status(502).json({ error: result.error });
+  res.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -296,6 +355,24 @@ function isDirty(repoPath) {
   } catch {
     return false;
   }
+}
+
+// Makes `branch` the HEAD of the returned working directory. Normally that is
+// the repo itself: when a linked worktree holds the branch we release it first
+// so the action runs locally in the main tree, and only fall back to running
+// inside the worktree when it still holds uncommitted or unpushed work. Throws
+// on failure. Argument-array form (never a shell string) so branch names, which
+// come from GitHub, are never interpreted by a shell.
+function checkoutBranchCwd(repoPath, branch) {
+  execFileSync('git', ['fetch', 'origin', branch], { cwd: repoPath, stdio: 'ignore', timeout: 30000 });
+  const released = worktrees.releaseBranchWorktree(repoPath, branch, { fetch: false });
+  if (released.status === 'kept') {
+    // The worktree carries local work — deploy it where it lives rather than
+    // deleting it or failing the job.
+    return released.path;
+  }
+  execFileSync('git', ['checkout', branch], { cwd: repoPath, stdio: 'ignore', timeout: 15000 });
+  return repoPath;
 }
 
 // origin's default branch (usually `main`), falling back to "main".
@@ -465,6 +542,57 @@ app.get('/api/testflight/builds', (req, res) => {
   res.json({ builds });
 });
 
+/**
+ * Pull a repo's issues + PRs (through the L2 cache unless `force`) and fold the
+ * discovered PRs into the store. Shared by the issues endpoint and the hourly
+ * background refresher so both keep the store in exactly the same shape.
+ */
+async function syncRepoFromGitHub(repo, { force = false } = {}) {
+  const { issues, cached, at } = await gh.listIssues(repo.ownerRepo, { force });
+  const dismissed = store.getDismissedNumbers(repo.name);
+  const visible = issues.filter((i) => !dismissed.has(i.number));
+
+  // Auto-discover PRs referencing any of these issues — one `gh pr list`
+  // call for the whole repo, matched in-process — so the pipeline is
+  // populated on every expand without needing the manual "↻ PRs" click.
+  const { prs: allPrs } = await gh.listAllPrs(repo.ownerRepo, { force });
+  // Best-effort branch + tip-commit annotations; an empty map just means the
+  // rows render without them.
+  const headCommits = await gh.listPrHeadCommits(repo.ownerRepo, { force });
+  // Whole-repo PR state, so a PR cloud-copilot created itself (which the
+  // per-issue body match may not find) still learns it was closed.
+  const stateByNumber = {};
+  for (const p of allPrs) stateByNumber[String(p.number)] = p.state;
+
+  for (const issue of visible) {
+    const matched = gh.matchPrsForIssue(allPrs, issue.number);
+    for (const p of matched) {
+      const head = headCommits[String(p.number)] || null;
+      store.upsertPr(repo.name, issue.number, {
+        prNumber: p.number,
+        prUrl: p.url,
+        title: p.title,
+        createdAt: p.createdAt,
+        source: 'gh',
+        state: p.state,
+        headRefName: p.headRefName || (head && head.headRefName) || null,
+        headCommit: head
+          ? { sha: head.sha, abbrev: head.abbrev, committedDate: head.committedDate, headline: head.headline, url: head.url }
+          : undefined,
+      });
+    }
+    // Drop previously auto-discovered PRs that no longer match (e.g. the
+    // match heuristic got stricter, or a PR body was edited) — never
+    // touches PRs cloud-copilot itself created for this issue.
+    store.pruneStaleGhPrs(repo.name, issue.number, matched.map((p) => p.number));
+    // Forget PRs GitHub closed without merging: their branch is gone, so every
+    // pipeline action on them would fail. Records carrying local history are
+    // kept (just hidden) so the builds overview keeps its data.
+    store.pruneClosedPrs(repo.name, issue.number, store.refreshPrStates(repo.name, issue.number, stateByNumber));
+  }
+  return { visible, cached, at };
+}
+
 app.get('/api/repos/:name/issues', async (req, res) => {
   const repo = resolveRepo(req.params.name);
   if (!repo) return res.status(404).json({ error: 'repo not found under REPOS_ROOT' });
@@ -472,30 +600,7 @@ app.get('/api/repos/:name/issues', async (req, res) => {
 
   try {
     const force = req.query.refresh === '1' || req.query.refresh === 'true';
-    const { issues, cached, at } = await gh.listIssues(repo.ownerRepo, { force });
-    const dismissed = store.getDismissedNumbers(repo.name);
-    const visible = issues.filter((i) => !dismissed.has(i.number));
-
-    // Auto-discover PRs referencing any of these issues — one `gh pr list`
-    // call for the whole repo, matched in-process — so the pipeline is
-    // populated on every expand without needing the manual "↻ PRs" click.
-    const { prs: allPrs } = await gh.listAllPrs(repo.ownerRepo, { force });
-    for (const issue of visible) {
-      const matched = gh.matchPrsForIssue(allPrs, issue.number);
-      for (const p of matched) {
-        store.upsertPr(repo.name, issue.number, {
-          prNumber: p.number,
-          prUrl: p.url,
-          title: p.title,
-          createdAt: p.createdAt,
-          source: 'gh',
-        });
-      }
-      // Drop previously auto-discovered PRs that no longer match (e.g. the
-      // match heuristic got stricter, or a PR body was edited) — never
-      // touches PRs cloud-copilot itself created for this issue.
-      store.pruneStaleGhPrs(repo.name, issue.number, matched.map((p) => p.number));
-    }
+    const { visible, cached, at } = await syncRepoFromGitHub(repo, { force });
 
     const numbers = visible.map((i) => i.number);
     const statuses = store.getStatuses(repo.name, numbers);
@@ -513,10 +618,48 @@ app.get('/api/repos/:name/issues', async (req, res) => {
     // existing `activeWorkIssues[0]` client contract.
     const busyIssue = repoBusyIssueNumber(repo.name);
     const activeWorkIssues = busyIssue != null ? [busyIssue] : [];
-    res.json({ repo: repo.name, ownerRepo: repo.ownerRepo, cached, at, issues: merged, activeWorkIssues });
+    res.json({
+      repo: repo.name,
+      ownerRepo: repo.ownerRepo,
+      cached,
+      at,
+      // Cache telemetry the client's sync pill renders from: when this repo's
+      // L2 entry was last filled, how long entries stay fresh, and when the
+      // hourly background refresh will next touch it.
+      serverAt: gh.cache.syncedAt(repo.ownerRepo) ?? at,
+      ttlMs: gh.CACHE_TTL_MS,
+      nextSyncAt: nextBackgroundSyncAt(),
+      issues: merged,
+      activeWorkIssues,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message, stderr: (err.stderr || '').toString() });
   }
+});
+
+// Just the live half of the issues list: per-issue action statuses plus which
+// issue holds the working-tree lock. Deliberately does NOT touch `gh` or the
+// L2 cache — it only reads state.json and the in-memory job table, so the
+// client can call it as often as it likes.
+//
+// Exists because the browser's L1 cache stores the whole /issues payload for
+// 15 minutes, which is right for GitHub metadata and wrong for this: a job
+// started from another machine (or another tab) is invisible to a cached
+// render, so the card stays "idle" and never reconnects (issue #52). The
+// client renders from L1 for speed, then patches the result with this.
+app.get('/api/repos/:name/statuses', (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found under REPOS_ROOT' });
+  const numbers = String(req.query.n || '')
+    .split(',')
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isInteger(n) && n > 0);
+  const busyIssue = repoBusyIssueNumber(repo.name);
+  res.json({
+    repo: repo.name,
+    statuses: numbers.length ? store.getStatuses(repo.name, numbers) : {},
+    activeWorkIssues: busyIssue != null ? [busyIssue] : [],
+  });
 });
 
 // Full stored record for one issue (conversation, PR link, etc.).
@@ -556,15 +699,29 @@ app.get('/api/repos/:name/issues/:n/prs', async (req, res) => {
     // Manual refresh always bypasses the whole-repo PR cache — unlike the
     // automatic discovery on repo expand, this is an explicit "check again now".
     const prs = await gh.findPrsForIssue(repo.ownerRepo, n, { force: true });
+    const headCommits = await gh.listPrHeadCommits(repo.ownerRepo, { force: true });
+    const { prs: allPrs } = await gh.listAllPrs(repo.ownerRepo, { force: true });
     for (const p of prs) {
+      const head = headCommits[String(p.number)] || null;
       store.upsertPr(repo.name, n, {
         prNumber: p.number,
         prUrl: p.url,
         title: p.title,
         createdAt: p.createdAt,
         source: 'gh',
+        state: p.state,
+        headRefName: p.headRefName || (head && head.headRefName) || null,
+        headCommit: head
+          ? { sha: head.sha, abbrev: head.abbrev, committedDate: head.committedDate, headline: head.headline, url: head.url }
+          : undefined,
       });
     }
+    // An explicit "check again now" is also the user's manual way to sweep
+    // closed PRs out of this issue's pipeline — including ones cloud-copilot
+    // created itself, which the body-match scan above may not return.
+    const stateByNumber = {};
+    for (const p of allPrs) stateByNumber[String(p.number)] = p.state;
+    store.pruneClosedPrs(repo.name, n, store.refreshPrStates(repo.name, n, stateByNumber));
     const record = store.getRecord(repo.name, n);
     res.json({ prs: store.prsArray(record) });
   } catch (err) {
@@ -573,7 +730,7 @@ app.get('/api/repos/:name/issues/:n/prs', async (req, res) => {
 });
 
 // Dismiss/hide an issue from the dashboard. Cancels any in-flight jobs tied to
-// it (work + every PR's deploy), then clears its tracked state and remembers
+// it (work + every PR's deploy/merge), then clears its tracked state and remembers
 // the dismissal so it doesn't reappear on the next issue-list refresh/poll.
 // This never touches the issue on GitHub itself.
 app.post('/api/repos/:name/issues/:n/hide', (req, res) => {
@@ -587,10 +744,44 @@ app.post('/api/repos/:name/issues/:n/hide', (req, res) => {
   if (jobs.cancelJob(`${repo.name}#${n}:work`)) cancelledJobs.push('work');
   for (const pr of Object.values(record.prs || {})) {
     if (jobs.cancelJob(`${repo.name}#${n}:deploy:${pr.prNumber}`)) cancelledJobs.push(`deploy:${pr.prNumber}`);
+    if (jobs.cancelJob(`${repo.name}#${n}:merge:${pr.prNumber}`)) cancelledJobs.push(`merge:${pr.prNumber}`);
   }
 
   store.dismissIssue(repo.name, n);
   res.json({ ok: true, cancelledJobs });
+});
+
+// PERMANENTLY delete an issue on GitHub. Unlike /hide above, this really does
+// destroy the issue upstream (`gh issue delete --yes`) and cannot be undone.
+// Order matters: cancel in-flight jobs first, then delete on GitHub, and only
+// clear local state once GitHub confirmed the deletion — if `gh` fails (most
+// commonly: no admin permission) the issue stays fully intact locally.
+app.delete('/api/repos/:name/issues/:n', async (req, res) => {
+  const repo = resolveRepo(req.params.name);
+  if (!repo) return res.status(404).json({ error: 'repo not found' });
+  if (!repo.github) return res.status(400).json({ error: 'repo has no github.com remote' });
+  const n = Number(req.params.n);
+  if (!Number.isInteger(n) || n <= 0) return res.status(400).json({ error: 'invalid issue number' });
+
+  const record = store.getRecord(repo.name, n);
+  const cancelledJobs = [];
+  if (jobs.cancelJob(`${repo.name}#${n}:work`)) cancelledJobs.push('work');
+  for (const pr of Object.values(record.prs || {})) {
+    if (jobs.cancelJob(`${repo.name}#${n}:deploy:${pr.prNumber}`)) cancelledJobs.push(`deploy:${pr.prNumber}`);
+  }
+
+  try {
+    await gh.deleteIssue(repo.ownerRepo, n);
+  } catch (err) {
+    const detail = String(err.stderr || err.message || '').trim();
+    return res.status(502).json({
+      error: `gh issue delete failed: ${detail || 'unknown error'}`,
+      cancelledJobs,
+    });
+  }
+
+  store.dismissIssue(repo.name, n);
+  res.json({ ok: true, deleted: true, cancelledJobs });
 });
 
 // ---------------------------------------------------------------------------
@@ -706,7 +897,14 @@ app.post('/api/repos/:name/preissues/:id/chat', async (req, res) => {
     bin: COPILOT_BIN,
     args,
     cwd: repo.path,
-    meta: { action: 'preissue-chat', id, model },
+    meta: {
+      action: 'preissue-chat',
+      id,
+      model,
+      repo: repo.name,
+      chatTitle: store.titleFromMessage(pre.text),
+      subject: store.titleFromMessage(message),
+    },
     onSession: (sid) => store.setPreIssueSession(repo.name, id, sid),
     onDone: async (j) => {
       const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
@@ -806,7 +1004,13 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
     bin: COPILOT_BIN,
     args,
     cwd: repo.path,
-    meta: { action: 'work' },
+    meta: {
+      action: 'work',
+      repo: repo.name,
+      issueNumber: n,
+      subject: cachedIssueTitle(repo, n) || `issue #${n}`,
+      sequence: nextCreatePrSequence(repo.name),
+    },
     onSession: (id) =>
       store.updateRecord(repo.name, n, (r) => {
         r.work.sessionId = id;
@@ -841,10 +1045,30 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
       const success = fromTranscript ? Boolean(prUrl) : j.exitCode === 0 && Boolean(prUrl);
       const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
 
+      // Housekeeping BEFORE the record is written, so the cleanup notes end up
+      // in the stored transcript too. The agent may have implemented the issue
+      // inside a linked worktree it created (and even left locked); once the
+      // branch is pushed that directory only stands between Deploy and its
+      // branch. Removing it here — while this job still holds the repo lock —
+      // means Deploy never has to fight for the checkout. Anything holding
+      // uncommitted or unpushed work is left alone.
+      let headBranch = null;
+      if (prNumber) {
+        try {
+          const prInfo = await gh.getPr(repo.ownerRepo, prNumber);
+          headBranch = (prInfo && prInfo.headRefName) || null;
+        } catch {
+          /* branch stays null — the sweep below still covers it */
+        }
+      }
+      const cleanup = worktrees.cleanupAfterRun(repo.path, headBranch, { skipPaths: [j.cwd] });
+      const cleanupText = worktrees.formatCleanup(cleanup);
+      const conversation = cleanupText ? `${j.conversation}\n${cleanupText}\n` : j.conversation;
+
       store.updateRecord(repo.name, n, (r) => {
         r.work.status = status;
         r.work.exitCode = j.exitCode;
-        r.work.conversation = j.conversation;
+        r.work.conversation = conversation;
         r.work.prUrl = prUrl;
         r.work.prNumber = prNumber;
         r.work.sessionId = j.sessionId || r.work.sessionId;
@@ -858,6 +1082,8 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
           prUrl,
           createdAt: new Date().toISOString(),
           source: 'work',
+          state: 'OPEN',
+          headRefName: headBranch || undefined,
         });
       }
 
@@ -867,6 +1093,7 @@ app.post('/api/repos/:name/issues/:n/work', async (req, res) => {
         prUrl,
         prNumber,
         sessionId: j.sessionId,
+        worktreeCleanup: cleanup,
       };
     },
   });
@@ -897,17 +1124,19 @@ function sendSseBlocked(res, payload) {
   res.end();
 }
 
-// Builds the "What to Test" text TestFlight testers see, from the PR title
-// (falling back to a generic version/build string). Strips characters that
-// could break out of the single-quoted shell argument the agent is told to
-// pass to `fastlane beta` — the PR title comes from GitHub and is never
-// trusted as shell-safe.
-function buildChangelog(pr, issueNumber, version, buildNumber) {
-  const raw = (pr && pr.title) || '';
-  const cleaned = raw.replace(/['"`$\\]/g, '').replace(/\s+/g, ' ').trim();
-  const suffix = issueNumber ? ` (closes #${issueNumber})` : '';
-  const text = cleaned ? `${cleaned}${suffix}` : `v${version || '1.0'} (build ${buildNumber})`;
-  return text.slice(0, 500); // TestFlight "What to Test" is short; keep it well under Apple's limit
+// A PR closed without being merged has, in practice, no branch left: GitHub
+// deletes it, so the very first `git fetch origin <branch>` of any pipeline
+// action dies with an opaque "Command failed". Detect it up front and say so
+// in words, and record the state so the row also disappears from the pipeline.
+// Returns a message when the action must be refused, or null to proceed.
+function refuseIfPrClosed(repo, n, prNumber, pr) {
+  if (!pr || pr.state !== 'CLOSED') return null;
+  store.upsertPr(repo.name, n, { prNumber, state: 'CLOSED' });
+  return (
+    `Blocked: PR #${prNumber} is closed without having been merged, so its branch ` +
+    `("${pr.headRefName || 'unknown'}") no longer exists on GitHub. There is nothing to run against. ` +
+    `Reopen the PR, or start a new one for this issue.`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1010,7 +1239,7 @@ function failedPreflight(repo, n, prNumber, j) {
 }
 
 function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
-  gh.getPr(repo.ownerRepo, prNumber).then((pr) => {
+  gh.getPr(repo.ownerRepo, prNumber).then(async (pr) => {
     if (!pr || !pr.headRefName) {
       const message = `Could not resolve the branch for PR #${prNumber} via gh.`;
       store.updateDeploy(repo.name, n, prNumber, (d) => {
@@ -1021,28 +1250,41 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
       return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
     }
 
+    const closed = refuseIfPrClosed(repo, n, prNumber, pr);
+    if (closed) return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'blocked', message: closed });
+
     // Build number / version are computed HERE, deterministically, from the
     // exact commit being shipped — never inferred afterward from the agent's
     // free-form report. build = commit count (same source `fastlane beta`
     // itself defaults to); version = the Xcode project's own MARKETING_VERSION.
     // Assigned by prepareDeployPhase(), which runs either immediately (clean
     // tree) or after the salvage phase — and is read back in onDone.
-    let buildNumber, version, changelog;
+    let buildNumber, version, changelog, workCwd;
 
-    // Checks out the PR branch and builds the deploy phase spec. Throws with
+    // Checks out the PR branch — releasing a linked worktree that still holds
+    // it when that can be done without losing work, otherwise deploying from
+    // inside that worktree — and builds the deploy phase spec. Throws with
     // git's own stderr on failure.
-    const prepareDeployPhase = () => {
+    const prepareDeployPhase = async () => {
       // Argument-array form — branch names come from GitHub and are never
       // interpreted by a shell.
-      git(repo.path, ['fetch', 'origin', pr.headRefName], 30000);
-      git(repo.path, ['checkout', pr.headRefName], 15000);
-      buildNumber = Number(git(repo.path, ['rev-list', '--count', 'HEAD'], 15000));
-      version = repoConfig.readMarketingVersion(repo.path); // null if not found — fastlane then uses its own default
+      workCwd = checkoutBranchCwd(repo.path, pr.headRefName);
+      buildNumber = Number(git(workCwd, ['rev-list', '--count', 'HEAD'], 15000));
+      version = repoConfig.readMarketingVersion(workCwd); // null if not found — fastlane then uses its own default
 
       const versionArg = version ? ` version:${version}` : '';
-      // "What to Test" text testers see in TestFlight — derived from the PR
-      // title so builds are self-describing instead of shipping with no notes.
-      changelog = buildChangelog(pr, n, version, buildNumber);
+      // "What to Test" text testers see in TestFlight — one short Chinese
+      // sentence derived from the PR title, so builds are self-describing
+      // instead of shipping the raw (often English, prefixed, issue-tagged)
+      // title. Best-effort translation with a deterministic fallback; see
+      // lib/changelog.js. Awaited before the deploy phase starts so the pinned
+      // text is in the prompt.
+      changelog = await changelogLib.resolveChangelog({
+        pr,
+        version,
+        buildNumber,
+        copilotBin: COPILOT_BIN,
+      });
       const prompt =
         `The branch for PR #${prNumber} is already checked out. Deploy the current ` +
         `${repo.name} app to TestFlight using the testflight-deploy skill, running ` +
@@ -1059,7 +1301,7 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
       return {
         bin: COPILOT_BIN,
         args: ['-p', prompt, '--allow-all', ...modelFlags()],
-        cwd: repo.path,
+        cwd: workCwd,
         phase: 'deploy',
       };
     };
@@ -1071,7 +1313,7 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
     let firstPhase;
     if (!salvage) {
       try {
-        firstPhase = prepareDeployPhase();
+        firstPhase = await prepareDeployPhase();
         reachedDeploy = true;
       } catch (err) {
         const message = checkoutFailureMessage(pr.headRefName, err);
@@ -1086,12 +1328,19 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
 
     const job = jobs.startJob(key, {
       ...(salvage || firstPhase),
-      meta: { action: 'deploy', prNumber, phase: salvage ? 'salvage' : 'deploy' },
+      meta: {
+        action: 'deploy',
+        prNumber,
+        repo: repo.name,
+        issueNumber: n,
+        subject: pr.title || `PR #${prNumber}`,
+        phase: salvage ? 'salvage' : 'deploy',
+      },
       nextPhase: salvage
         ? async (j, code) => {
             assertSalvaged(code, repo);
             jobs.note(j, `\n[preflight] working tree clean — checking out ${pr.headRefName} and deploying…\n`);
-            const spec = prepareDeployPhase();
+            const spec = await prepareDeployPhase();
             reachedDeploy = true;
             return spec;
           }
@@ -1171,27 +1420,34 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
       return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
     }
 
+    const closed = refuseIfPrClosed(repo, n, prNumber, pr);
+    if (closed) return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'blocked', message: closed });
+
     // Argument-array form (never a shell string) so the branch name — which
     // comes from GitHub and could in principle contain shell metacharacters —
-    // is never interpreted by a shell. Throws with git's stderr on failure.
+    // is never interpreted by a shell. Releases a linked worktree still holding
+    // the branch when that loses no work, otherwise deploys from inside it.
+    // Throws with git's stderr on failure; sets the directory to deploy from.
+    let workCwd;
     const checkout = () => {
-      git(repo.path, ['fetch', 'origin', pr.headRefName], 30000);
-      git(repo.path, ['checkout', pr.headRefName], 15000);
+      workCwd = checkoutBranchCwd(repo.path, pr.headRefName);
     };
 
     // The deploy command itself is trusted repo-local config (from
     // `.cloud-copilot.json`, authored by whoever owns the repo under
     // REPOS_ROOT) — not attacker-controlled input, so a shell string is fine
     // here (same trust boundary as REPOS_ROOT itself).
-    const deployPhase = { bin: 'bash', args: ['-lc', command], cwd: repo.path, phase: 'deploy' };
+    const deployPhaseSpec = () => ({ bin: 'bash', args: ['-lc', command], cwd: workCwd, phase: 'deploy' });
 
     // Dirty tree? Salvage it into an issue + PR first (phase 1), then check out
     // and deploy (phase 2). Clean tree? Check out and deploy immediately.
     const salvage = salvagePhaseSpec(repo, prNumber);
     let reachedDeploy = false;
+    let firstPhase;
     if (!salvage) {
       try {
         checkout();
+        firstPhase = deployPhaseSpec();
         reachedDeploy = true;
       } catch (err) {
         const message = checkoutFailureMessage(pr.headRefName, err);
@@ -1205,15 +1461,22 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
     }
 
     const job = jobs.startJob(key, {
-      ...(salvage || deployPhase),
-      meta: { action: 'deploy', prNumber, phase: salvage ? 'salvage' : 'deploy' },
+      ...(salvage || firstPhase),
+      meta: {
+        action: 'deploy',
+        prNumber,
+        repo: repo.name,
+        issueNumber: n,
+        subject: pr.title || `PR #${prNumber}`,
+        phase: salvage ? 'salvage' : 'deploy',
+      },
       nextPhase: salvage
         ? async (j, code) => {
             assertSalvaged(code, repo);
             jobs.note(j, `\n[preflight] working tree clean — checking out ${pr.headRefName} and deploying…\n`);
             checkout();
             reachedDeploy = true;
-            return deployPhase;
+            return deployPhaseSpec();
           }
         : undefined,
       onDone: async (j) => {
@@ -1296,7 +1559,8 @@ app.post('/api/repos/:name/issues/:n/deploy/:pr/cancel', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Action: Merge a specific PR (gh pr merge --merge --delete-branch)
+// Action: Merge a specific PR. A failed gh merge automatically starts Copilot
+// to investigate, resolve branch conflicts, push, and retry the merge.
 // ---------------------------------------------------------------------------
 
 app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
@@ -1330,30 +1594,112 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
     }
   }
 
+  const busyKey = findOtherRepoBusyKey(repo.name, key);
+  if (busyKey) {
+    const message = `Blocked: ${describeBusyKey(repo.name, busyKey)}. Only one working-tree action per repo at a time.`;
+    return sendSseBlocked(res, { action: 'merge', prNumber, status: 'blocked', message });
+  }
+
   store.updateMerge(repo.name, n, prNumber, (m) => {
     m.status = 'merging';
     m.forced = force;
     m.startedAt = new Date().toISOString();
     m.finishedAt = null;
     m.conversation = '';
+    m.sessionId = null;
+    m.recoveryAttempted = false;
+    m.conflictResolved = false;
+    m.recoveryMessage = null;
   });
 
-  const baseRefName = await gh.getPr(repo.ownerRepo, prNumber).then((pr) => pr?.baseRefName || null);
-
   const job = jobs.startJob(key, {
-    bin: gh.GH_BIN,
-    args: ['pr', 'merge', String(prNumber), '--repo', repo.ownerRepo, '--merge', '--delete-branch'],
+    bin: process.execPath,
+    args: [
+      path.join(__dirname, 'lib', 'mergeRunner.js'),
+      gh.GH_BIN,
+      COPILOT_BIN,
+      repo.ownerRepo,
+      String(prNumber),
+      resolveModel(),
+    ],
     cwd: repo.path,
-    meta: { action: 'merge', prNumber },
+    meta: {
+      action: 'merge',
+      prNumber,
+      repo: repo.name,
+      issueNumber: n,
+      subject: cachedPrTitle(repo, prNumber) || `PR #${prNumber}`,
+    },
+    onSession: (id) =>
+      store.updateMerge(repo.name, n, prNumber, (m) => {
+        m.sessionId = id;
+      }),
+    onProgress: (j) =>
+      store.updateMerge(repo.name, n, prNumber, (m) => {
+        m.conversation = j.conversation;
+        if (j.sessionId) m.sessionId = j.sessionId;
+      }),
     onDone: async (j) => {
-      const success = j.exitCode === 0;
-      const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
+      const mergedAfterCancellation = j.cancelled
+        ? await gh.getPr(repo.ownerRepo, prNumber).then((pr) => pr?.state === 'MERGED')
+        : false;
+      const success = j.exitCode === 0 || mergedAfterCancellation;
+      const status = success ? 'success' : j.cancelled ? 'aborted' : 'failed';
+      const markerMatches = [
+        ...j.conversation.matchAll(/\[cloud-copilot merge recovery\] (\{[^\n]+\})/g),
+      ];
+      let recovery = {};
+      if (markerMatches.length) {
+        try {
+          recovery = JSON.parse(markerMatches.at(-1)[1]);
+        } catch {
+          recovery = {};
+        }
+      }
+      const recoveryAttempted = Boolean(recovery.attempted);
+      const conflictResolved = Boolean(
+        success && (recovery.conflictResolved || (mergedAfterCancellation && recovery.conflictDetected)),
+      );
+      const baseRefName =
+        typeof recovery.baseRefName === 'string' && recovery.baseRefName ? recovery.baseRefName : null;
+      const recoveryMessage = conflictResolved
+        ? 'Merged after Copilot resolved conflicts'
+        : recoveryAttempted && success
+          ? 'Merged after Copilot recovery'
+          : recoveryAttempted
+            ? 'Copilot recovery did not complete the merge'
+            : null;
       store.updateMerge(repo.name, n, prNumber, (m) => {
         m.status = status;
         m.exitCode = j.exitCode;
         m.conversation = j.conversation;
+        m.sessionId = j.sessionId;
+        m.recoveryAttempted = recoveryAttempted;
+        m.conflictResolved = conflictResolved;
+        m.recoveryMessage = recoveryMessage;
         m.finishedAt = new Date().toISOString();
       });
+      let issueCleanup = null;
+      if (success) {
+        // GitHub only auto-closes the issue when the PR body carries `Closes #N`
+        // and targets the default branch, and it never closes the other PRs
+        // opened for the same issue — do both ourselves. Best-effort: a cleanup
+        // failure must not flip an already successful merge to 'failed'.
+        try {
+          const record = store.getRecord(repo.name, n);
+          issueCleanup = await cleanupAfterMerge({
+            ownerRepo: repo.ownerRepo,
+            issueNumber: n,
+            mergedPrNumber: prNumber,
+            prNumbers: Object.keys(record.prs || {}).map(Number),
+          });
+        } catch (error) {
+          issueCleanup = { errors: [error.message], message: `Post-merge cleanup failed: ${error.message}` };
+        }
+        store.updateMerge(repo.name, n, prNumber, (m) => {
+          m.cleanup = issueCleanup;
+        });
+      }
       if (success && baseRefName) {
         // Best-effort: bring the local clone back to the base branch, like the
         // manual `git checkout main && git pull` done after a manual merge.
@@ -1368,7 +1714,40 @@ app.post('/api/repos/:name/issues/:n/merge/:pr', async (req, res) => {
           /* best-effort only — merge itself already succeeded */
         }
       }
-      return { action: 'merge', prNumber, status };
+      // A merged PR's worktree is dead weight, and GitHub usually deleted its
+      // remote branch — so origin/<base> is what proves its commits are safe.
+      let worktreeCleanup = [];
+      if (success) {
+        const base = baseRefName || defaultBranchOf(repo.path);
+        let mergedBranch = null;
+        try {
+          const prInfo = await gh.getPr(repo.ownerRepo, prNumber);
+          mergedBranch = (prInfo && prInfo.headRefName) || null;
+        } catch {
+          /* the sweep below still covers it */
+        }
+        worktreeCleanup = worktrees.cleanupAfterRun(repo.path, mergedBranch, {
+          skipPaths: [j.cwd],
+          fallbackRef: `origin/${base}`,
+        });
+        const cleanupText = worktrees.formatCleanup(worktreeCleanup);
+        if (cleanupText) {
+          store.updateMerge(repo.name, n, prNumber, (m) => {
+            m.conversation = `${m.conversation}\n${cleanupText}\n`;
+          });
+        }
+      }
+      return {
+        action: 'merge',
+        prNumber,
+        status,
+        recoveryAttempted,
+        conflictResolved,
+        recoveryMessage,
+        cleanup: issueCleanup,
+        cleanupMessage: (issueCleanup && issueCleanup.message) || null,
+        worktreeCleanup,
+      };
     },
   });
 
@@ -1442,9 +1821,13 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
     const message2 = `Could not resolve the branch for PR #${prNumber} via gh.`;
     return sendSseBlocked(res, { action: 'chat', prNumber, mode, status: 'failed', message: message2 });
   }
+  const closed = refuseIfPrClosed(repo, n, prNumber, prInfo);
+  if (closed) {
+    return sendSseBlocked(res, { action: 'chat', prNumber, mode, status: 'blocked', message: closed });
+  }
+  let workCwd;
   try {
-    execFileSync('git', ['fetch', 'origin', prInfo.headRefName], { cwd: repo.path, stdio: 'ignore', timeout: 30000 });
-    execFileSync('git', ['checkout', prInfo.headRefName], { cwd: repo.path, stdio: 'ignore', timeout: 15000 });
+    workCwd = checkoutBranchCwd(repo.path, prInfo.headRefName);
   } catch (err) {
     const message2 = `Failed to check out branch "${prInfo.headRefName}": ${err.message}`;
     return sendSseBlocked(res, { action: 'chat', prNumber, mode, status: 'failed', message: message2 });
@@ -1480,8 +1863,16 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
   const job = jobs.startJob(key, {
     bin: COPILOT_BIN,
     args,
-    cwd: repo.path,
-    meta: { action: 'chat', prNumber, mode, model },
+    cwd: workCwd,
+    meta: {
+      action: 'chat',
+      prNumber,
+      mode,
+      model,
+      repo: repo.name,
+      issueNumber: n,
+      chatTitle: store.titleFromMessage(message),
+    },
     onSession: (id) =>
       store.updateRecord(repo.name, n, (r) => {
         const pr2 = r.prs[prNumber];
@@ -1637,7 +2028,16 @@ app.post('/api/admin/chat', (req, res) => {
     bin: COPILOT_BIN,
     args,
     cwd,
-    meta: { action: 'admin', turnId, repo: repoName || null, model },
+    meta: {
+      action: 'admin',
+      turnId,
+      repo: repoName || null,
+      model,
+      sessionId,
+      chatTitle: store.titleFromMessage(
+        (sessionId && store.getAdminChat(sessionId)?.title) || message,
+      ),
+    },
     onSession: (sid) => store.updateAdminTurnProgress(turnId, { sessionId: sid }),
     onProgress: (j) => store.updateAdminTurnProgress(turnId, { assistantText: j.conversation, sessionId: j.sessionId }),
     onDone: async (j) => {
@@ -1716,10 +2116,70 @@ app.delete('/api/admin/chats/:sessionId', (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------------------------------------------------------------------------
+// Hourly background sync — keeps the L2 cache warm so the dashboard is never
+// showing data older than an hour, even if nobody opened the page.
+// ---------------------------------------------------------------------------
+
+const BG_SYNC_INTERVAL_MS = Number(process.env.GH_SYNC_INTERVAL_MS || 60 * 60 * 1000);
+// Delay the first pass so a restart doesn't fire N `gh` calls while the user is
+// still loading the page they just restarted for.
+const BG_SYNC_FIRST_DELAY_MS = Number(process.env.GH_SYNC_FIRST_DELAY_MS || 60 * 1000);
+
+let nextBackgroundSync = Date.now() + BG_SYNC_FIRST_DELAY_MS;
+function nextBackgroundSyncAt() {
+  return nextBackgroundSync;
+}
+
+// Repos are synced one at a time, not in parallel: four concurrent `gh`
+// processes on a laptop is a lot of noise for a background job nobody is
+// waiting on. A repo with a running job is skipped and picked up next hour.
+async function runBackgroundSync() {
+  let repos;
+  try {
+    repos = gh.listRepos(REPOS_ROOT).filter((r) => r.github);
+  } catch (err) {
+    console.warn(`[gh-sync] could not enumerate repos: ${err.message}`);
+    return;
+  }
+  let synced = 0;
+  let skipped = 0;
+  for (const repo of repos) {
+    if (findOtherRepoBusyKey(repo.name, null)) {
+      skipped += 1;
+      continue;
+    }
+    try {
+      await syncRepoFromGitHub(repo, { force: true });
+      synced += 1;
+    } catch (err) {
+      // Leave the previous (stale) cache entry in place — stale data beats no
+      // data, and the next pass will try again.
+      console.warn(`[gh-sync] ${repo.name}: ${err.message}`);
+    }
+  }
+  console.log(`[gh-sync] refreshed ${synced}/${repos.length} repo(s)${skipped ? `, skipped ${skipped} busy` : ''}`);
+}
+
+function scheduleBackgroundSync(delayMs) {
+  nextBackgroundSync = Date.now() + delayMs;
+  setTimeout(async () => {
+    await runBackgroundSync();
+    scheduleBackgroundSync(BG_SYNC_INTERVAL_MS);
+  }, delayMs).unref();
+}
+
 app.listen(PORT, HOST, () => {
   console.log(`cloud-copilot running at http://${HOST}:${PORT}`);
   console.log(`Authorized repos root: ${REPOS_ROOT}`);
   console.log(`Copilot binary: ${COPILOT_BIN}`);
+  const cacheInfo = gh.cache.load();
+  console.log(
+    cacheInfo.restored
+      ? `GitHub cache: restored ${cacheInfo.repos} repo(s) from ${gh.cache.CACHE_FILE}`
+      : 'GitHub cache: starting cold',
+  );
+  scheduleBackgroundSync(BG_SYNC_FIRST_DELAY_MS);
   // Recover any admin turn that was still in-flight when the previous
   // process died (e.g. a chat turn triggered its own restart mid-reply) so
   // it shows up as an "interrupted" turn instead of silently vanishing.

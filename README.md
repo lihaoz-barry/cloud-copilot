@@ -117,6 +117,33 @@ every workflow bar starts at the same x whichever icons a line has.
   subprocesses die too; the run ends in an `aborted` state you can re-run.
 - **Re-deploy**: clicking Deploy on a finished/failed/aborted PR asks to confirm
   before starting a new run.
+- **Worktrees are cleaned up after every run, not fought over at Deploy time** —
+  an agent session often implements an issue inside a `git worktree` it creates
+  itself (e.g. under `.claude/worktrees/`) and leaves behind, sometimes locked,
+  still holding the PR's branch. Git then refuses to check that branch out
+  anywhere else (`already used by worktree`), which is exactly what Deploy needs
+  to do. So **Create PR** and a successful **Merge** now sweep those directories
+  as soon as they finish — while they still hold the repo lock — and Deploy/PR
+  chat keep the same release step as a fallback. The rule is always "never delete
+  work": a worktree is unlocked, removed and pruned only when it is clean **and**
+  every commit it holds already exists on `origin/<branch>` (after a merge,
+  `origin/<base>` counts too, since GitHub usually deleted the branch). Anything
+  with uncommitted changes, unpushed commits, a detached HEAD, or no remote to
+  compare against is left untouched — and if Deploy still finds its branch held
+  by such a worktree, it runs inside that directory instead of failing. What was
+  removed or kept, and why, is appended to the run's transcript as
+  `[worktree] released … / kept … — reason`.
+- **Closed PRs drop out of the local pipeline** — a PR closed *without* being
+  merged has no branch left on GitHub, so Deploy/Merge/chat on it could only ever
+  die on `git fetch` with an opaque `Command failed`. Each sync records every
+  tracked PR's GitHub state (including ones cloud-copilot created itself, which
+  the per-issue body match may not return), and `CLOSED` rows stop being listed —
+  `↻ PRs` is the manual sweep. **`MERGED` is never hidden**: that is the
+  pipeline's successful end state. A closed PR that was never deployed, merged or
+  chatted is forgotten entirely; one that *does* carry local history keeps its
+  record (just hidden) so the builds overview never loses past attempts. If you
+  click Deploy on a PR that closed since the page loaded, you get a plain-language
+  `Blocked: PR #N is closed…` instead of a checkout failure.
 - **Merge is gated on Deploy succeeding** — the Merge cell stays a dimmed, locked
   `🔒 Merge` until then. You can still click it early; it asks you to confirm a
   **force-merge** that skips the gate.
@@ -711,6 +738,7 @@ cloud-copilot/
 │   ├── notifier.js     # task-aware ntfy pushes when a job reaches a terminal state
 │   ├── runner.js       # spawn copilot, stream SSE, capture transcript + session id
 │   ├── mergeRunner.js  # gh pr merge + verify, with automatic Copilot conflict recovery
+│   ├── worktrees.js    # linked-worktree housekeeping: release/sweep without ever losing work
 │   └── repoConfig.js   # loads a repo's .cloud-copilot.json (or auto-detects iOS)
 ├── public/
 │   ├── index.html      # repos → issues → Create PR / Deploy / Merge pipeline console

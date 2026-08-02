@@ -381,6 +381,24 @@
     .q-item .qs { flex: none; font-size: .7rem; padding: 1px 6px; border-radius: 999px; border: 1px solid #8886; opacity: .8; }
     .q-item.running .qs { border-color: #16a34a99; color: #16a34a; }
 
+    /* Queue entries / notifications that point at a card you can jump to. */
+    .q-item.linked, .notif-item.linked { cursor: pointer; }
+    .q-item.linked:hover, .notif-item.linked:hover { border-color: #2563eb99; background: #2563eb14; }
+    .jump { opacity: .5; font-size: .72rem; margin-left: 5px; }
+    .q-item.linked:hover .jump, .notif-item.linked:hover .jump { opacity: 1; color: #2563eb; }
+    .q-item.linked:focus-visible, .notif-item.linked:focus-visible { outline: 2px solid #2563eb; outline-offset: 1px; }
+
+    /* Ring the card a task link just scrolled to, so it's obvious which one
+       out of a long list was meant. */
+    @keyframes cc-flash {
+      0%, 100% { box-shadow: 0 0 0 0 #2563eb00; }
+      15%, 60% { box-shadow: 0 0 0 3px #2563eb99; }
+    }
+    .flash-target { animation: cc-flash 2.4s ease-out; border-radius: 12px; }
+    @media (prefers-reduced-motion: reduce) {
+      .flash-target { animation: none; box-shadow: 0 0 0 3px #2563eb99; }
+    }
+
     /* ---- Admin terminal page --------------------------------------------- */
     #adminView { max-width: 860px; margin: 0 auto; padding: 8px 14px 90px; }
     .admin-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
@@ -878,13 +896,27 @@ function renderRepo(repo) {
     <div class="repo-body"><div class="muted" style="padding:8px 4px">Click to load issues…</div></div>`;
   const head = el.querySelector('.repo-head');
   const body = el.querySelector('.repo-body');
-  let loaded = false;
-  head.addEventListener('click', async () => {
+  // One shared in-flight promise rather than a `loaded` boolean: a deep link
+  // and a click on the header can both ask for the issues at the same time,
+  // and a bare flag would let the second caller resolve immediately while the
+  // list is still empty — so the link would find no card to scroll to.
+  let loading = null;
+  const ensureIssues = () => {
+    if (!repo.github) return Promise.resolve();
+    if (!loading) loading = loadIssues(repo, body).catch(() => {});
+    return loading;
+  };
+  // Expand + lazily load this repo's issues, resolving only once they are in
+  // the DOM. Exposed on the element so a deep link (#/issue/<repo>/<n>) can
+  // open the right repo and then scroll to the issue that just finished
+  // loading, instead of racing an empty card.
+  el.__ensureOpen = async () => {
+    el.classList.add('open');
+    await ensureIssues();
+  };
+  head.addEventListener('click', () => {
     el.classList.toggle('open');
-    if (el.classList.contains('open') && !loaded && repo.github) {
-      loaded = true;
-      await loadIssues(repo, body);
-    }
+    if (el.classList.contains('open')) ensureIssues();
   });
   if (!repo.github) {
     body.innerHTML = '<div class="muted" style="padding:8px 4px">No github.com remote — issues unavailable.</div>';
@@ -960,6 +992,10 @@ function createRepoCtx(initialBusyIssue) {
 function renderIssue(repo, issue, repoCtx, opts = {}) {
   const el = document.createElement('div');
   el.className = 'issue';
+  // Scroll target for task/notification deep links. A data attribute rather
+  // than an id because the same issue can be on screen twice (pinned section
+  // + repo list) and duplicate ids would make the anchor ambiguous.
+  el.dataset.issueAnchor = issueAnchor(repo.name, issue.number);
   const labels = (issue.labels || [])
     .map((l) => `<span class="label">${escape(l)}</span>`)
     .join('');
@@ -1780,6 +1816,12 @@ function escape(s) {
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// escape() leaves quotes alone, which is fine for text nodes but not for a
+// value interpolated into a double-quoted attribute (e.g. data-href).
+function escapeAttr(s) {
+  return escape(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 // ---- Image attachments: shared drag-and-drop + click-to-upload picker ------
 // Used by both the Admin Terminal composer and each per-PR chat panel. Keeps
 // a small in-memory list of { name, dataUrl, mimeType } images for the turn
@@ -1949,8 +1991,169 @@ function setTab(tab) {
   if (tab === 'testflight') loadTestflightBuilds();
 }
 document.querySelectorAll('.nav-tab').forEach((b) => {
-  b.addEventListener('click', () => setTab(b.dataset.tab));
+  b.addEventListener('click', () => selectTab(b.dataset.tab));
 });
+
+// Explicitly clicking a tab must beat a leftover route hash. Without this,
+// following an Admin task link parks `#/admin` in the URL and every later
+// click on Home is immediately bounced back to Admin by route(), leaving the
+// Home tab unusable until the hash changes some other way.
+function selectTab(tab) {
+  const owner = tabForHash();
+  if (owner && owner !== tab) {
+    history.replaceState(null, '', location.pathname + location.search);
+  }
+  setTab(tab);
+}
+
+// Which tab a route hash belongs to, or null when the hash isn't a route.
+function tabForHash() {
+  if (hashPath() === '#/admin') return 'admin';
+  if (parseHash() || parsePreIssuesHash() || parsePreIssueDetailHash() || parseIssueHash()) return 'home';
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Task deep links — jump from a queue entry / notification to the thing it is
+// actually about.
+//
+// Every running or queued action is *somewhere* in the UI: an issue card on
+// Home, a PR row inside that card, the PR detail page's chat, a PreIssue, or
+// the Admin terminal. Without a link the user has to remember which repo they
+// started a task from and hunt for it by hand — the whole point of the queue
+// is that they walked away while it ran. So each entry becomes a real
+// hyperlink (a hash route, therefore shareable/reloadable/back-navigable)
+// that lands on the exact card and flashes it.
+// ---------------------------------------------------------------------------
+
+const issueAnchor = (repoName, n) => `${repoName}#${n}`;
+
+/**
+ * Hash route for a queue entry or notification. Both carry the same shape
+ * ({ action, repo, issueNumber, prNumber, preIssueId/id, turnId }) — queue
+ * entries via `queue.submit`'s meta, notifications via the stored record.
+ * Returns null when there is nothing meaningful to point at.
+ */
+function taskHref(t) {
+  if (!t) return null;
+  const repo = t.repo;
+  const n = t.issueNumber;
+  switch (t.action) {
+    case 'admin':
+      return '#/admin';
+    case 'preissue-chat':
+      // Only `preIssueId` — a notification record's `id` is the notification's
+      // own uuid, which would build a link to a PreIssue that doesn't exist.
+      return repo && t.preIssueId
+        ? `#/preissue/${enc(repo)}/${enc(t.preIssueId)}`
+        : repo ? `#/preissues/${enc(repo)}` : null;
+    case 'chat':
+      // The PR chat lives on the PR detail page, which is already a route.
+      return repo && n && t.prNumber ? `#/pr/${enc(repo)}/${n}/${t.prNumber}` : null;
+    case 'deploy':
+    case 'merge':
+      // Deploy/Merge are stages of a PR row inside the issue card on Home,
+      // where their live chevron + log actually stream.
+      return repo && n && t.prNumber ? `#/issue/${enc(repo)}/${n}/${t.prNumber}` : null;
+    case 'work':
+      return repo && n ? `#/issue/${enc(repo)}/${n}` : null;
+    default:
+      return repo && n ? `#/issue/${enc(repo)}/${n}` : null;
+  }
+}
+
+// Briefly ring the element the user was sent to, so it's obvious which card
+// out of a long list the link meant.
+function flashTarget(el) {
+  if (!el) return;
+  // Two links flashed in quick succession must not have the first one's timer
+  // strip the class off the second target mid-animation.
+  clearTimeout(el.__flashTimer);
+  el.classList.remove('flash-target');
+  void el.offsetWidth; // restart the animation if the same target is re-picked
+  el.classList.add('flash-target');
+  el.__flashTimer = setTimeout(() => el.classList.remove('flash-target'), 2600);
+}
+
+function scrollToEl(el) {
+  if (!el) return;
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  flashTarget(el);
+}
+
+/**
+ * Home-tab deep link: expand the repo, wait for its issues to load, then
+ * scroll to the issue (and optionally the PR row inside it).
+ *
+ * The repo may be hidden by the filter menu — a link the user explicitly
+ * followed wins over the filter, so we unhide it for this visit rather than
+ * scrolling to something invisible.
+ */
+async function focusIssue(repoName, issueNumber, prNumber) {
+  if (currentTab !== 'home') setTab('home');
+  if (!window.__repos) await loadRepos();
+  const repoEl = reposEl.querySelector(`.repo[data-repo="${cssEscape(repoName)}"]`);
+  if (!repoEl) return;
+  const hid = hiddenSet();
+  if (hid.has(repoName)) {
+    hid.delete(repoName);
+    saveHidden(hid);
+    renderFilterMenu(window.__repos || []);
+    applyRepoVisibility();
+  }
+  if (repoEl.__ensureOpen) await repoEl.__ensureOpen();
+
+  // Prefer the copy in the repo list over the pinned duplicate: it's the one
+  // that owns the PR rows and the full pipeline. Scoping the lookup also keeps
+  // us off the third copy rendered inside the (now hidden) PR detail view,
+  // which can't be scrolled to.
+  const sel = `.issue[data-issue-anchor="${cssEscape(issueAnchor(repoName, issueNumber))}"]`;
+  const issueEl =
+    reposEl.querySelector(sel) ||
+    [...mainView.querySelectorAll(sel)].find((e) => e.offsetParent !== null);
+  // The issue may simply not be on the page any more (closed, or dropped by
+  // the per-issue hide list) — land on its repo rather than doing nothing at
+  // all, so the click still visibly goes somewhere.
+  if (!issueEl) return scrollToEl(repoEl);
+
+  const prEl = prNumber ? issueEl.querySelector(`.pritem[data-pr="${cssEscape(String(prNumber))}"]`) : null;
+  scrollToEl(prEl || issueEl);
+}
+
+// CSS.escape isn't available on every mobile browser this runs on.
+function cssEscape(s) {
+  const str = String(s);
+  return window.CSS && CSS.escape ? CSS.escape(str) : str.replace(/["\\]/g, '\\$&');
+}
+
+// Follow a link produced by taskHref(). Routing is hash-based, so assigning
+// the hash is enough — except when the hash is already exactly that value
+// (clicking the same task twice), where no hashchange fires and we re-run the
+// focus by hand so the flash still happens.
+function navigateToTask(href) {
+  if (!href) return;
+  if (location.hash === href) route();
+  else location.hash = href;
+}
+
+// Admin turns have no per-turn route (the terminal shows one conversation at
+// a time), so "go to the running admin task" means: open the Admin tab and
+// scroll to the newest turn, which is the one still streaming.
+function focusAdminTurn() {
+  const logEl = document.getElementById('termLog');
+  if (!logEl) return;
+  // setTab('admin') kicks off initAdminTerminal(), which fetches the stored
+  // turns — so the log is usually still empty on this tick. Poll a few frames
+  // for content instead of flashing nothing.
+  let tries = 0;
+  const tick = () => {
+    logEl.scrollTop = logEl.scrollHeight;
+    const last = logEl.lastElementChild;
+    if (last) return flashTarget(last);
+    if (++tries < 20) setTimeout(tick, 100);
+  };
+  requestAnimationFrame(tick);
+}
 
 // ---------------------------------------------------------------------------
 // Notification center + live queue view (top-left bell).
@@ -1996,18 +2199,19 @@ async function refreshNotifications() {
     return;
   }
   notifList.innerHTML = items
-    .map(
-      (n) => `
-      <div class="notif-item ${n.read ? '' : 'unread'}" data-id="${escape(n.id)}">
+    .map((n) => {
+      const href = taskHref(n);
+      return `
+      <div class="notif-item ${n.read ? '' : 'unread'} ${href ? 'linked' : ''}" data-id="${escape(n.id)}" ${href ? `data-href="${escapeAttr(href)}" role="link" tabindex="0"` : ''}>
         <span class="notif-kind">${NOTIF_ICON[n.kind] || NOTIF_ICON.info}</span>
         <div class="grow">
-          <div class="nt">${escape(n.title)}</div>
+          <div class="nt">${escape(n.title)}${href ? '<span class="jump">↗</span>' : ''}</div>
           ${n.message ? `<div class="nm">${escape(n.message)}</div>` : ''}
           <div class="nw">${escape(notifAgo(n.at))}</div>
         </div>
         <button class="nx" title="Dismiss">×</button>
-      </div>`,
-    )
+      </div>`;
+    })
     .join('');
 }
 
@@ -2025,11 +2229,14 @@ async function refreshQueue() {
     queueList.innerHTML = '<div class="notif-empty">Idle.</div>';
     return;
   }
-  const row = (e, isRunning) => `
-    <div class="q-item ${isRunning ? 'running' : ''}">
+  const row = (e, isRunning) => {
+    const href = taskHref(e);
+    return `
+    <div class="q-item ${isRunning ? 'running' : ''} ${href ? 'linked' : ''}" ${href ? `data-href="${escapeAttr(href)}" role="link" tabindex="0"` : ''}>
       <span class="qs">${isRunning ? 'running' : `#${e.position}`}</span>
-      <span class="grow">${escape(e.label)}${e.reason ? `<div class="nm">${escape(e.reason)}</div>` : ''}</span>
+      <span class="grow">${escape(e.label)}${href ? '<span class="jump">↗</span>' : ''}${e.reason ? `<div class="nm">${escape(e.reason)}</div>` : ''}</span>
     </div>`;
+  };
   queueList.innerHTML = running.map((e) => row(e, true)).join('') + waiting.map((e) => row(e, false)).join('');
 }
 
@@ -2060,7 +2267,15 @@ document.addEventListener('click', (e) => {
 
 notifList.addEventListener('click', async (e) => {
   const btn = e.target.closest('.nx');
-  if (!btn) return;
+  if (!btn) {
+    // Anywhere else on a notification = go to what it is about.
+    const linked = e.target.closest('.notif-item[data-href]');
+    if (linked) {
+      notifPanel.classList.remove('show');
+      navigateToTask(linked.dataset.href);
+    }
+    return;
+  }
   const item = btn.closest('.notif-item');
   const id = item && item.dataset.id;
   if (!id) return;
@@ -2071,6 +2286,28 @@ notifList.addEventListener('click', async (e) => {
     /* ignore */
   }
   refreshNotifications();
+});
+
+// Same for the live queue: tapping a running/queued entry takes you to the
+// card it belongs to instead of leaving you to find it yourself.
+queueList.addEventListener('click', (e) => {
+  const linked = e.target.closest('.q-item[data-href]');
+  if (!linked) return;
+  notifPanel.classList.remove('show');
+  navigateToTask(linked.dataset.href);
+});
+
+// Linked rows are `role="link" tabindex="0"` divs, so they need the keyboard
+// activation a real anchor would give for free.
+[notifList, queueList].forEach((list) => {
+  list.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const linked = e.target.closest('[data-href]');
+    if (!linked) return;
+    e.preventDefault();
+    notifPanel.classList.remove('show');
+    navigateToTask(linked.dataset.href);
+  });
 });
 
 notifClear.addEventListener('click', async () => {
@@ -2233,20 +2470,40 @@ async function onTfMerge(b, btn) {
   }
 }
 
+// location.hash is user-editable, and decodeURIComponent() throws on a
+// malformed escape (e.g. "#%zz"). route() runs on every hashchange and tab
+// switch, so an uncaught URIError there would wedge the whole UI — fall back
+// to the raw hash instead.
+function hashPath() {
+  try {
+    return decodeURIComponent(location.hash);
+  } catch {
+    return location.hash;
+  }
+}
+
 function parseHash() {
-  const m = decodeURIComponent(location.hash).match(/^#\/pr\/([^/]+)\/(\d+)\/(\d+)$/);
+  const m = hashPath().match(/^#\/pr\/([^/]+)\/(\d+)\/(\d+)$/);
   if (!m) return null;
   return { repo: m[1], issueNumber: Number(m[2]), prNumber: Number(m[3]) };
 }
 
 function parsePreIssuesHash() {
-  const m = decodeURIComponent(location.hash).match(/^#\/preissues\/([^/]+)$/);
+  const m = hashPath().match(/^#\/preissues\/([^/]+)$/);
   return m ? { repo: m[1] } : null;
 }
 
 function parsePreIssueDetailHash() {
-  const m = decodeURIComponent(location.hash).match(/^#\/preissue\/([^/]+)\/([^/]+)$/);
+  const m = hashPath().match(/^#\/preissue\/([^/]+)\/([^/]+)$/);
   return m ? { repo: m[1], id: m[2] } : null;
+}
+
+// Deep link straight at an issue card on Home — optionally at one PR row
+// inside it (`#/issue/<repo>/<n>/<pr>`), which is where Deploy/Merge stream.
+function parseIssueHash() {
+  const m = hashPath().match(/^#\/issue\/([^/]+)\/(\d+)(?:\/(\d+))?$/);
+  if (!m) return null;
+  return { repo: m[1], issueNumber: Number(m[2]), prNumber: m[3] ? Number(m[3]) : null };
 }
 
 function hideAllHomeViews() {
@@ -2257,14 +2514,32 @@ function hideAllHomeViews() {
 }
 
 function route() {
-  if (currentTab !== 'home') return;
+  // `#/admin` is a tab, not a Home sub-view — handle it before the Home guard
+  // so a task link can switch tabs on its own.
+  if (hashPath() === '#/admin') {
+    if (currentTab !== 'admin') setTab('admin');
+    focusAdminTurn();
+    return;
+  }
+  if (currentTab !== 'home') {
+    // A task link points at a Home route while another tab is showing (e.g.
+    // the user opened the panel from Admin) — switch tabs, which re-enters
+    // route() with currentTab === 'home' and renders it properly.
+    if (tabForHash() === 'home') setTab('home');
+    return;
+  }
   const parsed = parseHash();
   const preList = parsePreIssuesHash();
   const preDetail = parsePreIssueDetailHash();
+  const issueLink = parseIssueHash();
   if (parsed) {
     hideAllHomeViews();
     prDetailView.style.display = '';
     renderPrDetail(parsed.repo, parsed.issueNumber, parsed.prNumber);
+  } else if (issueLink) {
+    hideAllHomeViews();
+    mainView.style.display = '';
+    focusIssue(issueLink.repo, issueLink.issueNumber, issueLink.prNumber);
   } else if (preDetail) {
     hideAllHomeViews();
     preIssueDetailView.style.display = '';

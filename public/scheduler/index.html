@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>cloud-scheduler</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel2: #1c2128;
+    --line: #30363d;
+    --fg: #e6edf3;
+    --dim: #8b949e;
+    --ok: #2ea043;
+    --warn: #d29922;
+    --bad: #da3633;
+    --accent: #388bfd;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    padding: 16px 14px 48px;
+    -webkit-text-size-adjust: 100%;
+  }
+  h1 { font-size: 18px; margin: 0 0 2px; display: flex; align-items: center; gap: 8px; }
+  .sub { color: var(--dim); font-size: 12px; margin-bottom: 16px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-bottom: 14px;
+  }
+  .card h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--dim); margin: 0 0 10px; font-weight: 600;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  button {
+    font: inherit; color: var(--fg); background: var(--panel2);
+    border: 1px solid var(--line); border-radius: 7px;
+    padding: 5px 11px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.danger { border-color: #6a2320; color: #ff8a80; }
+  button.danger:hover:not(:disabled) { background: #40201f; border-color: var(--bad); }
+  button.primary { background: #1f6feb22; border-color: var(--accent); }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .grow { flex: 1 1 auto; min-width: 0; }
+  .pill {
+    font-size: 11px; padding: 1px 8px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--dim); white-space: nowrap;
+  }
+  .pill.on { color: #7ee787; border-color: #23823a; }
+  .pill.off { color: var(--dim); }
+  .pill.bad { color: #ff8a80; border-color: #6a2320; }
+  .pill.auto { color: #d2a8ff; border-color: #553098; }
+  .session {
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 12px; margin-bottom: 8px; background: var(--panel2);
+  }
+  .session .what { font-weight: 600; }
+  .session .meta { color: var(--dim); font-size: 12px; margin-top: 2px; word-break: break-all; }
+  .empty { color: var(--dim); padding: 6px 0; }
+  pre.log {
+    background: #010409; border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px; margin: 10px 0 0; max-height: 55vh; overflow: auto;
+    font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .metric { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; }
+  .metric .k { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; }
+  .metric .v { font-size: 20px; font-weight: 600; margin-top: 2px; }
+  .metric .d { font-size: 11px; color: var(--dim); }
+  .bar { height: 5px; border-radius: 3px; background: #21262d; margin-top: 6px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--ok); transition: width .4s; }
+  .bar > i.warn { background: var(--warn); }
+  .bar > i.bad { background: var(--bad); }
+  label.check { display: flex; align-items: center; gap: 7px; padding: 3px 0; }
+  .err { color: #ff8a80; font-size: 12px; margin-top: 8px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<h1>cloud-scheduler <span id="health" class="pill">connecting…</span></h1>
+<div class="sub" id="sub">Supervises every Copilot session on this machine, independently of the dashboard.</div>
+
+<div class="card">
+  <h2>
+    Automation
+    <span id="schedPill" class="pill">…</span>
+    <span class="grow"></span>
+    <button id="runNow">Sweep now</button>
+  </h2>
+  <label class="check"><input type="checkbox" id="schedOn" /> Drive <code>committed</code> issues automatically</label>
+  <div class="sub" id="schedNote" style="margin:6px 0 0"></div>
+  <div id="schedRepos"></div>
+  <div class="err" id="schedErr" hidden></div>
+</div>
+
+<div class="card">
+  <h2>
+    Sessions <span id="sessCount" class="pill">0</span>
+    <span class="grow"></span>
+    <label class="check" style="font-size:12px;color:var(--dim)">
+      <input type="checkbox" id="showAll" /> include finished
+    </label>
+  </h2>
+  <div id="sessions"><div class="empty">Nothing running.</div></div>
+</div>
+
+<div class="card">
+  <h2>
+    Machine
+    <span class="grow"></span>
+    <button id="metricsBtn" class="primary">Measure now</button>
+    <button id="pushBtn">Push to phone</button>
+  </h2>
+  <div id="metrics"><div class="empty">Press “Measure now” — nothing is sampled until you ask.</div></div>
+  <div class="err" id="metricsErr" hidden></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmtDur = (ms) => {
+  if (!Number.isFinite(ms)) return '?';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + 'm ' + (s % 60) + 's';
+  return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+};
+const gib = (b) => (b == null ? '?' : (b / 1024 ** 3).toFixed(1) + ' GB');
+const pct = (v) => (v == null ? '?' : Math.round(v) + '%');
+const esc = (s) => String(s == null ? '' : s);
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const body = await r.json().catch(() => null);
+  if (!r.ok) throw new Error((body && body.error) || ('HTTP ' + r.status));
+  return body;
+}
+
+// ---------------------------------------------------------------------------
+// Sessions
+// ---------------------------------------------------------------------------
+
+// Which session's log is open. Kept across polls so a refresh never closes it —
+// and so is the text, because the list re-renders every few seconds while the
+// stream only ever sends what is new.
+let openLog = null;
+let logStream = null;
+let logText = '';
+
+function describe(s) {
+  const m = s.meta || {};
+  const bits = [];
+  if (m.action) bits.push(m.action);
+  if (m.repo) bits.push(m.repo);
+  if (m.issueNumber) bits.push('#' + m.issueNumber);
+  if (m.prNumber) bits.push('PR #' + m.prNumber);
+  return bits.length ? bits.join(' · ') : (s.key || s.bin);
+}
+
+function statusPill(s) {
+  const p = document.createElement('span');
+  p.className = 'pill ' + (s.status === 'running' ? 'on' : s.status === 'exited' && s.exitCode === 0 ? 'on' : 'bad');
+  p.textContent =
+    s.status === 'running'
+      ? 'running'
+      : s.status === 'aborted'
+        ? 'aborted'
+        : s.exitCode === 0
+          ? 'done'
+          : 'exit ' + (s.exitCode == null ? '?' : s.exitCode);
+  return p;
+}
+
+function renderSessions(sessions) {
+  const host = $('sessions');
+  $('sessCount').textContent = sessions.filter((s) => s.status === 'running').length;
+  host.textContent = '';
+  if (!sessions.length) {
+    host.innerHTML = '<div class="empty">Nothing running.</div>';
+    return;
+  }
+  for (const s of sessions) {
+    const el = document.createElement('div');
+    el.className = 'session';
+
+    const top = document.createElement('div');
+    top.className = 'row';
+    const grow = document.createElement('div');
+    grow.className = 'grow';
+    const what = document.createElement('div');
+    what.className = 'what';
+    what.textContent = describe(s);
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const bits = [fmtDur(s.elapsedMs), 'pid ' + s.pid];
+    if (s.meta && s.meta.port) bits.push(':' + s.meta.port);
+    if (s.usage) bits.push(pct(s.usage.cpuPercentOfMachine) + ' of machine');
+    if (s.meta && s.meta.auto) bits.push('auto');
+    if (s.note) bits.push(s.note);
+    meta.textContent = bits.join(' · ');
+    grow.append(what, meta);
+    top.append(grow, statusPill(s));
+
+    const logBtn = document.createElement('button');
+    logBtn.textContent = openLog === s.id ? 'Hide log' : 'Log';
+    logBtn.addEventListener('click', () => {
+      if (openLog === s.id) {
+        openLog = null;
+        if (logStream) { logStream.es.close(); logStream = null; }
+      } else {
+        openLog = s.id;
+        logText = '';
+        if (logStream) { logStream.es.close(); logStream = null; }
+      }
+      refresh();
+    });
+    top.append(logBtn);
+
+    if (s.status === 'running') {
+      const stop = document.createElement('button');
+      stop.className = 'danger';
+      stop.textContent = 'Abort';
+      stop.title = 'Kill this session and everything it started';
+      stop.addEventListener('click', async () => {
+        stop.disabled = true;
+        stop.textContent = 'Aborting…';
+        try {
+          await api('/api/sessions/' + encodeURIComponent(s.id) + '/abort', { method: 'POST' });
+        } catch (err) {
+          stop.textContent = 'Failed';
+          console.error(err);
+        }
+        refresh();
+      });
+      top.append(stop);
+    }
+    el.append(top);
+
+    if (openLog === s.id) {
+      const pre = document.createElement('pre');
+      pre.className = 'log';
+      pre.id = 'log-' + s.id;
+      pre.textContent = logText || 'loading…';
+      el.append(pre);
+    }
+    host.append(el);
+  }
+  if (openLog) {
+    attachLog(openLog);
+    const pre = document.getElementById('log-' + openLog);
+    if (pre) pre.scrollTop = pre.scrollHeight;
+  }
+}
+
+/**
+ * Stream one session's log.
+ *
+ * Uses the same SSE endpoint the dashboard does, so what is shown here is the
+ * process's actual output — not a copy this page assembled — and it keeps
+ * flowing whether or not :8787 is up.
+ */
+function attachLog(id) {
+  if (logStream && logStream.id === id) return; // already following
+  if (logStream) logStream.es.close();
+  const es = new EventSource('/api/sessions/' + encodeURIComponent(id) + '/stream');
+  logStream = { id, es };
+  const append = (text) => {
+    logText += text;
+    const pre = document.getElementById('log-' + id);
+    if (!pre) return;
+    const stick = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+    pre.textContent = logText;
+    if (stick) pre.scrollTop = pre.scrollHeight;
+  };
+  es.addEventListener('chunk', (e) => {
+    try { append(JSON.parse(e.data).text || ''); } catch { /* ignore */ }
+  });
+  es.addEventListener('exit', (e) => {
+    let d = {};
+    try { d = JSON.parse(e.data); } catch { /* ignore */ }
+    append('\n[' + d.status + (d.exitCode == null ? '' : ' · exit ' + d.exitCode) + ']\n');
+    es.close();
+    if (logStream && logStream.id === id) logStream = null;
+  });
+  es.onerror = () => { /* EventSource retries on its own */ };
+}
+
+// ---------------------------------------------------------------------------
+// Scheduler
+// ---------------------------------------------------------------------------
+
+let schedBusy = false;
+
+function renderScheduler(s) {
+  if (schedBusy) return;
+  $('schedOn').checked = Boolean(s.enabled);
+  const pill = $('schedPill');
+  pill.className = 'pill ' + (s.unreachable ? 'bad' : s.enabled ? 'on' : 'off');
+  pill.textContent = s.unreachable ? 'unreachable' : s.enabled ? 'on' : 'off';
+  const every = s.intervalMs ? Math.round(s.intervalMs / 60000) + ' min' : '?';
+  const next = s.nextRunAt ? new Date(s.nextRunAt).toLocaleTimeString() : '—';
+  $('schedNote').textContent = s.enabled
+    ? 'Sweeps every ' + every + ' · up to ' + s.maxConcurrent + ' runs at once · next ' +
+      (s.running ? 'sweeping now' : next)
+    : 'Off — committed issues are not driven automatically.';
+  $('runNow').disabled = !s.enabled || Boolean(s.running);
+
+  const err = $('schedErr');
+  const problems = [];
+  if (s.lastError) problems.push(s.lastError);
+  for (const f of (s.lastSummary && s.lastSummary.failures) || []) {
+    problems.push(f.task + ': ' + (f.message || f.status));
+  }
+  err.hidden = !problems.length;
+  err.textContent = problems.join(' · ');
+
+  const repos = s.repos || {};
+  const host = $('schedRepos');
+  const sig = JSON.stringify(repos) + String(s.enabled);
+  if (host.dataset.sig === sig) return;
+  host.dataset.sig = sig;
+  host.textContent = '';
+  for (const name of Object.keys(repos)) {
+    if (repos[name] !== false) continue;
+    const row = document.createElement('label');
+    row.className = 'check';
+    row.style.fontSize = '12px';
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.addEventListener('change', () => post({ repo: name, repoEnabled: null }));
+    row.append(box, document.createTextNode(name + ' (excluded)'));
+    host.append(row);
+  }
+}
+
+async function post(body) {
+  schedBusy = true;
+  try {
+    renderScheduler(await api('/api/scheduler', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }));
+  } catch (err) {
+    $('schedErr').hidden = false;
+    $('schedErr').textContent = err.message;
+  } finally {
+    schedBusy = false;
+  }
+}
+
+$('schedOn').addEventListener('change', () => post({ enabled: $('schedOn').checked }));
+$('runNow').addEventListener('click', () => post({ runNow: true }));
+$('showAll').addEventListener('change', refresh);
+
+// ---------------------------------------------------------------------------
+// Metrics — sampled only when asked, because measuring costs CPU too
+// ---------------------------------------------------------------------------
+
+let usageById = new Map();
+
+function bar(v) {
+  const cls = v == null ? '' : v > 85 ? 'bad' : v > 60 ? 'warn' : '';
+  return '<div class="bar"><i class="' + cls + '" style="width:' + Math.min(100, v || 0) + '%"></i></div>';
+}
+
+function metricCard(k, v, d, barValue) {
+  return (
+    '<div class="metric"><div class="k">' + k + '</div><div class="v">' + v + '</div>' +
+    (d ? '<div class="d">' + d + '</div>' : '') +
+    (barValue == null ? '' : bar(barValue)) +
+    '</div>'
+  );
+}
+
+async function measure() {
+  const btn = $('metricsBtn');
+  btn.disabled = true;
+  btn.textContent = 'Measuring…';
+  try {
+    // Two samples a second apart: CPU percentages are deltas, so a single
+    // reading would be the average since boot — a number that never moves.
+    await api('/api/metrics');
+    await new Promise((r) => setTimeout(r, 1000));
+    const m = await api('/api/metrics');
+    usageById = new Map((m.sessions || []).map((s) => [s.id, s.usage]));
+    const cards = [
+      metricCard('CPU', pct(m.cpu.overallPercent), m.cpu.cores + ' cores · load ' + m.cpu.loadAvg.join(' '), m.cpu.overallPercent),
+      metricCard('Memory', pct(m.memory.usedPercent), 'of ' + gib(m.memory.totalBytes), m.memory.usedPercent),
+    ];
+    if (m.gpu) cards.push(metricCard('GPU', pct(m.gpu.utilization), 'renderer ' + pct(m.gpu.renderer), m.gpu.utilization));
+    if (m.disk) cards.push(metricCard('Disk', pct(m.disk.usedPercent), gib(m.disk.freeBytes) + ' free', m.disk.usedPercent));
+    cards.push(
+      metricCard(
+        'Copilot sessions',
+        pct(m.supervised.cpuPercentOfMachine),
+        m.supervised.count + ' session(s) · ' + gib(m.supervised.rssBytes) + ' resident',
+        m.supervised.cpuPercentOfMachine,
+      ),
+    );
+    $('metrics').innerHTML = '<div class="metrics">' + cards.join('') + '</div>';
+    $('metricsErr').hidden = true;
+    renderSessions(m.sessions || []);
+  } catch (err) {
+    $('metricsErr').hidden = false;
+    $('metricsErr').textContent = err.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Measure now';
+  }
+}
+
+$('metricsBtn').addEventListener('click', measure);
+$('pushBtn').addEventListener('click', async () => {
+  const btn = $('pushBtn');
+  btn.disabled = true;
+  const was = btn.textContent;
+  try {
+    const out = await api('/api/metrics/push', { method: 'POST' });
+    btn.textContent = out.sent ? 'Sent ✓' : 'Not configured';
+  } catch (err) {
+    btn.textContent = 'Failed';
+    console.error(err);
+  }
+  setTimeout(() => { btn.textContent = was; btn.disabled = false; }, 2200);
+});
+
+// ---------------------------------------------------------------------------
+// Poll
+// ---------------------------------------------------------------------------
+
+async function refresh() {
+  try {
+    const h = await api('/api/health');
+    $('health').className = 'pill on';
+    $('health').textContent = 'up ' + fmtDur(h.uptimeMs);
+    $('sub').textContent =
+      'pid ' + h.pid + ' · ' + h.host + ' · dashboard ' + h.dashboard +
+      ' — supervised sessions survive a dashboard restart.';
+  } catch {
+    $('health').className = 'pill bad';
+    $('health').textContent = 'offline';
+  }
+  try {
+    const all = $('showAll').checked;
+    const { sessions } = await api('/api/sessions' + (all ? '?all=1' : ''));
+    renderSessions(sessions.map((s) => ({ ...s, usage: usageById.get(s.id) || null })));
+  } catch (err) {
+    $('sessions').innerHTML = '<div class="err">' + esc(err.message) + '</div>';
+  }
+  try {
+    renderScheduler(await api('/api/scheduler'));
+  } catch (err) {
+    $('schedErr').hidden = false;
+    $('schedErr').textContent = err.message;
+  }
+}
+
+refresh();
+setInterval(refresh, 4000);
+</script>
+</body>
+</html>

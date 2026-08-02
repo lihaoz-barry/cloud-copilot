@@ -3497,7 +3497,7 @@ async function loadTestflightBuilds() {
   // full archived history, so nothing accumulated earlier is lost.
   tfAllBuilds = data.builds;
   tfPopulateFilterOptions();
-  tfRenderPartialErrors(data.errors || []);
+  tfRenderPartialErrors(Array.isArray(data.errors) ? data.errors : []);
   renderTfList();
 }
 
@@ -3519,8 +3519,10 @@ function tfPopulateFilterOptions() {
     }
     sel.value = values.includes(prev) ? prev : '';
   };
-  const versions = [...new Set(tfAllBuilds.map((b) => b.version).filter(Boolean))].sort((a, b) =>
-    String(b).localeCompare(String(a), undefined, { numeric: true }),
+  // Select values are always strings — normalise the build fields the same way
+  // so a numeric version can never fail to match its own option.
+  const versions = [...new Set(tfAllBuilds.map((b) => (b.version == null ? '' : String(b.version))).filter(Boolean))].sort((a, b) =>
+    b.localeCompare(a, undefined, { numeric: true }),
   );
   const statuses = [...new Set(tfAllBuilds.map((b) => b.deployStatus).filter(Boolean))].sort();
   const repos = [...new Set(tfAllBuilds.map((b) => b.repo).filter(Boolean))].sort();
@@ -3547,7 +3549,7 @@ function tfRenderPartialErrors(errors) {
 }
 
 function tfMatchesFilters(b) {
-  if (tfFilterState.version && b.version !== tfFilterState.version) return false;
+  if (tfFilterState.version && String(b.version ?? '') !== tfFilterState.version) return false;
   if (tfFilterState.status && b.deployStatus !== tfFilterState.status) return false;
   if (tfFilterState.repo && b.repo !== tfFilterState.repo) return false;
   if (tfFilterState.days) {
@@ -3606,9 +3608,23 @@ function renderTfBrokenCard(b, err) {
 function tfCommitUrl(b) {
   const c = b.commit;
   if (!c) return null;
-  if (c.url) return c.url;
-  if (b.ownerRepo && c.sha) return `https://github.com/${b.ownerRepo}/commit/${c.sha}`;
+  const direct = tfSafeUrl(c.url);
+  if (direct) return direct;
+  if (b.ownerRepo && c.sha) return tfSafeUrl(`https://github.com/${b.ownerRepo}/commit/${c.sha}`);
   return null;
+}
+
+// Only ever link out to real http(s) URLs, and only via `a.href = url` — never
+// by interpolating into an attribute, because `escape()` deliberately does not
+// escape quotes. Also blocks `javascript:` hrefs from stored data.
+function tfSafeUrl(u) {
+  if (typeof u !== 'string' || !u) return null;
+  try {
+    const parsed = new URL(u, window.location.origin);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : null;
+  } catch {
+    return null;
+  }
 }
 
 function renderTfCard(b) {
@@ -3637,8 +3653,14 @@ function renderTfCard(b) {
   }
   const prLink = document.createElement('span');
   prLink.className = 'tf-pr';
-  if (b.prUrl) {
-    prLink.innerHTML = `<a href="${b.prUrl}" target="_blank" rel="noopener">PR #${b.prNumber}</a>`;
+  const prUrl = tfSafeUrl(b.prUrl);
+  if (prUrl) {
+    const a = document.createElement('a');
+    a.href = prUrl;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = `PR #${b.prNumber}`;
+    prLink.appendChild(a);
   } else {
     prLink.textContent = `PR #${b.prNumber}`;
   }
@@ -3650,23 +3672,41 @@ function renderTfCard(b) {
 
   const meta = document.createElement('div');
   meta.className = 'tf-meta';
-  const bits = [];
-  const started = b.startedAt ? `started ${escape(tfAbsTime(b.startedAt))}` : '';
-  if (started) bits.push(started);
-  if (b.finishedAt) bits.push(`finished ${escape(tfAbsTime(b.finishedAt))}`);
+  // Built as DOM nodes, not an HTML string: `escape()` does not escape quotes,
+  // so a stored branch name or URL must never reach an attribute as text.
+  const code = (t) => {
+    const c = document.createElement('code');
+    c.textContent = t;
+    return c;
+  };
+  const bit = (...parts) => {
+    const span = document.createElement('span');
+    for (const p of parts) span.append(p);
+    meta.appendChild(span);
+  };
+  if (b.startedAt) bit(`started ${tfAbsTime(b.startedAt)}`);
+  if (b.finishedAt) bit(`finished ${tfAbsTime(b.finishedAt)}`);
   const dur = tfDuration(b.durationMs);
-  if (dur) bits.push(`took ${dur}`);
-  if (b.branch) bits.push(`branch <code>${escape(b.branch)}</code>`);
+  if (dur) bit(`took ${dur}`);
+  if (b.branch) bit('branch ', code(b.branch));
   if (b.commit && (b.commit.abbrev || b.commit.sha)) {
-    const label = escape(b.commit.abbrev || String(b.commit.sha).slice(0, 7));
+    const label = b.commit.abbrev || String(b.commit.sha).slice(0, 7);
     const url = tfCommitUrl(b);
     const hint = b.commitIsCurrentHead ? ' (PR head today)' : '';
-    bits.push(url ? `commit <a href="${url}" target="_blank" rel="noopener"><code>${label}</code></a>${hint}` : `commit <code>${label}</code>${hint}`);
+    if (url) {
+      const a = document.createElement('a');
+      a.href = url;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.appendChild(code(label));
+      bit('commit ', a, hint);
+    } else {
+      bit('commit ', code(label), hint);
+    }
   }
-  bits.push(`issue #${b.issueNumber}`);
-  if (b.prState) bits.push(`PR ${escape(String(b.prState).toLowerCase())}`);
-  if (Number.isFinite(b.exitCode) && b.exitCode !== 0) bits.push(`exit ${b.exitCode}`);
-  meta.innerHTML = bits.map((x) => `<span>${x}</span>`).join('');
+  bit(`issue #${b.issueNumber}`);
+  if (b.prState) bit(`PR ${String(b.prState).toLowerCase()}`);
+  if (Number.isFinite(b.exitCode) && b.exitCode !== 0) bit(`exit ${b.exitCode}`);
 
   const row = document.createElement('div');
   row.className = 'tf-row';

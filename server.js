@@ -380,7 +380,7 @@ function checkoutBranchCwd(repoPath, branch) {
  * history rows stay accurate. Best-effort: any git failure yields null rather
  * than blocking the deploy.
  */
-function readShippedCommit(cwd) {
+function readShippedCommit(cwd, ownerRepo) {
   try {
     const out = execFileSync('git', ['log', '-1', '--format=%H%n%h%n%cI%n%s'], {
       cwd,
@@ -389,7 +389,13 @@ function readShippedCommit(cwd) {
     }).trim();
     const [sha, abbrev, committedDate, ...rest] = out.split('\n');
     if (!sha) return null;
-    return { sha, abbrev: abbrev || sha.slice(0, 7), committedDate: committedDate || null, headline: rest.join(' ') || null };
+    return {
+      sha,
+      abbrev: abbrev || sha.slice(0, 7),
+      committedDate: committedDate || null,
+      headline: rest.join(' ') || null,
+      url: ownerRepo ? `https://github.com/${ownerRepo}/commit/${sha}` : null,
+    };
   } catch {
     return null;
   }
@@ -556,22 +562,37 @@ app.get('/api/testflight/builds', (req, res) => {
   }
   const errors = [...(listed.errors || [])];
   const builds = [];
-  // Annotating a build can fail per row (unreadable repo config, missing repo
-  // on this machine). Each row is isolated so one bad entry costs exactly one
-  // entry — the rest of the history still renders.
-  for (const b of listed.builds) {
+  // The history is unbounded (one row per deploy attempt ever), so resolving
+  // the repo and reading its .cloud-copilot.json is memoised per repo instead
+  // of per row — otherwise a long history means hundreds of identical fs reads
+  // (and hundreds of identical error rows) on every refresh.
+  const repoInfo = new Map();
+  const infoFor = (name) => {
+    if (repoInfo.has(name)) return repoInfo.get(name);
+    let info;
     try {
-      const repo = resolveRepo(b.repo);
-      if (repo && repoConfig.loadDeployConfig(repo.path).type !== 'ios-testflight') {
-        // Repos configured for a "shell" deploy (e.g. a restart script) aren't
-        // TestFlight builds and would otherwise pollute this page.
-        continue;
-      }
-      builds.push({ ...b, ownerRepo: (repo && repo.ownerRepo) || null, repoKnown: Boolean(repo) });
+      const repo = resolveRepo(name);
+      // A repo we don't know on this machine keeps its builds visible: history
+      // must not vanish just because the checkout is gone.
+      const type = repo ? repoConfig.loadDeployConfig(repo.path).type : null;
+      info = { repo, type, error: null };
     } catch (err) {
-      errors.push({ repo: b.repo, issueNumber: b.issueNumber, prNumber: b.prNumber, message: err.message });
-      builds.push({ ...b, ownerRepo: null, repoKnown: false });
+      // Unreadable repo config — keep the rows and report the problem once.
+      info = { repo: null, type: null, error: err.message };
     }
+    repoInfo.set(name, info);
+    return info;
+  };
+  for (const b of listed.builds) {
+    const info = infoFor(b.repo);
+    if (info.error && !info.reported) {
+      info.reported = true;
+      errors.push({ repo: b.repo, issueNumber: null, prNumber: null, message: info.error });
+    }
+    // Repos configured for a "shell" deploy (e.g. a restart script) aren't
+    // TestFlight builds and would otherwise pollute this page.
+    if (info.repo && info.type !== 'ios-testflight') continue;
+    builds.push({ ...b, ownerRepo: (info.repo && info.repo.ownerRepo) || null, repoKnown: Boolean(info.repo) });
   }
   res.json({ builds, errors, total: builds.length, generatedAt: new Date().toISOString() });
 });
@@ -1202,7 +1223,7 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
       // Pin the exact code this attempt ships onto the deploy record, so the
       // TestFlight history keeps showing the right branch/commit for this
       // build even after the PR gets new commits (or is merged and deleted).
-      const shipped = readShippedCommit(workCwd);
+      const shipped = readShippedCommit(workCwd, repo.ownerRepo);
       store.updateDeploy(repo.name, n, prNumber, (d) => {
         d.branch = pr.headRefName;
         d.commit = shipped;

@@ -511,7 +511,9 @@ The **✈️ TestFlight** tab lists *every* build the pipeline has ever shipped,
 just the latest one per PR. Each deploy attempt is archived into the store
 (`deployHistory`) before the next one starts, so re-deploying a PR — or pushing
 new commits to it — never overwrites the earlier build's record, even when both
-attempts report the same version string.
+attempts report the same version string. An attempt that never reported a result
+(the server restarted mid-deploy) is archived as `aborted` with a note rather
+than dropped, so nothing that ran is missing from the list.
 
 Each row shows: app, version + build number, deploy status, start/finish time and
 duration, the branch and the exact commit that was shipped, the PR and issue, the

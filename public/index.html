@@ -4446,7 +4446,16 @@ async function loadTestflightBuilds() {
   let data;
   try {
     const r = await fetch('/api/testflight/builds');
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) {
+      // The route answers 500 with a JSON `error` explaining what it couldn't
+      // read — show that, not a bare status code.
+      let detail = '';
+      try {
+        const body = await r.json();
+        if (body && body.error) detail = `: ${body.error}`;
+      } catch {}
+      throw new Error(`HTTP ${r.status}${detail}`);
+    }
     data = await r.json();
     if (!data || !Array.isArray(data.builds)) throw new Error('Malformed response from /api/testflight/builds');
   } catch (e) {
@@ -4507,7 +4516,10 @@ function tfRenderPartialErrors(errors) {
   }
   const lines = errors
     .slice(0, 5)
-    .map((e) => `${escape(String(e.repo || '?'))}${e.prNumber ? ` PR #${e.prNumber}` : ''}: ${escape(String(e.message || 'unreadable'))}`);
+    .map(
+      (e) =>
+        `${escape(String(e.repo || '?'))}${e.prNumber ? escape(` PR #${e.prNumber}`) : ''}: ${escape(String(e.message || 'unreadable'))}`,
+    );
   tfPartial.innerHTML =
     `⚠️ ${errors.length} record${errors.length > 1 ? 's' : ''} couldn't be read — the builds below are still complete for everything else.` +
     `<br>${lines.join('<br>')}${errors.length > 5 ? '<br>…' : ''}`;

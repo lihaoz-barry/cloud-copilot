@@ -205,15 +205,42 @@ test('annotateBuilds keeps builds of a repo that is gone from this machine', () 
   assert.strictEqual(out[0].ownerRepo, null);
 });
 
-test('annotateBuilds reports an unreadable repo config once and keeps its builds', () => {
+test('annotateBuilds reports a failing repo scan once and keeps every build', () => {
   const builds = [{ repo: 'broken' }, { repo: 'broken' }, { repo: 'broken' }];
   const { builds: out, errors } = buildHistory.annotateBuilds(builds, {
     resolveRepo: () => {
-      throw new Error('EACCES .cloud-copilot.json');
+      throw new Error('EACCES scanning repos root');
     },
     deployTypeOf: () => null,
   });
   assert.strictEqual(out.length, 3);
   assert.strictEqual(errors.length, 1, 'one error per repo, not per build');
   assert.match(errors[0].message, /EACCES/);
+});
+
+test('an unreadable deploy config keeps the app visible instead of hiding its history', () => {
+  const builds = [{ repo: 'ios', buildNumber: 1 }, { repo: 'ios', buildNumber: 2 }];
+  const { builds: out, errors } = buildHistory.annotateBuilds(builds, {
+    resolveRepo: (n) => iosRepo(n),
+    deployTypeOf: () => {
+      throw new Error('Invalid .cloud-copilot.json: Unexpected token }');
+    },
+  });
+  assert.strictEqual(out.length, 2, 'a broken config must not silently erase an app history');
+  // The repo IS configured here — a config we could not parse must not make it
+  // look like a checkout that no longer exists (which would disable Merge and
+  // drop the commit links for the wrong reason).
+  assert.strictEqual(out[0].repoKnown, true);
+  assert.strictEqual(out[0].ownerRepo, 'o/ios');
+  assert.strictEqual(errors.length, 1);
+  assert.match(errors[0].message, /Invalid \.cloud-copilot\.json/);
+});
+
+test('a repo with no deploy type at all is still filtered off the TestFlight page', () => {
+  const { builds: out, errors } = buildHistory.annotateBuilds([{ repo: 'plain' }], {
+    resolveRepo: (n) => iosRepo(n),
+    deployTypeOf: () => null, // readable config, just not an iOS app
+  });
+  assert.deepStrictEqual(out, []);
+  assert.deepStrictEqual(errors, []);
 });

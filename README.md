@@ -752,7 +752,7 @@ is never something you can forget to do.
 | POST | `/api/jobs/cancel` | Stop one running job. Body: `{ "key": "<repo>#<n>:<action>" }`. Falls through to cloud-scheduler when this process has no record of it, so Stop works on a task that outlived a restart. |
 | GET  | `/api/settings/scheduler` | Scheduler state, proxied from :8788: `{ enabled, repos, running, intervalMs, maxConcurrent, nextRunAt, lastRunAt, lastSummary }`. `unreachable: true` when cloud-scheduler is not answering. |
 | POST | `/api/settings/scheduler` | Turn the scheduler on/off (`{ enabled }`), per repo (`{ repo, repoEnabled }`), or run a sweep now (`{ runNow: true }`). Proxied to :8788 and persisted in `data/scheduler.json`. |
-| GET  | `/api/testflight/builds` | **TestFlight build history** — every deploy attempt ever recorded for `ios-testflight` repos (live + archived), newest first: `{ builds, errors, total, generatedAt }`. Each build carries version, build number, start/finish/duration, deploy status, branch + commit, PR/issue, the "What to Test" note, and a short failure reason for failed attempts. Attempts are never collapsed — several builds of the same version stay separate rows. Records that cannot be read land in `errors` instead of failing the response; `repoKnown` is false when the repo is no longer configured on this machine (its builds are still listed). |
+| GET  | `/api/testflight/builds` | **TestFlight build history** — every deploy attempt ever recorded for `ios-testflight` repos (live + archived), newest first: `{ builds, errors, total, generatedAt }`. Each build carries version, build number, start/finish/duration, deploy status, branch + commit, PR/issue, the "What to Test" note, and a short failure reason for failed attempts. Attempts are never collapsed — several builds of the same version stay separate rows. Records that cannot be read land in `errors` instead of failing the response; `repoKnown` is false when the repo is no longer configured on this machine (its builds are still listed). A repo whose `.cloud-copilot.json` cannot be parsed also keeps its builds — the reason is reported in `errors` rather than making that app's whole history silently vanish from the page. |
 | POST | `/api/run` | Simple one-shot demo (prompt + optional `sessionId` resume). |
 
 ### cloud-scheduler API (port 8788)
@@ -797,7 +797,10 @@ one-line reason extracted from the deploy transcript. Superseded attempts are
 badged `attempt n/m · superseded`; only the current attempt keeps its Merge button.
 A build whose repo is no longer configured on this machine stays in the list —
 it is marked `repo not configured here` and its Merge button is disabled, since
-every action route keyed on that repo would 404.
+every action route keyed on that repo would 404. Only repos whose deploy type is
+readable *and* isn't `ios-testflight` are filtered off the page: an app with a
+broken `.cloud-copilot.json` keeps its history and gets a line in the warning
+banner instead.
 
 The toolbar filters by version, status, date range and app. Filtering is purely a
 view over the full in-memory history (and `↻ Refresh` re-reads the complete

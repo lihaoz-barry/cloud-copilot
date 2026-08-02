@@ -799,7 +799,16 @@ app.get('/api/testflight/builds', (req, res) => {
   const errors = [...(listed.errors || [])];
   const annotated = buildHistory.annotateBuilds(listed.builds, {
     resolveRepo,
-    deployTypeOf: (repo) => repoConfig.loadDeployConfig(repo.path).type,
+    // `loadDeployConfig` reports a broken/unreadable `.cloud-copilot.json` as
+    // `{ type: null, error }` rather than throwing. Treating that as "not a
+    // TestFlight repo" would make the app's entire build history disappear from
+    // this page without a word, so raise it: annotateBuilds then keeps the
+    // builds and surfaces the reason once.
+    deployTypeOf: (repo) => {
+      const cfg = repoConfig.loadDeployConfig(repo.path);
+      if (cfg.error) throw new Error(cfg.error);
+      return cfg.type;
+    },
   });
   errors.push(...annotated.errors);
   res.json({ builds: annotated.builds, errors, total: annotated.builds.length, generatedAt: new Date().toISOString() });

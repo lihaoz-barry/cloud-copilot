@@ -32,6 +32,7 @@
     work: 'Create PR',
     deploy: 'Deploy',
     merge: 'Merge',
+    update: 'Update from base',
     chat: 'PR chat',
     'admin-chat': 'Admin chat',
     'preissue-chat': 'Issue draft',

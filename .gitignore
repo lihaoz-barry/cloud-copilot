@@ -7,6 +7,11 @@ data/
 data/gh-cache.json
 server.js.bak
 server.log
+# cloud-scheduler (:8788) — its own log; session transcripts live in data/
+scheduler.log
+
+# per-run isolated checkouts created by lib/worktreePool.js
+.worktrees/
 
 # secrets / local deploy config — never commit
 *.p8
@@ -16,3 +21,6 @@ setup/deploy.env
 # playwright-mcp scratch output
 .playwright-mcp/
 setup/notify.env
+
+# per-run isolated data dir (lib/worktreePool.js leases, local smoke runs)
+.cc-data/

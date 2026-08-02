@@ -64,13 +64,16 @@ the Issues + PR flow through `gh` + `copilot -p`.
 
 Per-issue state is a small machine persisted to `data/state.json`. Each issue keeps
 one **work** (Create PR) record plus a map of **PRs**, and every PR carries its own
-**deploy** and **merge** lifecycle (status, start/finish, `durationMs`, transcript):
+**deploy**, **merge** and **update** (sync with the base branch) lifecycle
+(status, start/finish, `durationMs`, transcript) plus its last collected `sync`
+status:
 
 | Stage      | idle              | running           | success         | failed / aborted                |
 | ---------- | ----------------- | ----------------- | --------------- | -------------------------------- |
 | Create PR  | `Create PR` 🔵    | `Creating PR…` 🟡  | issue turns 🟢  | `PR failed` 🔴 / `PR aborted`    |
 | Deploy     | `Deploy` 🔵       | `Deploying…` 🟡    | `Deployed` 🟢   | `Deploy failed` 🔴 / `Aborted`   |
 | Merge      | `🔒 Merge` 🔵 (dim until Deploy succeeds) | `Merging…` 🟡 | `Merged` 🟢 | `Merge failed` 🔴 / `Aborted` |
+| Update from base | `⇣N` / `⚠` / `✓` / `○` badge | `⟳` 🔵 | badge returns to `✓` | badge stays `⇣N`/`⚠`, log kept |
 
 Each PR renders as **one workflow line** across all three stages — a **Create PR |
 Deploy | Merge** pipeline, matching the state machine above: blue = planned,
@@ -201,6 +204,15 @@ rows simply render without their branch/commit annotations.
   and never touches `gh`; the list is repainted only if something actually
   moved. The 60-second sweep does the same for repos still inside the TTL, so a
   page left open notices a remote job within a minute.
+- **Labels ride along with that patch**, even though they are GitHub data. They
+  are the one part of the GitHub half that a person flips expecting an immediate
+  answer — the `committed` checkbox — and 15 minutes of L1 on top of 15 minutes
+  of L2 meant a label set on github.com could take half an hour to appear, which
+  reads as a checkbox that does not work. `/statuses` therefore also returns the
+  label names from the L2 cache (a memory read, not a `gh` call), and toggling
+  the checkbox writes the server's answer straight into L1. An issue missing
+  from that map means "nothing cached", not "no labels" — the client keeps what
+  it has rather than blanking it.
 - **Past the TTL**, the browser silently asks the server and updates the list in
   place. That request usually costs nothing beyond L2; only if the server's own
   copy has aged out does it reach for `gh`.
@@ -224,6 +236,10 @@ The freshness pill next to the issue count shows both halves and a countdown:
 Green inside the TTL, amber under an hour, grey beyond that; hovering gives
 absolute timestamps. Tune with `GH_CACHE_TTL_MS`, `GH_SYNC_INTERVAL_MS`, and
 `GH_SYNC_FIRST_DELAY_MS`.
+
+The per-PR base-branch comparison is deliberately *not* part of this: it runs
+on its own 3-minute rhythm against local git and never touches the GitHub API
+(see [Base-branch sync badge](#base-branch-sync-badge--update-a-pr-with-copilot)).
 
 ### Auto-run depth
 
@@ -397,9 +413,23 @@ Deploy is dispatched per-repo. Drop a `.cloud-copilot.json` at a repo's root:
   `.xcodeproj`/`.xcworkspace` at its root is auto-detected as `ios-testflight`.
 - **`shell`** — checks out the PR's branch, then runs `command` directly (no
   agent involved — it's deterministic). cloud-copilot dogfoods this on itself: see
-  its own [`.cloud-copilot.json`](.cloud-copilot.json) and the `cc:restart` script
-  in [`package.json`](package.json), which kills the running `node server.js` and
-  starts a fresh one — the same restart done by hand during development.
+  its own [`.cloud-copilot.json`](.cloud-copilot.json) and `cc:restart` in
+  [`package.json`](package.json), which runs
+  [`scripts/restart.sh`](scripts/restart.sh) — the same restart done by hand
+  during development.
+
+  That script identifies the old process by **the port it holds**, not by a
+  `pkill -f 'node server.js'` pattern: a command-line match also hits the shell
+  running it and any unrelated project's server. It then waits for the port to
+  actually be released before starting the replacement, and exits non-zero with
+  the log if the new process does not answer. The version it replaced did none
+  of that, and the failure mode was nasty — the new process lost the port race,
+  died of `EADDRINUSE`, and the OLD one kept serving. Since `public/` is read
+  from disk per request while `server.js` and `lib/` are frozen at boot, the
+  browser then ran the *new* dashboard against the *old* API and every endpoint
+  the new UI knew about answered 404. `GET /api/version` now reports exactly
+  that condition (see below) so it can never again look like a dozen unrelated
+  bugs.
 - No config and no Xcode project detected → Deploy is disabled with a message
   pointing here. cloud-copilot never guesses a shell command for an unconfigured
   repo.
@@ -433,6 +463,71 @@ entirely, so nothing changes for a well-behaved repo.
 
 This is deliberately not an auto-stash: a stash is invisible in the UI and gets
 forgotten. An issue plus a reviewable PR is the durable form of the same rescue.
+
+### Base-branch sync badge (⇣N / ⚠) — update a PR with Copilot
+
+Every open PR's workflow line starts with a small round badge, left of the PR
+number, saying how that branch relates to its base branch (usually `main`) —
+in the same visual family as the pipeline chevrons:
+
+| Badge | Meaning |
+| ----- | ------- |
+| `✓` green | In sync: 0 behind, merges cleanly. |
+| `⇣` amber, with the count on the ring | The branch is **N commits behind** its base. |
+| `⚠` red | Merging the base in would **conflict** (the behind count still rides on the ring). |
+| `○` grey | Not compared yet — a fork PR whose head this clone doesn't have, or a repo the sweep hasn't reached. Never rendered as clean. |
+| `⟳` blue | An update session is running right now. |
+| `!` red | The last update run failed or was aborted; click to see the log or retry. |
+
+Hovering shows base → head, exact ahead/behind, how long ago the comparison
+ran and whether it came from git or GitHub. The same legend lives in
+**⚙ Settings → Sync badge**.
+
+#### How the comparison is made
+
+Every **3 minutes** the server recompares every tracked open PR of every repo,
+using the clone already on disk — not the GitHub API:
+
+```
+git fetch --no-tags --prune origin          # once per repo per sweep
+git rev-list --left-right --count origin/<base>...origin/<head>   # behind / ahead
+git merge-tree --write-tree origin/<base> origin/<head>           # would it conflict?
+```
+
+Both plumbing commands are read-only with respect to the working tree and the
+index (`merge-tree` writes only loose objects), so a sweep is safe while a
+Copilot job holds the checkout. The interval is `PR_SYNC_INTERVAL_MS`
+(default 180000). Results are written to each PR's `sync` field in
+`data/state.json`; the browser polls `GET /api/repos/:name/prsync` on the same
+3-minute rhythm and repaints the badges **in place**, so a running log panel is
+never torn down. A sweep also runs immediately after a PR is created and after
+a merge (which moves the base branch and puts every other PR behind).
+
+Asking GitHub instead was rejected on purpose: `mergeable` is computed lazily,
+so it answers `UNKNOWN` exactly when a PR is new — the moment the badge matters
+most. GitHub's answer is still collected on the hourly sync, but only for what
+git here cannot see (fork PRs), and an `UNKNOWN` from GitHub is discarded rather
+than allowed to blank out a definite local result.
+
+**Clicking the badge starts a Copilot session that updates the PR**, in the
+direction `base → PR head` only:
+
+- It runs in the PR branch's own working tree (an existing linked worktree is
+  reused if one holds the branch) and takes the same repo working-tree lock as
+  Create PR / Deploy / Merge / Chat, so it can never race them.
+- The session fetches, merges `origin/<base>` into the PR branch, resolves
+  conflicts, runs the relevant existing checks, commits and pushes — never a
+  force-push, never `gh pr merge`, never a new PR.
+- Success is decided by git, not by the transcript: the pushed head must
+  contain the pushed base (`0` commits behind). Otherwise the run is `failed`,
+  the log stays available behind `⋯ → ▤`, and the badge keeps telling the truth.
+- Afterwards the branch is recompared locally (git answers now; GitHub would
+  take minutes to recompute `mergeable`) and the badge updates itself. A
+  successful update archives the PR's previous Deploy and re-locks Merge (the
+  old build no longer reflects the branch), exactly like an applied chat turn.
+- Progress, abort (`⨯`) and the full log live on the row's `⋯` tools line, and
+  the job survives a page reload or a dropped phone connection like every other
+  action.
 
 ### Chat with a PR (plan → apply)
 
@@ -500,6 +595,159 @@ behaviour:
 
 ---
 
+## Running many PRs at once (worktree + port pool)
+
+Create PR, Update, Review and Chat no longer take over the repo's checkout, so
+**several of them run at the same time — even on the same repo**.
+
+- **One throwaway worktree per run.** `lib/worktreePool.js` leases
+  `<repo>/.worktrees/<action>-<issue>-<hex>` (excluded via `.git/info/exclude`, so
+  nothing lands in your diff). Create PR gets a detached checkout of
+  `origin/<base>`; branch actions check out the PR branch, or reuse an existing
+  linked worktree that already holds it.
+- **One port per worktree.** `lib/portPool.js` hands out a free port from
+  **8000–8888**, probing it with a real bind before leasing, and exports it into
+  the run as `PORT` and `CC_TEST_PORT`. Two runs can therefore boot dev servers
+  side by side without a fight. The server's own port is never leased.
+- **Isolated state.** Each lease also sets `CC_DATA_DIR=<worktree>/.cc-data`, so a
+  nested tool run inside a worktree can never scribble on the real
+  `data/state.json`.
+- **Limits.** 3 concurrent leases per repo, 6 in total (`CC_MAX_WORKTREES_PER_REPO`
+  / `CC_MAX_WORKTREES_GLOBAL`). Beyond that a run waits in a FIFO queue instead
+  of failing.
+- **One branch, one run.** A branch that a running task already holds is never
+  handed to a second one: two agents in one checkout would overwrite each
+  other's edits. The second run is refused with a "branch is busy" message and
+  can simply be retried.
+- **Never lose work.** Release reuses the existing disposability check: a worktree
+  is only removed when it is clean and provably has no unpushed commits.
+  Anything else is left on disk for you. Crash leftovers are swept at startup.
+- **Deploy, Merge and Restart main still share the repo's real working tree** and
+  remain mutually exclusive — those genuinely need the checkout.
+
+### ⚡ Running tasks panel
+
+The **⚡ button in the top-left** opens a live list of everything the server is
+running: repo + issue, what it is doing, how long it has been going, which
+worktree and port it holds, whether it was started by you or automatically, a
+link to the issue, and a **Stop** button per row. The button carries a badge with
+the number of running jobs and polls every 3 seconds while open. The scheduler's
+switch and a **Run a sweep now** button live at the bottom of the same panel.
+
+## Two processes: the dashboard and cloud-scheduler
+
+cloud-copilot runs as **two servers**, and the split is the whole reason a
+restart is now uneventful:
+
+| | port | owns | restarts |
+| - | ---- | ---- | -------- |
+| **dashboard** (`server.js`) | 8787 | the UI, GitHub state, `data/state.json` | constantly — it deploys itself, and the agents it starts edit its own code |
+| **cloud-scheduler** (`scheduler-server.js`) | 8788 | every running Copilot process, their logs, and the committed-issue loop | almost never, on purpose |
+
+Before the split, both jobs lived in one process, and every self-deploy stranded
+the work in flight. The children were detached and kept running, but the only
+record of them was an object in the dead process's memory — so the browser
+showed a task frozen at *Deploying…* with an **empty log**, and its **Stop**
+button answered `404 no such running job` about a process that was very much
+alive.
+
+Now the dashboard *asks* :8788 to start a process and streams the log back.
+What that buys:
+
+- **Sessions outlive the dashboard.** Restart it as often as you like; on boot
+  it re-attaches to whatever is still running (`re-attached N running
+  session(s)` in the log) and the ⚡ panel, the live log and Stop all work again.
+- **Abort is one signal, not a lookup.** Each session is spawned `detached`, so
+  it leads its own process group; aborting sends `SIGTERM` (then `SIGKILL`) to
+  the *group*, which takes down copilot and everything under it — fastlane,
+  xcodebuild, `npm test`, playwright. The group id is on disk, so this works for
+  a session started by a dashboard that has since been replaced, and for one
+  adopted by a supervisor that has itself restarted.
+- **Logs are files, not buffers.** A session's stdout/stderr *is*
+  `data/sessions/<id>.log` — the child holds that file descriptor directly, so
+  the transcript keeps being written even when nothing is watching. (A pipe
+  would have been simpler and exactly wrong: killing the reader would kill the
+  writer.)
+- **Nothing stays "working" forever.** On boot the dashboard settles every
+  record that claims to be mid-action but has no live session, so a row can no
+  longer be stuck in a state with no process behind it.
+
+`npm start` starts the dashboard **and** launches cloud-scheduler if :8788 is
+free, detached, so it survives the next restart. To run or restart it by itself:
+
+```bash
+npm run scheduler             # foreground
+npm run cc:restart-scheduler  # replace the running one (sessions keep going)
+```
+
+### The cloud-scheduler dashboard (http://localhost:8788)
+
+A separate, deliberately plain page:
+
+- **Sessions** — everything running on this machine, with elapsed time, pid,
+  worktree port, its share of the CPU, a **Log** button that streams the real
+  file, and an **Abort** button. Tick *include finished* to see what recently
+  ended and why.
+- **Automation** — the same on/off switch and *Sweep now* as the ⚡ panel;
+  both edit the same state, which now lives in `data/scheduler.json`.
+- **Machine** — CPU (overall and per core), memory, GPU utilisation, disk, and
+  **how much of the machine the Copilot sessions themselves are using**.
+  Nothing is sampled until you press **Measure now**, because measuring costs
+  CPU too; **Push to phone** sends the same summary as an ntfy notification.
+
+Everything on :8788 is loopback-only by default (`SCHEDULER_HOST`) — it is an
+API that can start processes, so it has no business listening on a network.
+
+## Committed issues and the scheduler
+
+Tick the **committed** checkbox on an issue and cloud-copilot takes ownership of
+it. The checkbox writes the **`committed` GitHub label** — the label *is* the
+state, so it is visible and editable from GitHub itself and survives any local
+reset.
+
+Every 10 minutes (`SCHEDULER_INTERVAL_MS`) the scheduler sweeps every enabled
+repo and, for each committed issue, does the highest-priority thing that is due:
+
+1. **Create PR** if the issue has no open PR (re-checked live against GitHub
+   first, so a PR opened by hand is adopted instead of duplicated).
+2. **Update from base** if the PR is behind its base branch — this is what keeps
+   every committed PR continuously rebased on the newest `main`. A PR with no
+   comparison on record yet (typically the one this sweep just created) gets one
+   computed on the spot rather than being allowed to fall through to step 3:
+   reviewing a diff that is about to be rewritten by the base merge it actually
+   needs wastes a whole agent run. Fork PRs, which local git genuinely cannot
+   answer for, still fall through.
+3. **Review & improve** once per head commit, when nothing else is pending. A new
+   push makes the PR eligible again; the reviewed SHA is read from git, not from
+   the hourly PR cache, so a review can never loop on its own push.
+
+At most **3 runs happen at once** machine-wide (`SCHEDULER_MAX_CONCURRENT`).
+Each gets its own worktree and test port, so they genuinely run in parallel —
+but each is also a full model session plus whatever build it starts, and past
+three this machine stops being usable for the person sitting at it. Watch the
+*Machine* panel on :8788 and lower it if your hardware disagrees.
+
+**You always win**: a repo with any manually started job is skipped for that
+sweep. Failures back off exponentially and, after 3 attempts, the issue is
+flagged `needsAttention` and left alone. Every automatic run is a normal job —
+it shows up in the ⚡ panel, streams into the same log, and sends the same ntfy
+push (prefixed `自动 ·`).
+
+Ticking the checkbox **brings the next sweep forward** instead of waiting out
+the interval — committing something and watching nothing happen for ten minutes
+is indistinguishable from a broken button. The checkbox shows a short `queued`
+hint when that happens. Clicking repeatedly cannot start a burst of sweeps: it
+only reschedules the one timer.
+
+The global switch is off by default and is **persisted** (in
+`data/scheduler.json`, migrated once from `state.json`); it lives in the
+cloud-scheduler process, so restarting the dashboard no longer stops or restarts
+the automation. Under it sits one checkbox per GitHub repo, for keeping the
+scheduler off a single repo while it runs everywhere else. Those are opt-*outs*:
+a repo with no entry follows the global switch, so enabling a newly cloned repo
+is never something you can forget to do.
+
+
 ## API
 
 | Method | Path | Purpose |
@@ -512,7 +760,7 @@ behaviour:
 | GET  | `/api/settings/self` | The cloud-copilot repo serving this app: `{ repo, branch, defaultBranch, dirty, busy }`, or `{ repo: null }`. |
 | POST | `/api/settings/self/restart-main` | **Restart main** — stash if dirty, check out the default branch, `pull --ff-only`, then restart detached. Takes the repo working-tree lock; `409` when it's held. |
 | GET  | `/api/repos/:name/issues[?refresh=1]` | List open issues merged with local status; includes `activeWorkIssues` (repo lock) and cache telemetry (`serverAt`, `ttlMs`, `nextSyncAt`) for the freshness pill. Served from the L2 cache (15 min TTL, persisted to `data/gh-cache.json`); `?refresh=1` forces a live `gh` read and rewrites it. Also auto-discovers and persists PRs referencing these issues (one whole-repo `gh pr list`, same cache). |
-| GET  | `/api/repos/:name/statuses?n=1,2,3` | Just the live half of the list above: `{ statuses, activeWorkIssues }` for the given issue numbers. Reads `state.json` + the in-memory job table only — never `gh`, never the L2 cache — so the client can call it on every cache-backed render and once a minute thereafter. |
+| GET  | `/api/repos/:name/statuses?n=1,2,3` | Just the live half of the list above: `{ statuses, labels, activeWorkIssues }` for the given issue numbers. Reads `state.json`, the in-memory job table and the in-memory L2 entry — never `gh` — so the client can call it on every cache-backed render and once a minute thereafter. `labels` is what keeps the `committed` checkbox from lagging half an hour behind GitHub. |
 | GET  | `/api/repos/:name/issues/:n/record` | Full stored record (work + per-PR deploy/merge, transcripts, `live` flags). |
 | GET  | `/api/repos/:name/issues/:n/prs` | Force-refresh the PR list for one issue from GitHub — always live, bypasses the whole-repo PR cache. |
 | POST | `/api/repos/:name/issues/:n/work` | **Create PR** — SSE stream. Body: `{ "mode": "allow-all" }`. |
@@ -521,9 +769,36 @@ behaviour:
 | POST | `/api/repos/:name/issues/:n/deploy/:pr/cancel` | Abort the running deploy for that PR. |
 | POST | `/api/repos/:name/issues/:n/merge/:pr` | **Merge a specific PR** — SSE stream. Body: `{ "force": false }`. Blocked unless Deploy succeeded, unless `force: true`. A failed `gh pr merge` automatically starts Copilot to investigate, resolve conflicts, retry, and verify the merge. On success the issue and the issue's other open PRs are closed automatically (`MERGE_AUTO_CLEANUP=0` disables it). |
 | POST | `/api/repos/:name/issues/:n/merge/:pr/cancel` | Abort the running merge for that PR. |
+| GET | `/api/repos/:name/prsync` | Base-branch sync state of every tracked PR of a repo (`{ [prNumber]: sync }`), plus the sweep interval and the next sweep time. Reads `data/state.json` only — the badge poller's endpoint. |
+| POST | `/api/repos/:name/issues/:n/prs/:pr/update` | **Update a PR from its base branch** — SSE stream. Starts a Copilot session in the PR's working tree that merges `base` → PR head, resolves any conflicts, and pushes. Never merges the PR into the base. Takes the repo working-tree lock; success is verified with `git rev-list --count origin/<head>..origin/<base>` (must be 0), then the branch is recompared with local git and returned as `sync`. |
+| POST | `/api/repos/:name/issues/:n/prs/:pr/update/cancel` | Abort the running branch update for that PR. |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat` | **Chat with a PR** — SSE stream. Body: `{ "message": "...", "mode": "plan"\|"apply", "model": "..." }`. `plan` is read-only (default approval flags); `apply` implements + pushes to the existing branch and resets Deploy/Merge on success. The optional `model` overrides the global setting for that turn only (unknown values fall back to it). |
 | POST | `/api/repos/:name/issues/:n/prs/:pr/chat/cancel` | Abort the running chat turn for that PR. |
+| POST | `/api/repos/:name/issues/:n/prs/:pr/review` | **Review & improve a PR** — SSE stream. Starts a Copilot session in the PR's own worktree that reviews the diff, applies the fixes it deems worth making, and pushes. Records the reviewed head SHA so the same commit is never reviewed twice. |
+| POST | `/api/repos/:name/issues/:n/prs/:pr/review/cancel` | Abort the running review for that PR. |
+| POST | `/api/repos/:name/issues/:n/committed` | Toggle the **committed** label on the issue. Body: `{ "committed": true }`. Writes the label on GitHub — that label *is* the state. Answers `{ committed, label, scheduled, labels }`: `labels` is the issue's full label set as the server now knows it (the client writes that into its own cache rather than guessing a patch), and `scheduled` says whether the next sweep was brought forward. |
+| GET  | `/api/version` | What code this process is actually running: `{ boot, disk, stale, reasons, committedLabel }`. `stale` compares a **content hash** of `server.js` + `lib/` against the one taken at boot — not the commit sha, which would fire on every commit of already-running code. Polled every 60s; when it says `stale`, the dashboard shows a banner, because at that point the page is talking to an API older than itself. |
+| GET  | `/api/jobs` | Everything currently running: `{ jobs, worktrees, limits, scheduler, supervisor }`. Includes supervised sessions this process has no job for (i.e. ones that outlived a restart). Backs the ⚡ task panel; polled every 3s while it is open. |
+| POST | `/api/jobs/cancel` | Stop one running job. Body: `{ "key": "<repo>#<n>:<action>" }`. Falls through to cloud-scheduler when this process has no record of it, so Stop works on a task that outlived a restart. |
+| GET  | `/api/settings/scheduler` | Scheduler state, proxied from :8788: `{ enabled, repos, running, intervalMs, maxConcurrent, nextRunAt, lastRunAt, lastSummary }`. `unreachable: true` when cloud-scheduler is not answering. |
+| POST | `/api/settings/scheduler` | Turn the scheduler on/off (`{ enabled }`), per repo (`{ repo, repoEnabled }`), or run a sweep now (`{ runNow: true }`). Proxied to :8788 and persisted in `data/scheduler.json`. |
 | POST | `/api/run` | Simple one-shot demo (prompt + optional `sessionId` resume). |
+
+### cloud-scheduler API (port 8788)
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| GET  | `/api/health` | `{ ok, pid, startedAt, uptimeMs, sessions, dashboard }`. |
+| POST | `/api/sessions` | Start a supervised process. Body: `{ key, bin, args, cwd, env, meta }`. `409` (with the existing session) when `key` is already running — which is what stops a retried request from duplicating a PR. |
+| GET  | `/api/sessions[?all=1]` | Running sessions, or every session on record. |
+| GET  | `/api/sessions/:id` | One session, including `pid`, `pgid`, `exitCode` and whether it is `alive`. |
+| GET  | `/api/sessions/:id/log[?tail=N]` | The transcript as plain text, straight off disk. |
+| GET  | `/api/sessions/:id/stream` | SSE: `meta` → replayed `chunk`s → `live` → live `chunk`s → `exit`. The `live` marker is what lets a reconnecting *server* tell replay from new output instead of duplicating its transcript. |
+| POST | `/api/sessions/:id/abort` | `SIGTERM` then `SIGKILL` the whole process group. |
+| POST | `/api/sessions/abort-by-key` | The same, addressed by job key. |
+| GET  | `/api/metrics` | CPU (overall + per core), load, memory, GPU, disk, and per-session CPU/RSS by process group. |
+| POST | `/api/metrics/push` | Send the metrics summary to your phone via ntfy. |
+| GET  | `/api/scheduler` | Scheduler state (what `/api/settings/scheduler` proxies). `POST` to change it. |
 
 ### SSE events
 
@@ -531,8 +806,9 @@ behaviour:
 (`{sessionId}`) → `phase` (`{phase,bin,args,cwd}`, only for multi-phase jobs — see
 [Deploy preflight](#deploy-preflight-dirty-working-trees)) → `result`
 (`{action,status,prUrl?,prNumber?}`, where `status` is
-`success`/`failed`/`aborted`, or `blocked` when the repo lock rejects a second
-Create PR, or Merge is attempted before Deploy has succeeded) → `done` (`{exitCode}`).
+`success`/`failed`/`aborted`, or `blocked` when the working-tree lock rejects
+an overlapping Deploy/Merge/Restart, or Merge is attempted before Deploy has
+succeeded) → `done` (`{exitCode}`).
 
 ---
 
@@ -753,6 +1029,14 @@ Other optional env vars:
 | `PORT`       | `8787`         | Port to listen on                        |
 | `HOST`       | `0.0.0.0`      | Bind address (`127.0.0.1` for local-only)|
 | `MERGE_AUTO_CLEANUP` | `1`    | `0` disables closing the issue + superseded PRs after a merge |
+| `CC_MAX_WORKTREES_PER_REPO` | `3` | Concurrent worktree leases allowed per repo |
+| `CC_MAX_WORKTREES_GLOBAL` | `6` | Concurrent worktree leases allowed across all repos |
+| `CC_WORKTREE_ACQUIRE_TIMEOUT_MS` | `600000` | How long a run waits in the queue for a free worktree slot |
+| `CC_PORT_RANGE_START` | `8000` | First port handed to a worktree (`PORT`/`CC_TEST_PORT` inside it) |
+| `CC_PORT_RANGE_END` | `8888`  | Last port of that range |
+| `CC_COMMITTED_LABEL` | `committed` | GitHub label that marks an issue as committed |
+| `SCHEDULER_INTERVAL_MS` | `600000` | Scheduler sweep interval (10 min) |
+| `CC_DATA_DIR` | `./data`      | State/cache/upload directory — set per worktree so parallel runs never share state |
 
 ---
 
@@ -813,6 +1097,7 @@ session). The "running mode" selector here controls *tool approval policy*, not 
 cloud-copilot/
 ├── package.json        # express dependency, `npm start`, `cc:restart` (self deploy)
 ├── .cloud-copilot.json # this repo's own deploy config (shell -> cc:restart)
+├── scripts/restart.sh  # the restart itself: port-identified, waits, fails loudly
 ├── server.js           # Express app: repos/issues/work/deploy/merge routes + state machine
 ├── lib/
 │   ├── changelog.js    # PR title -> short Chinese TestFlight "What to Test" note
@@ -825,6 +1110,9 @@ cloud-copilot/
 │   ├── mergeRunner.js  # gh pr merge + Copilot recovery, verifies the PR is MERGED
 │   ├── mergeCleanup.js # after a merge: close the issue + superseded sibling PRs
 │   ├── worktrees.js    # linked-worktree housekeeping: release/sweep without ever losing work
+│   ├── worktreePool.js # leases one throwaway worktree per run (concurrency limits + cleanup)
+│   ├── portPool.js     # leases a free port (8000-8888) to each worktree
+│   ├── scheduler.js    # 10-min sweep that drives committed issues by itself
 │   └── repoConfig.js   # loads a repo's .cloud-copilot.json (or auto-detects iOS)
 ├── public/
 │   ├── index.html      # repos → issues → Create PR / Deploy / Merge pipeline console

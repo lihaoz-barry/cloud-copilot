@@ -475,13 +475,23 @@ A `shell` deploy can therefore declare the second process:
   line), never its process group, so the detached Copilot sessions it supervises
   keep running and the new supervisor re-adopts them from
   `data/sessions/index.json`.
-  [`scripts/self-deploy.js`](scripts/self-deploy.js) proves it — it counts
-  running sessions before the restart and **fails the deploy** if the replacement
-  comes back with fewer, dumping the tail of `scheduler.log` into the log.
+  [`scripts/self-deploy.js`](scripts/self-deploy.js) proves it — it records the
+  running sessions before the restart and checks each one afterwards *by
+  identity*: adopted by the new supervisor, or its process really is gone. A
+  session still alive that nobody picked up **fails the deploy** and dumps the
+  tail of `scheduler.log` into it. (A head count would fail a deploy just because
+  a Copilot run happened to finish during the restart.)
 - **The result tells the truth**: dashboard up but scheduler down is a *failed*
   deploy, and the log is split into two clearly labelled phases. The decision
   itself lives in [`lib/selfDeploy.js`](lib/selfDeploy.js) (server side, unit
   tested), not in a shell string.
+- **How the result survives the restart**: phase 2 replaces the very supervisor
+  that owns the deploy session, and an adopted session's death is *observed*
+  rather than awaited — so its exit code comes back `null` even when everything
+  worked. The runner therefore prints its verdict on the transcript as its last
+  act, and the dashboard reads that (and only that) when there is no exit code to
+  trust. Without it, every successful scheduler restart would be reported as a
+  failed deploy.
 
 ### Base-branch sync badge (⇣N / ⚠) — update a PR with Copilot
 
@@ -1140,7 +1150,8 @@ cloud-copilot/
 │   └── gen-assets.js   # regenerates public/icons + public/sounds (no deps)
 ├── test/
 │   ├── changelog.test.js  # `npm test` — What to Test note building (node --test)
-│   └── selfDeploy.test.js # which changes require a cloud-scheduler restart
+│   ├── selfDeploy.test.js # which changes require a cloud-scheduler restart
+│   └── selfDeployRunner.test.js # the two phases themselves, against a fake scheduler
 ├── data/               # state.json (gitignored)
 ├── .gitignore
 └── README.md

@@ -28,17 +28,51 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 
+const { RESULT_MARKER } = require('../lib/selfDeploy');
+
 const ROOT = path.resolve(__dirname, '..');
 const SCHEDULER_PORT = Number(process.env.CC_SUPERVISOR_PORT || process.env.SCHEDULER_PORT || 8788);
 const SCHEDULER_HOST = process.env.CC_SUPERVISOR_HOST || '127.0.0.1';
 const SCHEDULER_LOG = path.join(ROOT, 'scheduler.log');
+// Overridable so the test suite does not have to wait out a real restart.
+const HEALTH_TIMEOUT_MS = Number(process.env.CC_SELF_DEPLOY_HEALTH_TIMEOUT_MS || 30000);
+const ADOPT_TIMEOUT_MS = Number(process.env.CC_SELF_DEPLOY_ADOPT_TIMEOUT_MS || 15000);
+const POLL_MS = Number(process.env.CC_SELF_DEPLOY_POLL_MS || 500);
+
+/**
+ * Write synchronously: the verdict below has to be on disk before process.exit,
+ * and `process.stdout.write` only guarantees that when stdout happens to be a
+ * file. Under the supervisor it is one, but a plain pipe would drop the last
+ * line — the one line that decides whether the deploy succeeded.
+ */
+function writeLine(fd, line) {
+  try {
+    fs.writeSync(fd, `${line}\n`);
+  } catch {
+    (fd === 1 ? process.stdout : process.stderr).write(`${line}\n`);
+  }
+}
 
 function log(line) {
-  process.stdout.write(`${line}\n`);
+  writeLine(1, line);
 }
 
 function fail(line) {
-  process.stderr.write(`${line}\n`);
+  writeLine(2, line);
+}
+
+/**
+ * Report the verdict and leave.
+ *
+ * The exit code is the truth only while the supervisor that spawned this
+ * process is still alive — and phase 2 deliberately replaces it. The marker on
+ * the transcript is what survives, so it is written last and always, including
+ * on the paths that exit non-zero. See lib/selfDeploy.js.
+ */
+function done(ok, reason) {
+  if (reason) (ok ? log : fail)(reason);
+  log(`${RESULT_MARKER} ${ok ? 'success' : 'failed'}`);
+  process.exit(ok ? 0 : 1);
 }
 
 function readPlan() {
@@ -66,10 +100,10 @@ function run(command) {
   });
 }
 
-function health(timeoutMs = 2000) {
+function getJson(urlPath, timeoutMs = 2000) {
   return new Promise((resolve) => {
     const req = http.get(
-      { host: SCHEDULER_HOST, port: SCHEDULER_PORT, path: '/api/health', timeout: timeoutMs },
+      { host: SCHEDULER_HOST, port: SCHEDULER_PORT, path: urlPath, timeout: timeoutMs },
       (res) => {
         let body = '';
         res.setEncoding('utf8');
@@ -91,37 +125,83 @@ function health(timeoutMs = 2000) {
   });
 }
 
+const health = (timeoutMs) => getJson('/api/health', timeoutMs);
+
+/** Every session the supervisor knows about, running or not. */
+async function listSessions({ all = false } = {}) {
+  const out = await getJson(`/api/sessions${all ? '?all=1' : ''}`);
+  return out && Array.isArray(out.sessions) ? out.sessions : null;
+}
+
+/**
+ * Is that pid still there? EPERM means "yes, and not ours to signal", which is
+ * still alive.
+ */
+function pidAlive(pid) {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
+  }
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function waitForHealth(totalMs = 30000) {
+async function waitForHealth(totalMs = HEALTH_TIMEOUT_MS) {
   const deadline = Date.now() + totalMs;
   for (;;) {
     const h = await health();
     if (h && h.ok) return h;
     if (Date.now() >= deadline) return null;
-    await sleep(500);
+    await sleep(POLL_MS);
   }
 }
 
 /**
- * How many running sessions the new supervisor has adopted.
+ * Did the replacement supervisor pick every running session back up?
  *
- * Adoption is a startup step, so a health response can arrive a beat before the
- * count settles; give it a moment rather than failing a deploy on a race.
+ * Deliberately not a head count. Sessions finish on their own schedule, and a
+ * Copilot run that simply completed during the restart window would make
+ * "fewer than before" true without anything being wrong. So each session is
+ * checked by identity: it is fine if the new supervisor lists it as running, and
+ * equally fine if its pid is gone (it ended, and the supervisor recorded that).
+ * What is not fine is a process that is still alive with nobody watching it —
+ * that is the lost session this whole phase exists to rule out.
+ *
+ * Adoption is a startup step, so give it a moment rather than failing a deploy
+ * on a race with it.
+ *
+ * @param {Array<{id:string,pid:number,key?:string}>} before sessions running before the restart
+ * @returns {Promise<{ok:boolean, adopted:number, ended:number, lost:Array, error:string|null}>}
  */
-async function waitForAdoption(expected, totalMs = 15000) {
+async function waitForAdoption(before, totalMs = ADOPT_TIMEOUT_MS) {
   const deadline = Date.now() + totalMs;
-  let best = 0;
+  let last = { ok: false, adopted: 0, ended: 0, lost: [], error: 'the supervisor did not list its sessions' };
   for (;;) {
-    const h = await health();
-    const count = h && typeof h.sessions === 'number' ? h.sessions : 0;
-    if (count > best) best = count;
-    if (best >= expected || Date.now() >= deadline) return best;
-    await sleep(500);
+    const now = await listSessions({ all: true });
+    if (now) {
+      const byId = new Map(now.map((s) => [s.id, s]));
+      const lost = [];
+      let adopted = 0;
+      let ended = 0;
+      for (const s of before) {
+        const found = byId.get(s.id);
+        if (found && found.status === 'running') adopted += 1;
+        else if (!pidAlive(s.pid)) ended += 1;
+        else lost.push(s);
+      }
+      last = { ok: lost.length === 0, adopted, ended, lost, error: null };
+      if (last.ok) return last;
+    }
+    if (Date.now() >= deadline) return last;
+    await sleep(POLL_MS);
   }
 }
 
-function tailSchedulerLog(lines = 30) {  try {
+function tailSchedulerLog(lines = 30) {
+  try {
     const text = fs.readFileSync(SCHEDULER_LOG, 'utf8');
     return text.split('\n').slice(-lines).join('\n');
   } catch (err) {
@@ -139,8 +219,7 @@ async function main() {
   const plan = readPlan();
   const dashboardCommand = plan.dashboardCommand;
   if (typeof dashboardCommand !== 'string' || !dashboardCommand.trim()) {
-    fail('the plan has no dashboardCommand');
-    process.exit(2);
+    done(false, 'the plan has no dashboardCommand');
   }
 
   log('=== Phase 1/2: dashboard ===');
@@ -149,27 +228,26 @@ async function main() {
   log(`$ ${dashboardCommand}`);
   const dashCode = await run(dashboardCommand);
   if (dashCode !== 0) {
-    fail(`dashboard restart failed (exit ${dashCode}) — deploy failed`);
-    process.exit(dashCode);
+    done(false, `dashboard restart failed (exit ${dashCode}) — deploy failed`);
   }
   log('dashboard restarted');
 
   if (!plan.restartScheduler) {
     log('=== Phase 2/2: cloud-scheduler — skipped (no scheduler changes) ===');
-    log('deploy succeeded');
-    return;
+    done(true, 'deploy succeeded');
   }
 
   log('=== Phase 2/2: cloud-scheduler ===');
   if (plan.matched && plan.matched.length) log(`scheduler files changed: ${plan.matched.join(', ')}`);
 
-  const before = await health();
-  const beforeCount = before && typeof before.sessions === 'number' ? before.sessions : 0;
-  if (!before) {
+  // Who is running right now, by identity — the list the replacement supervisor
+  // has to account for. An unreachable scheduler has nothing to lose.
+  const before = (await listSessions()) || [];
+  if (!(await health())) {
     log(`cloud-scheduler is not answering on :${SCHEDULER_PORT} before the restart — starting it`);
   } else {
     log(
-      `${beforeCount} running Copilot session(s) before the restart — they are detached and keep ` +
+      `${before.length} running Copilot session(s) before the restart — they are detached and keep ` +
         'running; the new supervisor re-adopts them from data/sessions/index.json, so work already ' +
         'in flight is unaffected',
     );
@@ -181,31 +259,35 @@ async function main() {
   if (schedCode !== 0) {
     fail(`cloud-scheduler restart failed (exit ${schedCode}) — deploy failed`);
     dumpSchedulerLog();
-    process.exit(schedCode);
+    done(false);
   }
 
-  const after = await waitForHealth(30000);
+  const after = await waitForHealth();
   if (!after) {
-    fail(`cloud-scheduler did not answer on :${SCHEDULER_PORT} within 30s — deploy failed`);
+    fail(`cloud-scheduler did not answer on :${SCHEDULER_PORT} within ${Math.round(HEALTH_TIMEOUT_MS / 1000)}s — deploy failed`);
     dumpSchedulerLog();
-    process.exit(1);
+    done(false);
   }
 
-  const afterCount = await waitForAdoption(beforeCount, 15000);
-  if (afterCount < beforeCount) {
-    fail(
-      `cloud-scheduler is up (pid ${after.pid}) but adopted only ${afterCount} of the ${beforeCount} ` +
-        'running session(s) — deploy failed',
-    );
+  const adoption = await waitForAdoption(before);
+  if (!adoption.ok) {
+    const detail = adoption.error
+      ? adoption.error
+      : `${adoption.lost.length} still-running session(s) were not picked up: ` +
+        adoption.lost.map((s) => `${s.id}${s.key ? ` (${s.key})` : ''} pid ${s.pid}`).join(', ');
+    fail(`cloud-scheduler is up (pid ${after.pid}) but ${detail} — deploy failed`);
     dumpSchedulerLog();
-    process.exit(1);
+    done(false);
   }
 
-  log(`cloud-scheduler up on :${SCHEDULER_PORT} (pid ${after.pid}), ${afterCount} running session(s) adopted`);
-  log('deploy succeeded');
+  log(
+    `cloud-scheduler up on :${SCHEDULER_PORT} (pid ${after.pid}), ` +
+      `${adoption.adopted} running session(s) adopted` +
+      (adoption.ended ? `, ${adoption.ended} finished during the restart` : ''),
+  );
+  done(true, 'deploy succeeded');
 }
 
 main().catch((err) => {
-  fail(`self-deploy crashed: ${err && err.stack ? err.stack : err}`);
-  process.exit(1);
+  done(false, `self-deploy crashed: ${err && err.stack ? err.stack : err}`);
 });

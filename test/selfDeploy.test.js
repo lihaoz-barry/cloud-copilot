@@ -140,6 +140,61 @@ test('a diff we could not read restarts the scheduler rather than assuming nothi
   assert.match(plan.decisionLine, /could not diff/);
 });
 
+test('a deploy whose base commit is unknown restarts the scheduler', () => {
+  // BOOT_CODE.head can be null (a checkout without git metadata, a boot that
+  // could not read HEAD). "We don't know what changed" must never be reduced to
+  // "nothing changed", which would leave a stale scheduler running.
+  const diff = selfDeploy.changedFiles('/srv/cloud-copilot', null, 'abc1234');
+  assert.deepEqual(diff.files, []);
+  assert.ok(diff.error, 'a missing base commit is an error, not an empty diff');
+  const plan = selfDeploy.planShellDeploy({
+    repoPath: APP_ROOT,
+    appRoot: APP_ROOT,
+    deploy: SELF,
+    files: diff.files,
+    diffError: diff.error,
+  });
+  assert.equal(plan.restartScheduler, true);
+});
+
+test('a deploy whose head commit is unknown restarts the scheduler', () => {
+  const diff = selfDeploy.changedFiles('/srv/cloud-copilot', 'abc1234', null);
+  assert.ok(diff.error);
+  assert.equal(
+    selfDeploy.planShellDeploy({
+      repoPath: APP_ROOT,
+      appRoot: APP_ROOT,
+      deploy: SELF,
+      files: [],
+      diffError: diff.error,
+    }).restartScheduler,
+    true,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The verdict on the transcript — the only result a two-phase deploy has
+// ---------------------------------------------------------------------------
+
+test('the transcript verdict is read back, and absent when never printed', () => {
+  assert.equal(selfDeploy.resultFromTranscript(`x\n${selfDeploy.RESULT_MARKER} success\n`), 'success');
+  assert.equal(selfDeploy.resultFromTranscript(`x\n${selfDeploy.RESULT_MARKER} failed\n`), 'failed');
+  assert.equal(selfDeploy.resultFromTranscript('dashboard restarted\ndeploy succeeded\n'), null);
+  assert.equal(selfDeploy.resultFromTranscript(''), null);
+  assert.equal(selfDeploy.resultFromTranscript(undefined), null);
+});
+
+test('a replayed transcript is judged by its last verdict', () => {
+  // A supervisor restart makes the dashboard reconnect and replay the log from
+  // the beginning, so the same lines legitimately appear more than once.
+  const t = `${selfDeploy.RESULT_MARKER} success\n${selfDeploy.RESULT_MARKER} success\n`;
+  assert.equal(selfDeploy.resultFromTranscript(t), 'success');
+  assert.equal(
+    selfDeploy.resultFromTranscript(`${selfDeploy.RESULT_MARKER} success\n${selfDeploy.RESULT_MARKER} failed\n`),
+    'failed',
+  );
+});
+
 // ---------------------------------------------------------------------------
 // The diff itself, against a real git repo
 // ---------------------------------------------------------------------------

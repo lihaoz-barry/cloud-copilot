@@ -305,11 +305,15 @@ function portNote(lease) {
  */
 function testNote(repo, projectType) {
   const cfg = repoConfig.loadTestConfig(repo.path, { projectType });
+  // A broken config is not the same as an unconfigured repo: saying "no known
+  // command" would send the agent off inventing one while the repo has been
+  // trying to tell it exactly what to run.
+  const problem = cfg.error ? ` (note: ${cfg.error} — report this rather than working around it)` : '';
   if (!cfg.commands.length) {
     return (
       ` This repository has no known verification command (project type: ` +
       `${cfg.type}); do not invent one — inspect the repo and only run commands ` +
-      `it actually defines.`
+      `it actually defines.${problem}`
     );
   }
   const list = cfg.commands.map((c) => `\`${c}\``).join(' then ');
@@ -317,7 +321,7 @@ function testNote(repo, projectType) {
     cfg.source === 'config'
       ? `declared in ${repoConfig.CONFIG_FILENAME}`
       : `the default for a ${cfg.type} project`;
-  return ` Before opening the pull request, verify your change with ${list} (${origin}), and fix what it reports.`;
+  return ` Before opening the pull request, verify your change with ${list} (${origin}), and fix what it reports.${problem}`;
 }
 
 // Human-readable description of what's holding a repo's working-tree lock,

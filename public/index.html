@@ -2255,10 +2255,23 @@ function openProjectTypeMenu(badge, repo, onPick) {
   function close() {
     menu.remove();
     document.removeEventListener('pointerdown', onAway, true);
+    document.removeEventListener('keydown', onKey, true);
+    window.removeEventListener('scroll', close, true);
+    window.removeEventListener('resize', close);
   }
   function onAway(ev) { if (!menu.contains(ev.target)) close(); }
+  // The menu is positioned once against the badge, so anything that moves the
+  // badge (scroll, resize) has to dismiss it rather than leave it floating over
+  // unrelated rows. Escape closes it without picking anything.
+  function onKey(ev) { if (ev.key === 'Escape') { ev.stopPropagation(); close(); } }
   document.body.append(menu);
-  setTimeout(() => document.addEventListener('pointerdown', onAway, true), 0);
+  try { menu.querySelector('button')?.focus({ preventScroll: true }); } catch { /* ignore */ }
+  document.addEventListener('keydown', onKey, true);
+  window.addEventListener('resize', close);
+  setTimeout(() => {
+    document.addEventListener('pointerdown', onAway, true);
+    window.addEventListener('scroll', close, true);
+  }, 0);
 }
 
 function makeProjectTypeBadge(repo) {
@@ -2312,12 +2325,20 @@ function makeProjectTypeBadge(repo) {
   }
 
   badge.addEventListener('pointerdown', (ev) => {
+    // Only a primary (left/touch) press counts, and a second pointer arriving
+    // mid-press must not orphan the first one's rAF loop — its id would be
+    // overwritten and the loop would then run for the life of the page.
+    if (ev.button !== 0 || !ev.isPrimary) return;
     ev.preventDefault();
     ev.stopPropagation(); // never toggle the repo card open/closed
+    stop();
     try { badge.setPointerCapture(ev.pointerId); } catch { /* not fatal */ }
     const started = Date.now();
     badge.classList.add('pressing');
     const tick = () => {
+      // A refresh can replace the whole repo list mid-press; without this the
+      // loop (and its timer) would outlive the element it is animating.
+      if (!badge.isConnected) { stop(); return; }
       badge.style.setProperty('--p', String(Math.min(1, (Date.now() - started) / PTYPE_HOLD_MS)));
       raf = requestAnimationFrame(tick);
     };
@@ -2923,8 +2944,14 @@ function renderIssue(repo, issue, repoCtx, opts = {}) {
   cdText.textContent = 'c+d';
   cdLabel.append(cdBox, cdText);
 
-  /** Does this issue want its PR deployed as soon as it exists? */
-  const wantsCommitDeploy = () => cdBox.checked;
+  /**
+   * Does this issue want its PR deployed as soon as it exists?
+   *
+   * The live project type is re-checked, not just the checkbox: flipping the
+   * repo to Web hides the tag but cannot untick it, and a hidden tick must
+   * never be what starts a deploy on a repo that is no longer allowed one.
+   */
+  const wantsCommitDeploy = () => cdBox.checked && repoProjectType(repo.name) === 'ios';
 
   icons.append(committedLabel, cdLabel, refreshPrsBtn, hideBtn, deleteBtn);
 

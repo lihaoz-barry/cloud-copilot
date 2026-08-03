@@ -155,6 +155,37 @@ test('a non-string test.command is refused instead of executed', () => {
   assert.match(t.error, /test\.command/);
 });
 
+test('a "test" that is not an object is reported, not silently ignored', () => {
+  for (const bad of ['npm test', 42, ['npm test'], null]) {
+    const dir = makeRepo({
+      'package.json': '{}',
+      '.cloud-copilot.json': JSON.stringify({ test: bad }),
+    });
+    const t = repoConfig.loadTestConfig(dir);
+    assert.deepEqual(t.commands, [], `test: ${JSON.stringify(bad)} should yield no command`);
+    assert.match(t.error, /"test" must be an object/);
+  }
+});
+
+test('an iOS repo can point the simulator somewhere else', () => {
+  const dir = makeRepo(
+    { '.cloud-copilot.json': JSON.stringify({ test: { destination: 'platform=iOS Simulator,name=iPhone 15' } }) },
+    ['App.xcodeproj'],
+  );
+  const t = repoConfig.loadTestConfig(dir);
+  assert.equal(t.source, 'auto');
+  for (const c of t.commands) assert.match(c, /-destination "platform=iOS Simulator,name=iPhone 15"/);
+});
+
+test('a quote in a project name cannot break out of the xcodebuild command', () => {
+  const dir = makeRepo({}, ['We"ird.xcodeproj']);
+  const t = repoConfig.loadTestConfig(dir);
+  assert.equal(t.type, 'ios');
+  // Escaped, so the shell still sees exactly one argument per quoted value.
+  assert.match(t.commands[0], /-project "We\\"ird\.xcodeproj"/);
+  assert.match(t.commands[0], /-scheme "We\\"ird"/);
+});
+
 test('an overridden type also switches which test commands are used', () => {
   const dir = makeRepo({ 'package.json': '{}' }, ['App.xcodeproj']);
   const web = repoConfig.loadTestConfig(dir, { projectType: 'web' });

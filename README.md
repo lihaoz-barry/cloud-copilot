@@ -418,7 +418,9 @@ is resolved once per repo (cached, one `readdir` each) in
   workspace/project actually on disk; `web` gets `npm test`; `unknown` is told
   *not* to invent a command — the same conservative rule Deploy already follows.
   `{ "test": { "command": "npm run ci" } }` in `.cloud-copilot.json` overrides
-  all of it.
+  all of it. An iOS repo that needs a different simulator can say
+  `{ "test": { "destination": "platform=iOS Simulator,name=iPhone 15" } }`;
+  machine-wide, `CC_IOS_SIMULATOR` changes the default device name.
 - **The `c+d` tag** (below) only exists on iOS repos.
 
 **Changing it: long-press the badge for 5 seconds.** A short tap does nothing —
@@ -767,6 +769,12 @@ anywhere else. TestFlight accepts several builds in parallel, so shipping a test
 build while other PRs are in flight is safe; a Web service can only have one
 build live at a time, and two PRs racing to deploy it is not a feature.
 (Removing the label is always allowed, whatever the repo's current type.)
+
+Like the global Auto-run depth, the chaining itself is driven by the dashboard:
+the deploy starts from the browser tab that watched Create PR finish (or that
+reconnects to the finished run). The background scheduler still only drives
+issues as far as a PR — an issue it picks up on its own gets its PR, and the
+deploy happens the next time you open the dashboard on it.
 
 
 ## API

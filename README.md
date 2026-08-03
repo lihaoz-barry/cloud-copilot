@@ -434,6 +434,65 @@ Deploy is dispatched per-repo. Drop a `.cloud-copilot.json` at a repo's root:
   pointing here. cloud-copilot never guesses a shell command for an unconfigured
   repo.
 
+#### Self-deploy: two processes, one Deploy button
+
+cloud-copilot is two processes — the dashboard (`server.js`, :8787) and
+cloud-scheduler (`scheduler-server.js`, :8788) — and `cc:restart` replaces only
+the first. So a change to scheduler code used to "deploy" successfully while the
+old scheduler kept running until someone remembered `cc:restart-scheduler`.
+
+A `shell` deploy can therefore declare the second process:
+
+```json
+{
+  "deploy": {
+    "type": "shell",
+    "command": "npm run cc:restart",
+    "selfDeploy": true,
+    "scheduler": {
+      "command": "npm run cc:restart-scheduler",
+      "paths": ["scheduler-server.js", "lib/schedulerCore.js", "lib/supervisor.js",
+                "lib/supervisorClient.js", "lib/worktreePool.js", "lib/portPool.js"]
+    }
+  }
+}
+```
+
+- **Who self-deploys** is never decided by repo name (a renamed fork would lose
+  the behaviour): it's `"selfDeploy": true`, or the repo's working directory
+  being the running process's own app root. Every other repo behaves exactly as
+  before — same command, one phase, nothing new.
+- **What it restarts** comes from the diff, not from a habit:
+  `git diff --name-only <deployed>..<head>` is matched against `scheduler.paths`
+  (exact file, directory prefix, or a `*` wildcard that doesn't cross `/`).
+  The deploy log says which way it went — `no scheduler changes → dashboard only`
+  or `scheduler code changed (lib/supervisor.js) → will restart cloud-scheduler
+  after the dashboard`. `paths` defaults to the list above; an unreadable diff
+  restarts the scheduler rather than assuming nothing changed.
+- **Running sessions are not interrupted.**
+  [`scripts/restart-scheduler.sh`](scripts/restart-scheduler.sh) is unchanged: it
+  SIGTERMs the scheduler process *only* (found by port, verified by command
+  line), never its process group, so the detached Copilot sessions it supervises
+  keep running and the new supervisor re-adopts them from
+  `data/sessions/index.json`.
+  [`scripts/self-deploy.js`](scripts/self-deploy.js) proves it — it records the
+  running sessions before the restart and checks each one afterwards *by
+  identity*: adopted by the new supervisor, or its process really is gone. A
+  session still alive that nobody picked up **fails the deploy** and dumps the
+  tail of `scheduler.log` into it. (A head count would fail a deploy just because
+  a Copilot run happened to finish during the restart.)
+- **The result tells the truth**: dashboard up but scheduler down is a *failed*
+  deploy, and the log is split into two clearly labelled phases. The decision
+  itself lives in [`lib/selfDeploy.js`](lib/selfDeploy.js) (server side, unit
+  tested), not in a shell string.
+- **How the result survives the restart**: phase 2 replaces the very supervisor
+  that owns the deploy session, and an adopted session's death is *observed*
+  rather than awaited — so its exit code comes back `null` even when everything
+  worked. The runner therefore prints its verdict on the transcript as its last
+  act, and the dashboard reads that (and only that) when there is no exit code to
+  trust. Without it, every successful scheduler restart would be reported as a
+  failed deploy.
+
 ### Base-branch sync badge (⇣N / ⚠) — update a PR with Copilot
 
 Every open PR's workflow line starts with a small round badge, left of the PR
@@ -1053,8 +1112,10 @@ session). The "running mode" selector here controls *tool approval policy*, not 
 ```
 cloud-copilot/
 ├── package.json        # express dependency, `npm start`, `cc:restart` (self deploy)
-├── .cloud-copilot.json # this repo's own deploy config (shell -> cc:restart)
+├── .cloud-copilot.json # this repo's own deploy config (shell -> cc:restart, self-deploy)
 ├── scripts/restart.sh  # the restart itself: port-identified, waits, fails loudly
+├── scripts/restart-scheduler.sh # same, for :8788 — sessions keep running, are re-adopted
+├── scripts/self-deploy.js       # the two-phase self deploy: dashboard, then scheduler if needed
 ├── server.js           # Express app: repos/issues/work/deploy/merge routes + state machine
 ├── lib/
 │   ├── changelog.js    # PR title -> short Chinese TestFlight "What to Test" note
@@ -1070,7 +1131,8 @@ cloud-copilot/
 │   ├── worktreePool.js # leases one throwaway worktree per run (concurrency limits + cleanup)
 │   ├── portPool.js     # leases a free port (8000-8888) to each worktree
 │   ├── scheduler.js    # 10-min sweep that drives committed issues by itself
-│   └── repoConfig.js   # loads a repo's .cloud-copilot.json (or auto-detects iOS)
+│   ├── repoConfig.js   # loads a repo's .cloud-copilot.json (or auto-detects iOS)
+│   └── selfDeploy.js   # does this deploy touch scheduler code? (drives the 2nd phase)
 ├── public/
 │   ├── index.html      # repos → issues → Create PR / Deploy / Merge pipeline console
 │   ├── chat-render.js  # CCChat: streamed markdown renderer shared by every chat surface
@@ -1087,7 +1149,9 @@ cloud-copilot/
 ├── scripts/
 │   └── gen-assets.js   # regenerates public/icons + public/sounds (no deps)
 ├── test/
-│   └── changelog.test.js  # `npm test` — What to Test note building (node --test)
+│   ├── changelog.test.js  # `npm test` — What to Test note building (node --test)
+│   ├── selfDeploy.test.js # which changes require a cloud-scheduler restart
+│   └── selfDeployRunner.test.js # the two phases themselves, against a fake scheduler
 ├── data/               # state.json (gitignored)
 ├── .gitignore
 └── README.md

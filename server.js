@@ -37,6 +37,7 @@ const worktrees = require('./lib/worktrees');
 const worktreePool = require('./lib/worktreePool');
 const portPool = require('./lib/portPool');
 const supervisorClient = require('./lib/supervisorClient');
+const selfDeployLib = require('./lib/selfDeploy');
 
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 8787);
@@ -545,6 +546,15 @@ function checkoutBranchCwd(repoPath, branch) {
   }
   execFileSync('git', ['checkout', branch], { cwd: repoPath, stdio: 'ignore', timeout: 15000 });
   return repoPath;
+}
+
+// HEAD of a working tree, or null when it cannot be read.
+function safeGitHead(repoPath) {
+  try {
+    return git(repoPath, ['rev-parse', 'HEAD'], 10000);
+  } catch {
+    return null;
+  }
 }
 
 // origin's default branch (usually `main`), falling back to "main".
@@ -1265,7 +1275,15 @@ app.post('/api/repos/:name/preissues/:id/chat', async (req, res) => {
     },
     onSession: (sid) => store.setPreIssueSession(repo.name, id, sid),
     onDone: async (j) => {
-      const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
+      // `deploySucceeded` rather than the exit code: a self-deploy that
+      // restarted cloud-scheduler is *always* adopted like this, and its exit
+      // code is always unknown. Judging it by the code alone would report every
+      // successful two-phase deploy as a failure.
+      const status = j.cancelled
+        ? 'aborted'
+        : (parts.action === 'deploy' ? deploySucceeded(j) : j.exitCode === 0)
+          ? 'success'
+          : 'failed';
       store.appendPreIssueChatMessage(repo.name, id, { role: 'assistant', text: j.conversation, model });
       const draft = extractDraft(j.conversation);
       if (draft) store.setPreIssueDraft(repo.name, id, draft);
@@ -1660,7 +1678,25 @@ function runIosTestflightDeploy({ res, repo, n, prNumber, key }) {
   });
 }
 
-function runShellDeploy({ res, repo, n, prNumber, key, command }) {
+/**
+ * Did this deploy work?
+ *
+ * Normally the exit code says so. A cloud-copilot self-deploy is the exception:
+ * its second phase replaces the supervisor that owns the deploy session, and an
+ * adopted session's death is observed rather than awaited, so its exit code
+ * comes back null even when every phase succeeded. scripts/self-deploy.js
+ * therefore states its verdict on the transcript as its last act, and that is
+ * consulted only when there is no exit code to trust.
+ */
+function deploySucceeded(j) {
+  if (j.exitCode === null) {
+    const verdict = selfDeployLib.resultFromTranscript(j.conversation);
+    if (verdict) return verdict === 'success';
+  }
+  return j.exitCode === 0;
+}
+
+function runShellDeploy({ res, repo, n, prNumber, key, command, deploy }) {
   gh.getPr(repo.ownerRepo, prNumber).then((pr) => {
     if (!pr || !pr.headRefName) {
       const message = `Could not resolve the branch for PR #${prNumber} via gh.`;
@@ -1675,8 +1711,14 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
     const closed = refuseIfPrClosed(repo, n, prNumber, pr);
     if (closed) return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'blocked', message: closed });
 
+    const selfDeploying = selfDeployLib.isSelfDeploy(repo.path, deploy, __dirname);
+
     let workCwd;
+    let deployedSha = null;
     try {
+      // What is running *right now*, captured before the checkout swaps the
+      // files — the base of "what does this deploy actually change?".
+      deployedSha = selfDeploying ? BOOT_CODE.head || safeGitHead(repo.path) : null;
       workCwd = checkoutBranchCwd(repo.path, pr.headRefName);
     } catch (err) {
       const message = `Failed to check out branch "${pr.headRefName}": ${err.message}`;
@@ -1688,14 +1730,49 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
       return sendSseBlocked(res, { action: 'deploy', prNumber, status: 'failed', message });
     }
 
+    // Self-deploy only: this repo is two processes (dashboard :8787 and
+    // cloud-scheduler :8788) and `command` restarts only the first. Decide here
+    // — in the server, from the diff — whether the scheduler has to be replaced
+    // too, and hand that decision to scripts/self-deploy.js as data.
+    const headSha = safeGitHead(workCwd);
+    const diff = selfDeploying
+      ? selfDeployLib.changedFiles(workCwd, deployedSha, headSha)
+      : { files: [], error: null };
+    const plan = selfDeployLib.planShellDeploy({
+      repoPath: repo.path,
+      appRoot: __dirname,
+      deploy,
+      files: diff.files,
+      diffError: diff.error,
+    });
+
+    const runnerPath = path.join(workCwd, 'scripts', 'self-deploy.js');
+    const twoPhase = plan.selfDeploy && fs.existsSync(runnerPath);
+    const bin = twoPhase ? process.execPath : 'bash';
+    const args = twoPhase ? [runnerPath] : ['-lc', command];
+    const env = twoPhase
+      ? {
+          CC_SELF_DEPLOY_PLAN: JSON.stringify({
+            dashboardCommand: command,
+            schedulerCommand: plan.schedulerCommand,
+            restartScheduler: plan.restartScheduler,
+            matched: plan.matched,
+            decisionLine: plan.decisionLine,
+            base: deployedSha,
+            head: headSha,
+          }),
+        }
+      : undefined;
+
     // The deploy command itself is trusted repo-local config (from
     // `.cloud-copilot.json`, authored by whoever owns the repo under
     // REPOS_ROOT) — not attacker-controlled input, so a shell string is fine
     // here (same trust boundary as REPOS_ROOT itself).
     const job = jobs.startJob(key, {
-      bin: 'bash',
-      args: ['-lc', command],
+      bin,
+      args,
       cwd: workCwd,
+      env,
       meta: {
         action: 'deploy',
         prNumber,
@@ -1704,8 +1781,7 @@ function runShellDeploy({ res, repo, n, prNumber, key, command }) {
         subject: pr.title || `PR #${prNumber}`,
       },
       onDone: async (j) => {
-        const success = j.exitCode === 0;
-        const status = j.cancelled ? 'aborted' : success ? 'success' : 'failed';
+        const status = j.cancelled ? 'aborted' : deploySucceeded(j) ? 'success' : 'failed';
         store.updateDeploy(repo.name, n, prNumber, (d) => {
           d.status = status;
           d.exitCode = j.exitCode;
@@ -1761,7 +1837,15 @@ app.post('/api/repos/:name/issues/:n/deploy/:pr', async (req, res) => {
   store.startNewDeploy(repo.name, n, prNumber);
 
   if (deployConfig.type === 'shell') {
-    runShellDeploy({ res, repo, n, prNumber, key, command: deployConfig.command });
+    runShellDeploy({
+      res,
+      repo,
+      n,
+      prNumber,
+      key,
+      command: deployConfig.command,
+      deploy: deployConfig.deploy,
+    });
   } else {
     runIosTestflightDeploy({ res, repo, n, prNumber, key });
   }
@@ -2381,7 +2465,15 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/review', async (req, res) => {
         if (j.sessionId) rv.sessionId = j.sessionId;
       }),
     onDone: async (j) => {
-      const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
+      // `deploySucceeded` rather than the exit code: a self-deploy that
+      // restarted cloud-scheduler is *always* adopted like this, and its exit
+      // code is always unknown. Judging it by the code alone would report every
+      // successful two-phase deploy as a failure.
+      const status = j.cancelled
+        ? 'aborted'
+        : (parts.action === 'deploy' ? deploySucceeded(j) : j.exitCode === 0)
+          ? 'success'
+          : 'failed';
       // Whether the review changed anything is decided by git, not by the
       // transcript: a review that pushed commits moved the head SHA.
       //
@@ -2604,7 +2696,15 @@ app.post('/api/repos/:name/issues/:n/prs/:pr/chat', async (req, res) => {
         }
       }),
     onDone: async (j) => {
-      const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
+      // `deploySucceeded` rather than the exit code: a self-deploy that
+      // restarted cloud-scheduler is *always* adopted like this, and its exit
+      // code is always unknown. Judging it by the code alone would report every
+      // successful two-phase deploy as a failure.
+      const status = j.cancelled
+        ? 'aborted'
+        : (parts.action === 'deploy' ? deploySucceeded(j) : j.exitCode === 0)
+          ? 'success'
+          : 'failed';
       const cleanup = releaseLease(lease, {
         fallbackRef: `origin/${prInfo.baseRefName || defaultBranchOf(repo.path)}`,
       });
@@ -3227,7 +3327,15 @@ function adoptedCallbacksFor(session) {
     onSession: () => {},
     onProgress: (j) => flush(j, null),
     onDone: async (j) => {
-      const status = j.cancelled ? 'aborted' : j.exitCode === 0 ? 'success' : 'failed';
+      // `deploySucceeded` rather than the exit code: a self-deploy that
+      // restarted cloud-scheduler is *always* adopted like this, and its exit
+      // code is always unknown. Judging it by the code alone would report every
+      // successful two-phase deploy as a failure.
+      const status = j.cancelled
+        ? 'aborted'
+        : (parts.action === 'deploy' ? deploySucceeded(j) : j.exitCode === 0)
+          ? 'success'
+          : 'failed';
       // A Create PR that finished while we were away has a PR on GitHub and
       // nothing pointing at it; without this the issue would look untouched and
       // the scheduler would cheerfully implement it a second time.

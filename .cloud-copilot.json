@@ -1,6 +1,19 @@
 {
   "deploy": {
     "type": "shell",
-    "command": "npm run cc:restart"
+    "command": "npm run cc:restart",
+    "selfDeploy": true,
+    "scheduler": {
+      "command": "npm run cc:restart-scheduler",
+      "paths": [
+        "scheduler-server.js",
+        "lib/schedulerCore.js",
+        "lib/supervisor.js",
+        "lib/supervisorClient.js",
+        "lib/worktreePool.js",
+        "lib/portPool.js",
+        "scripts/restart-scheduler.sh"
+      ]
+    }
   }
 }
